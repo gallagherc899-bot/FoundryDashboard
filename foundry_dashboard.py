@@ -117,7 +117,8 @@ selected_parts = st.multiselect(
 
 if selected_parts:
     # Prepare data
-    df["week_ending"] = pd.to_datetime(df["week_ending"])
+    df["week_ending"] = pd.to_datetime(df["week_ending"], format="%m/%d/%Y", errors="coerce")
+
     grouped = df[df["part_id"].isin(selected_parts)].groupby(["part_id", "week_ending"])
 
     # Calculate MTBFscrap per week
