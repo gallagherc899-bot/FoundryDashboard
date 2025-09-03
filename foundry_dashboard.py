@@ -22,10 +22,13 @@ model.fit(X, y)
 st.title("🧪 Foundry Scrap Risk Predictor")
 st.markdown("Estimate scrap risk, defect likelihood, and cost impact for any part.")
 
-# Part ID selection with "New" option
-part_ids = sorted(df["part_id"].unique())
-part_id_options = ["New"] + [str(pid) for pid in part_ids]
-selected_part = st.selectbox("Select Part ID", part_id_options)
+part_known = selected_part != "New"
+
+if part_known:
+    part_id_input = int(selected_part)
+else:
+    part_id_input = None
+
 
 # Input fields
 quantity = st.number_input("Number of Parts", min_value=1, step=1)
