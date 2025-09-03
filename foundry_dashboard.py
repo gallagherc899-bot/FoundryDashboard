@@ -56,6 +56,15 @@ if st.button("Predict Scrap Risk"):
     else:
         similar = df[(df["piece_weight_(lbs)"].between(weight * 0.9, weight * 1.1)) &
                      (df["order_quantity"].between(quantity * 0.9, quantity * 1.1))]
+# Calculate average defect rates from similar parts
+defect_cols = [col for col in df.columns if col.endswith("Rate") and "Scrap" not in col]
+defect_means = similar[defect_cols].mean()
+top_defects = defect_means.sort_values(ascending=False).head(6)
+
+# Display top 6 defects with their estimated rates
+st.write("Top 6 Likely Defects:")
+for defect, rate in top_defects.items():
+    st.write(f"- {defect}: {round(rate * 100, 2)}% chance")
 
         if not similar.empty:
             avg_scrap = similar["scrap%"].mean()
