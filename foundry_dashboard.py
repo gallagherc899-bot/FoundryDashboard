@@ -36,9 +36,13 @@ if st.button("Predict Scrap Risk"):
     part_known = selected_part != "New"
     part_id_input = int(selected_part) if part_known else None
 
-    if part_known:
-        input_data = pd.DataFrame([[quantity, weight, part_id_input]], columns=features)
-        predicted_scrap = model.predict(input_data)[0]
+    if part_known = selected_part != "New"
+
+try:
+    part_id_input = int(float(selected_part)) if part_known else None
+except ValueError:
+    part_id_input = None
+
 
         # Get top 6 defect types historically associated with this part
         defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
