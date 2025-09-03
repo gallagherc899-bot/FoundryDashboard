@@ -11,7 +11,7 @@ df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
 required_cols = ["part_id", "scrap%", "order_quantity", "piece_weight_(lbs)"]
 df = df.dropna(subset=required_cols)
 
-# Train model
+# Train Random Forest model
 features = ["order_quantity", "piece_weight_(lbs)", "part_id"]
 X = df[features]
 y = df["scrap%"]
@@ -24,7 +24,7 @@ st.markdown("Estimate scrap risk, defect likelihood, and cost impact for any par
 
 # Part ID selection with "New" option
 part_ids = sorted(df["part_id"].unique())
-part_id_options = ["New"] + [str(pid) for pid in part_ids]
+part_id_options = ["New"] + [str(int(pid)) for pid in part_ids]
 selected_part = st.selectbox("Select Part ID", part_id_options)
 
 # Input fields
@@ -34,15 +34,11 @@ weight = st.number_input("Weight per Part (lbs)", min_value=0.1, step=0.1)
 # Prediction logic
 if st.button("Predict Scrap Risk"):
     part_known = selected_part != "New"
-    part_id_input = int(selected_part) if part_known else None
-
-    if part_known = selected_part != "New"
-
-try:
     part_id_input = int(float(selected_part)) if part_known else None
-except ValueError:
-    part_id_input = None
 
+    if part_known:
+        input_data = pd.DataFrame([[quantity, weight, part_id_input]], columns=features)
+        predicted_scrap = model.predict(input_data)[0]
 
         # Get top 6 defect types historically associated with this part
         defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
