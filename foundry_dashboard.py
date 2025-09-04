@@ -35,20 +35,14 @@ if st.button("Predict Scrap Risk"):
     part_id_input = int(float(selected_part)) if part_known else None
 
     if part_known:
-        # Calculate MTBFscrap for the selected part
-part_df = df[df["part_id"] == part_id_input]
-N = len(part_df)
-failures = (part_df["scrap%"] > threshold).sum()
-mtbf_scrap = N / failures if failures > 0 else float("inf")
-
-# Display MTBFscrap
-st.metric("MTBF (Scrap-Based)", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
-
         input_data = pd.DataFrame([[quantity, weight, part_id_input]], columns=features)
         predicted_scrap = model.predict(input_data)[0]
+
         part_df = df[df["part_id"] == part_id_input]
         defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
         defect_means = part_df[defect_cols].mean().sort_values(ascending=False).head(6)
+
+        # MTBFscrap calculation
         N = len(part_df)
         failures = (part_df["scrap%"] > threshold).sum()
         mtbf_scrap = N / failures if failures > 0 else float("inf")
