@@ -47,32 +47,36 @@ Where:
 - \( I(S_i > T) \) = 1 if scrap exceeds threshold, else 0  
 """)
 
-if selected_part != "New":
-    part_id_input = int(float(selected_part))
-    input_data = pd.DataFrame([[quantity, weight, part_id_input]], columns=features)
-    predicted_scrap = model.predict(input_data)[0]
+# Prediction button
+if st.button("Predict Scrap Risk"):
+    part_known = selected_part != "New"
+    part_id_input = int(float(selected_part)) if part_known else None
 
-    part_df = df[df["part_id"] == part_id_input]
-    defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
-    defect_means = part_df[defect_cols].mean().sort_values(ascending=False).head(6)
+    if part_known:
+        input_data = pd.DataFrame([[quantity, weight, part_id_input]], columns=features)
+        predicted_scrap = model.predict(input_data)[0]
 
-    # MTBFscrap calculation
-    N = len(part_df)
-    failures = (part_df["scrap%"] > threshold).sum()
-    mtbf_scrap = N / failures if failures > 0 else float("inf")
+        part_df = df[df["part_id"] == part_id_input]
+        defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
+        defect_means = part_df[defect_cols].mean().sort_values(ascending=False).head(6)
 
-    st.success(f"✅ Known Part ID: {part_id_input}")
-    st.metric("Predicted Scrap %", f"{round(predicted_scrap, 2)}%")
-    st.metric("MTBFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
-    st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
-    st.write("Top 6 Likely Defects:")
-    for defect, rate in defect_means.items():
-        st.write(f"- {defect}: {round(rate * 100, 2)}% chance")
+        # MTBFscrap calculation
+        N = len(part_df)
+        failures = (part_df["scrap%"] > threshold).sum()
+        mtbf_scrap = N / failures if failures > 0 else float("inf")
 
-    scrap_weight = quantity * weight * (predicted_scrap / 100)
-    cost_estimate = scrap_weight * (0.75 + 0.15) + quantity * (predicted_scrap / 100) * 2.00
-    st.write(f"Estimated Scrap Weight: **{round(scrap_weight, 2)} lbs**")
-    st.write(f"Hypothetical Cost Impact: **${round(cost_estimate, 2)}**")
+        st.success(f"✅ Known Part ID: {part_id_input}")
+        st.metric("Predicted Scrap %", f"{round(predicted_scrap, 2)}%")
+        st.metric("MTBFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
+        st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
+        st.write("Top 6 Likely Defects:")
+        for defect, rate in defect_means.items():
+            st.write(f"- {defect}: {round(rate * 100, 2)}% chance")
+
+        scrap_weight = quantity * weight * (predicted_scrap / 100)
+        cost_estimate = scrap_weight * (0.75 + 0.15) + quantity * (predicted_scrap / 100) * 2.00
+        st.write(f"Estimated Scrap Weight: **{round(scrap_weight, 2)} lbs**")
+        st.write(f"Hypothetical Cost Impact: **${round(cost_estimate, 2)}**")
 
 # MTBF Trend Visualization
 st.markdown("---")
