@@ -29,16 +29,15 @@ selected_part = st.selectbox("Select Part ID", part_id_options)
 quantity = st.number_input("Number of Parts", min_value=1, step=1)
 weight = st.number_input("Weight per Part (lbs)", min_value=0.1, step=0.1)
 threshold = st.slider("Scrap % Threshold for Failure (MTBF)", min_value=1.0, max_value=10.0, value=5.0)
+st.write(f"Current failure threshold: **{threshold}%**")
 
 # Display MTBFscrap equation
 st.subheader("📐 MTBFscrap Equation")
 st.latex(r"\text{MTBF}_{\text{scrap}} = \frac{N}{\sum I(S_i > T)}")
-st.write("Where:")
 st.write("- N = total number of runs")
 st.write("- Sᵢ = scrap % for run i")
 st.write("- T = scrap threshold (slider value)")
 st.write("- I(Sᵢ > T) = 1 if scrap exceeds threshold, else 0")
-
 
 # Prediction button
 if st.button("Predict Scrap Risk"):
