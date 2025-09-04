@@ -31,21 +31,14 @@ weight = st.number_input("Weight per Part (lbs)", min_value=0.1, step=0.1)
 threshold = st.slider("Scrap % Threshold for Failure (MTBF)", min_value=1.0, max_value=10.0, value=5.0)
 
 # Display MTBFscrap equation
-st.markdown(r"""
-### 📐 MTBFscrap Equation  
+st.subheader("📐 MTBFscrap Equation")
+st.latex(r"\text{MTBF}_{\text{scrap}} = \frac{N}{\sum I(S_i > T)}")
+st.write("Where:")
+st.write("- N = total number of runs")
+st.write("- Sᵢ = scrap % for run i")
+st.write("- T = scrap threshold (slider value)")
+st.write("- I(Sᵢ > T) = 1 if scrap exceeds threshold, else 0")
 
-
-\[
-\text{MTBF}_{\text{scrap}} = \frac{N}{\sum I(S_i > T)}
-\]
-
-
-Where:  
-- \( N \) = total number of runs  
-- \( S_i \) = scrap % for run \( i \)  
-- \( T \) = scrap threshold (slider value)  
-- \( I(S_i > T) \) = 1 if scrap exceeds threshold, else 0  
-""")
 
 # Prediction button
 if st.button("Predict Scrap Risk"):
