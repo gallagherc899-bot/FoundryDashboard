@@ -5,7 +5,7 @@ from sklearn.metrics import r2_score, mean_squared_error
 import matplotlib.pyplot as plt
 
 # Load and clean dataset
-df = pd.read_csv("RATESOlAL60.20.20.csv")
+df = pd.read_csv("anynymized_rates.csv")
 df["Week Ending"] = pd.to_datetime(df["Week Ending"].astype(str).str.strip(), format="mixed", errors="coerce")
 df = df.dropna(subset=["Week Ending"]).sort_values("Week Ending").reset_index(drop=True)
 
