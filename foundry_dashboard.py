@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 import altair as alt
+import matplotlib.pyplot as plt  # Added to prevent ModuleNotFoundError
 
 # Load and clean data
 df = pd.read_csv("anonymized_parts.csv")
