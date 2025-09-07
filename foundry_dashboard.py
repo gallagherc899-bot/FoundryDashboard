@@ -78,7 +78,7 @@ if st.button("Predict Scrap Risk"):
 
         # Display results
         st.success(f"✅ Known Part ID: {part_id_input}")
-        st.metric("Predicted Scrap %", f"{round(predicted_scrap, 2)}% ± {confidence_band}%")
+        st.write(f"**Predicted Scrap %:** {round(predicted_scrap, 2)}% ± {confidence_band}%")
         st.metric("MTBFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
         st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
 
