@@ -3,26 +3,34 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 import altair as alt
-import matplotlib.pyplot as plt  # Added to prevent ModuleNotFoundError
+import matplotlib.pyplot as plt
 
+# -----------------------------
 # Load and clean data
+# -----------------------------
 df = pd.read_csv("anonymized_parts.csv")
 df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
 df["week_ending"] = pd.to_datetime(df["week_ending"], format="%m/%d/%Y", errors="coerce")
 df = df.dropna(subset=["part_id", "scrap%", "order_quantity", "piece_weight_(lbs)", "week_ending"])
 
+# -----------------------------
 # Train model
+# -----------------------------
 features = ["order_quantity", "piece_weight_(lbs)", "part_id"]
 X = df[features]
 y = df["scrap%"]
 model = RandomForestRegressor(n_estimators=100, random_state=42)
 model.fit(X, y)
 
+# -----------------------------
 # UI Header
+# -----------------------------
 st.title("🧪 Foundry Scrap Risk & Reliability Dashboard")
 st.markdown("Predict scrap risk, visualize MTBF trends, and compare defect counts across parts.")
 
+# -----------------------------
 # Scrap Prediction Panel
+# -----------------------------
 st.subheader("🔍 Scrap Risk Prediction")
 part_ids = sorted(df["part_id"].unique())
 part_id_options = ["New"] + [str(int(pid)) for pid in part_ids]
@@ -32,7 +40,9 @@ weight = st.number_input("Weight per Part (lbs)", min_value=0.1, step=0.1)
 threshold = st.slider("Scrap % Threshold for Failure (MTBF)", min_value=1.0, max_value=10.0, value=5.0)
 st.write(f"Current failure threshold: **{threshold}%**")
 
-# Display MTBFscrap equation
+# -----------------------------
+# MTBFscrap Equation
+# -----------------------------
 st.subheader("📐 MTBFscrap Equation")
 st.latex(r"\text{MTBF}_{\text{scrap}} = \frac{N}{\sum I(S_i > T)}")
 st.write("- N = total number of runs")
@@ -40,7 +50,9 @@ st.write("- Sᵢ = scrap % for run i")
 st.write("- T = scrap threshold (slider value)")
 st.write("- I(Sᵢ > T) = 1 if scrap exceeds threshold, else 0")
 
-# Prediction button
+# -----------------------------
+# Prediction Logic
+# -----------------------------
 if st.button("Predict Scrap Risk"):
     part_known = selected_part != "New"
     part_id_input = int(float(selected_part)) if part_known else None
@@ -58,20 +70,38 @@ if st.button("Predict Scrap Risk"):
         failures = (part_df["scrap%"] > threshold).sum()
         mtbf_scrap = N / failures if failures > 0 else float("inf")
 
+        # Confidence band calculation
+        scrap_std = part_df["scrap%"].std()
+        confidence_band = round(scrap_std, 2)
+        lower_bound = round(predicted_scrap - confidence_band, 2)
+        upper_bound = round(predicted_scrap + confidence_band, 2)
+
+        # Display results
         st.success(f"✅ Known Part ID: {part_id_input}")
-        st.metric("Predicted Scrap %", f"{round(predicted_scrap, 2)}%")
+        st.metric("Predicted Scrap %", f"{round(predicted_scrap, 2)}% ± {confidence_band}%")
         st.metric("MTBFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
         st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
+
+        # Confidence interpretation
+        if confidence_band <= 1.5:
+            st.success("🔒 High Confidence: Historical scrap variation is low for this part.")
+        if upper_bound < threshold:
+            st.info(f"📉 90% confident this part will stay below the {threshold}% failure threshold.")
+
+        # Defect breakdown
         st.write("Top 6 Likely Defects:")
         for defect, rate in defect_means.items():
             st.write(f"- {defect}: {round(rate * 100, 2)}% chance")
 
+        # Cost estimate
         scrap_weight = quantity * weight * (predicted_scrap / 100)
         cost_estimate = scrap_weight * (0.75 + 0.15) + quantity * (predicted_scrap / 100) * 2.00
         st.write(f"Estimated Scrap Weight: **{round(scrap_weight, 2)} lbs**")
         st.write(f"Hypothetical Cost Impact: **${round(cost_estimate, 2)}**")
 
+# -----------------------------
 # MTBF Trend Visualization
+# -----------------------------
 st.markdown("---")
 st.subheader("📈 MTBFscrap Trend by Week")
 
@@ -98,7 +128,9 @@ if selected_parts and len(date_range) == 2:
     ).properties(width=800, height=400)
     st.altair_chart(chart, use_container_width=True)
 
+# -----------------------------
 # Defect Count Bar Chart
+# -----------------------------
 st.subheader("📊 Total Defect Counts by Part")
 if selected_parts and len(date_range) == 2:
     defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
