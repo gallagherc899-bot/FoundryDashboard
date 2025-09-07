@@ -70,30 +70,31 @@ if st.button("Predict Scrap Risk"):
         failures = (part_df["scrap%"] > threshold).sum()
         mtbf_scrap = N / failures if failures > 0 else float("inf")
 
-        # Confidence band calculation
-        scrap_std = part_df["scrap%"].std()
-        confidence_band = round(scrap_std, 2)
-        lower_bound = round(predicted_scrap - confidence_band, 2)
-        upper_bound = round(predicted_scrap + confidence_band, 2)
-
         # Display results
         st.success(f"✅ Known Part ID: {part_id_input}")
-        st.write(f"**Predicted Scrap %:** {round(predicted_scrap, 2)}% ± {confidence_band}%")
+
+        if len(part_df["scrap%"]) >= 2:
+            scrap_std = part_df["scrap%"].std()
+            confidence_band = round(scrap_std, 2)
+            lower_bound = round(predicted_scrap - confidence_band, 2)
+            upper_bound = round(predicted_scrap + confidence_band, 2)
+
+            st.write(f"**Predicted Scrap %:** {round(predicted_scrap, 2)}% ± {confidence_band}%")
+            if confidence_band <= 1.5:
+                st.success("🔒 High Confidence: Historical scrap variation is low for this part.")
+            if upper_bound < threshold:
+                st.info(f"📉 90% confident this part will stay below the {threshold}% failure threshold.")
+        else:
+            st.write(f"**Predicted Scrap %:** {round(predicted_scrap, 2)}%")
+            st.warning("⚠️ Not enough historical data to calculate confidence band.")
+
         st.write(f"**MTBFscrap:** {'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
         st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
 
-        # Confidence interpretation
-        if confidence_band <= 1.5:
-            st.success("🔒 High Confidence: Historical scrap variation is low for this part.")
-        if upper_bound < threshold:
-            st.info(f"📉 90% confident this part will stay below the {threshold}% failure threshold.")
-
-        # Defect breakdown
         st.write("Top 6 Likely Defects:")
         for defect, rate in defect_means.items():
             st.write(f"- {defect}: {round(rate * 100, 2)}% chance")
 
-        # Cost estimate
         scrap_weight = quantity * weight * (predicted_scrap / 100)
         cost_estimate = scrap_weight * (0.75 + 0.15) + quantity * (predicted_scrap / 100) * 2.00
         st.write(f"Estimated Scrap Weight: **{round(scrap_weight, 2)} lbs**")
