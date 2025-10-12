@@ -1,36 +1,47 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.preprocessing import LabelEncoder
+from imblearn.over_sampling import SMOTE
+import shap
 import altair as alt
 import matplotlib.pyplot as plt
 
-# -----------------------------
 # Load and clean data
-# -----------------------------
 df = pd.read_csv("anonymized_parts.csv")
-df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
-df["week_ending"] = pd.to_datetime(df["week_ending"], format="%m/%d/%Y", errors="coerce")
-df = df.dropna(subset=["part_id", "scrap%", "order_quantity", "piece_weight_(lbs)", "week_ending"])
+df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replace("(", "", regex=False).str.replace(")", "", regex=False)
+df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
+df = df.dropna(subset=["part_id", "scrap%", "order_quantity", "piece_weight_lbs", "week_ending"])
 
-# -----------------------------
-# Train model
-# -----------------------------
-features = ["order_quantity", "piece_weight_(lbs)", "part_id"]
-X = df[features]
-y = df["scrap%"]
-model = RandomForestRegressor(n_estimators=100, random_state=42)
-model.fit(X, y)
+# Encode features
+features = ["order_quantity", "piece_weight_lbs", "part_id"]
+X = df[features].copy()
+y = (df["scrap%"] > 5.0).astype(int)
+X["part_id"] = LabelEncoder().fit_transform(X["part_id"])
+X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
-# -----------------------------
+# Train Pre-SMOTE model
+rf_pre = RandomForestClassifier(random_state=42)
+rf_pre.fit(X_train, y_train)
+
+# Train Post-SMOTE model
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+rf_post = RandomForestClassifier(random_state=42)
+rf_post.fit(X_resampled, y_resampled)
+
 # UI Header
-# -----------------------------
 st.title("🧪 Foundry Scrap Risk & Reliability Dashboard")
-st.markdown("Predict scrap risk, visualize MTBF trends, and compare defect counts across parts.")
+st.markdown("Compare Pre-SMOTE and Post-SMOTE predictions, interpret SHAP values, and evaluate cost impact.")
 
-# -----------------------------
+# Model toggle
+model_choice = st.radio("Select Model Version", ["Pre-SMOTE", "Post-SMOTE"])
+model = rf_pre if model_choice == "Pre-SMOTE" else rf_post
+
 # Scrap Prediction Panel
-# -----------------------------
 st.subheader("🔍 Scrap Risk Prediction")
 part_ids = sorted(df["part_id"].unique())
 part_id_options = ["New"] + [str(int(pid)) for pid in part_ids]
@@ -40,72 +51,46 @@ weight = st.number_input("Weight per Part (lbs)", min_value=0.1, step=0.1)
 threshold = st.slider("Scrap % Threshold for Failure (MTBF)", min_value=1.0, max_value=10.0, value=5.0)
 st.write(f"Current failure threshold: **{threshold}%**")
 
-# -----------------------------
-# MTBFscrap Equation
-# -----------------------------
-st.subheader("📐 MTBFscrap Equation")
-st.latex(r"\text{MTBF}_{\text{scrap}} = \frac{N}{\sum I(S_i > T)}")
-st.write("- N = total number of runs")
-st.write("- Sᵢ = scrap % for run i")
-st.write("- T = scrap threshold (slider value)")
-st.write("- I(Sᵢ > T) = 1 if scrap exceeds threshold, else 0")
-
-# -----------------------------
-# Prediction Logic
-# -----------------------------
+# Prediction button
 if st.button("Predict Scrap Risk"):
     part_known = selected_part != "New"
     part_id_input = int(float(selected_part)) if part_known else None
 
     if part_known:
         input_data = pd.DataFrame([[quantity, weight, part_id_input]], columns=features)
-        predicted_scrap = model.predict(input_data)[0]
+        input_data["part_id"] = LabelEncoder().fit_transform(input_data["part_id"])
+        predicted_class = model.predict(input_data)[0]
+        predicted_proba = model.predict_proba(input_data)[0][1]
 
         part_df = df[df["part_id"] == part_id_input]
-        defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
-        defect_means = part_df[defect_cols].mean().sort_values(ascending=False).head(6)
-
-        # MTBFscrap calculation
         N = len(part_df)
         failures = (part_df["scrap%"] > threshold).sum()
         mtbf_scrap = N / failures if failures > 0 else float("inf")
 
-        # Display results
         st.success(f"✅ Known Part ID: {part_id_input}")
-
-        if len(part_df["scrap%"]) >= 2:
-            scrap_std = part_df["scrap%"].std()
-            confidence_band = round(scrap_std, 2)
-            lower_bound = round(predicted_scrap - confidence_band, 2)
-            upper_bound = round(predicted_scrap + confidence_band, 2)
-
-            st.write(f"**Predicted Scrap %:** {round(predicted_scrap, 2)}% ± {confidence_band}%")
-            if confidence_band <= 1.5:
-                st.success("🔒 High Confidence: Historical scrap variation is low for this part.")
-            if upper_bound < threshold:
-                st.info(f"📉 90% confident this part will stay below the {threshold}% failure threshold.")
-        else:
-            st.write(f"**Predicted Scrap %:** {round(predicted_scrap, 2)}%")
-            st.warning("⚠️ Not enough historical data to calculate confidence band.")
-
-        st.write(f"**MTBFscrap:** {'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
+        st.metric(f"{model_choice} Predicted Scrap Risk", f"{round(predicted_proba * 100, 2)}%")
+        st.metric("MTBFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
         st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
 
-        st.write("Top 6 Likely Defects:")
-        for defect, rate in defect_means.items():
-            st.write(f"- {defect}: {round(rate * 100, 2)}% chance")
+        # Cost-weighted evaluation
+        y_pred = model.predict(X_test)
+        cm = confusion_matrix(y_test, y_pred)
+        tn, fp, fn, tp = cm.ravel()
+        cost = fn * 100 + fp * 20
+        st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
 
-        scrap_weight = quantity * weight * (predicted_scrap / 100)
-        cost_estimate = scrap_weight * (0.75 + 0.15) + quantity * (predicted_scrap / 100) * 2.00
-        st.write(f"Estimated Scrap Weight: **{round(scrap_weight, 2)} lbs**")
-        st.write(f"Hypothetical Cost Impact: **${round(cost_estimate, 2)}**")
+        # SHAP summary (Post-SMOTE only)
+        if model_choice == "Post-SMOTE":
+            st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(X_test)
+            fig, ax = plt.subplots()
+            shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+            st.pyplot(fig)
 
-# -----------------------------
 # MTBF Trend Visualization
-# -----------------------------
 st.markdown("---")
 st.subheader("📈 MTBFscrap Trend by Week")
-
 date_range = st.date_input("Select Time Window", value=[df["week_ending"].min(), df["week_ending"].max()])
 selected_parts = st.multiselect("Select up to 5 Part IDs", options=sorted(df["part_id"].unique()), max_selections=5)
 
@@ -129,9 +114,7 @@ if selected_parts and len(date_range) == 2:
     ).properties(width=800, height=400)
     st.altair_chart(chart, use_container_width=True)
 
-# -----------------------------
 # Defect Count Bar Chart
-# -----------------------------
 st.subheader("📊 Total Defect Counts by Part")
 if selected_parts and len(date_range) == 2:
     defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
