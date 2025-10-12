@@ -80,11 +80,10 @@ if st.button("Predict Scrap Risk"):
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
 
         # SHAP summary (Post-SMOTE only)
-        if model_choice == "Post-SMOTE":
+    if model_choice == "Post-SMOTE":
             st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
             # SHAP summary (Post-SMOTE only)
-        if model_choice == "Post-SMOTE":
-            st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
+
 
     # Validate input data
     expected_cols = ['order_quantity', 'piece_weight_lbs', 'part_id']
