@@ -106,6 +106,7 @@ if model_choice == "Post-SMOTE":
 
 
 
+
 # MTBF Trend Visualization
 st.markdown("---")
 st.subheader("📈 MTBFscrap Trend by Week")
