@@ -79,16 +79,14 @@ if st.button("Predict Scrap Risk"):
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
 
-        # SHAP summary (Post-SMOTE only)
-    if model_choice == "Post-SMOTE":
-            st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
-            # SHAP summary (Post-SMOTE only)
-
+     # SHAP summary (Post-SMOTE only)
+if model_choice == "Post-SMOTE":
+    st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
 
     # Validate input data
     expected_cols = ['order_quantity', 'piece_weight_lbs', 'part_id']
     missing_cols = [col for col in expected_cols if col not in X_test.columns]
-    
+
     if X_test.empty:
         st.warning("⚠️ SHAP cannot be computed: X_test is empty.")
     elif missing_cols:
@@ -100,17 +98,12 @@ if st.button("Predict Scrap Risk"):
             shap_values = explainer.shap_values(X_test)
 
             # Plot SHAP summary
-            fig, ax = plt.subplots()
+            fig = plt.figure()
             shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
             st.pyplot(fig)
         except Exception as e:
             st.error(f"SHAP plot failed to render: {e}")
 
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X_test)
-            fig, ax = plt.subplots()
-            shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
-            st.pyplot(fig)
 
 # MTBF Trend Visualization
 st.markdown("---")
