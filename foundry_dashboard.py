@@ -78,7 +78,7 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
-            # SHAP summary (Post-SMOTE only)
+                # SHAP summary (Post-SMOTE only)
     if model_choice == "Post-SMOTE":
         st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
 
@@ -103,31 +103,6 @@ if st.button("Predict Scrap Risk"):
             except Exception as e:
                 st.error(f"SHAP plot failed to render: {e}")
 
-
-     # SHAP summary (Post-SMOTE only)
-if model_choice == "Post-SMOTE":
-    st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
-
-    # Validate input data
-    expected_cols = ['order_quantity', 'piece_weight_lbs', 'part_id']
-    missing_cols = [col for col in expected_cols if col not in X_test.columns]
-
-    if X_test.empty:
-        st.warning("⚠️ SHAP cannot be computed: X_test is empty.")
-    elif missing_cols:
-        st.warning(f"⚠️ SHAP cannot be computed: Missing columns in X_test: {missing_cols}")
-    else:
-        try:
-            # Compute SHAP values
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X_test)
-
-            # Create SHAP summary plot
-            shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
-            fig = plt.gcf()  # Get current figure
-            st.pyplot(fig)
-        except Exception as e:
-            st.error(f"SHAP plot failed to render: {e}")
 
 
 
