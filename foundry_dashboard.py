@@ -97,12 +97,13 @@ if model_choice == "Post-SMOTE":
             explainer = shap.TreeExplainer(model)
             shap_values = explainer.shap_values(X_test)
 
-            # Plot SHAP summary
-            fig = plt.figure()
+            # Create SHAP summary plot
             shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+            fig = plt.gcf()  # Get current figure
             st.pyplot(fig)
         except Exception as e:
             st.error(f"SHAP plot failed to render: {e}")
+
 
 
 # MTBF Trend Visualization
