@@ -5,6 +5,8 @@ scikit-learn
 altair
 matplotlib
 imbalanced-learn
+shap
+
 
 
 
