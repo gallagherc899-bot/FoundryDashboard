@@ -78,6 +78,39 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
+            # Dynamic SHAP summary for Post-SMOTE
+    if model_choice == "Post-SMOTE":
+        st.subheader("🧠 Dynamic Prediction Summary")
+
+        # Compute SHAP values for the input
+        explainer = shap.TreeExplainer(model)
+        shap_values_single = explainer.shap_values(input_data)[0]
+        total_shap = sum(abs(val) for val in shap_values_single)
+
+        # Confidence level
+        if total_shap > 0.4:
+            confidence = "High"
+        elif total_shap > 0.2:
+            confidence = "Medium"
+        else:
+            confidence = "Low"
+
+        # Feature contributions
+        st.write(f"**Confidence Level:** {confidence} (Total SHAP magnitude = {round(total_shap, 2)})")
+        st.write("**Feature Contributions:**")
+        for feature, value, shap_val in zip(input_data.columns, input_data.values[0], shap_values_single):
+            direction = "increased" if shap_val > 0 else "decreased"
+            st.write(f"- {feature} ({value}) {direction} scrap risk by {round(abs(shap_val), 2)}")
+
+        # Narrative summary
+        key_features = [f for f, s in zip(input_data.columns, shap_values_single) if abs(s) > 0.1]
+        if key_features:
+            st.markdown(f"> This prediction was driven primarily by "
+                        f"{' and '.join(key_features)}. "
+                        f"The model is **{confidence.lower()}** in its scrap classification.")
+        else:
+            st.markdown("> This prediction was influenced by minor feature contributions. Confidence is low.")
+
                 # SHAP summary (Post-SMOTE only)
     if model_choice == "Post-SMOTE":
         st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
@@ -102,33 +135,7 @@ if st.button("Predict Scrap Risk"):
                 st.pyplot(fig)
             except Exception as e:
                 st.error(f"SHAP plot failed to render: {e}")
-                if model_choice == "Post-SMOTE" and part_known:
-    st.subheader("🧠 Dynamic Prediction Summary")
-
-    # Compute SHAP values for the input
-    explainer = shap.TreeExplainer(model)
-    shap_values_single = explainer.shap_values(input_data)[0]
-    total_shap = sum(abs(val) for val in shap_values_single)
-
-    # Confidence level
-    if total_shap > 0.4:
-        confidence = "High"
-    elif total_shap > 0.2:
-        confidence = "Medium"
-    else:
-        confidence = "Low"
-
-    # Feature contributions
-    st.write(f"**Confidence Level:** {confidence} (Total SHAP magnitude = {round(total_shap, 2)})")
-    st.write("**Feature Contributions:**")
-    for feature, value, shap_val in zip(input_data.columns, input_data.values[0], shap_values_single):
-        direction = "increased" if shap_val > 0 else "decreased"
-        st.write(f"- {feature} ({value}) {direction} scrap risk by {round(abs(shap_val), 2)}")
-
-    # Narrative summary
-    st.markdown(f"> This prediction was driven primarily by "
-                f"{' and '.join([f for f, s in zip(input_data.columns, shap_values_single) if abs(s) > 0.1])}. "
-                f"The model is **{confidence.lower()}** in its scrap classification.")
+                
 
 
 
