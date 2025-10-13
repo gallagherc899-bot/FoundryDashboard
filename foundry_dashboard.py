@@ -78,30 +78,56 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
-        # SHAP summary (Post-SMOTE only)
     if model_choice == "Post-SMOTE":
-        st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
+        st.subheader("📊 Pareto Risk Drivers")
 
-        # Validate input data
-        expected_cols = ['order_quantity', 'piece_weight_lbs', 'part_id']
-        missing_cols = [col for col in expected_cols if col not in X_test.columns]
+    try:
+        # Compute SHAP values
+        explainer = shap.TreeExplainer(model)
+        shap_values_all = explainer.shap_values(input_data)
 
-        if X_test.empty:
-            st.warning("⚠️ SHAP cannot be computed: X_test is empty.")
-        elif missing_cols:
-            st.warning(f"⚠️ SHAP cannot be computed: Missing columns in X_test: {missing_cols}")
-        else:
-            try:
-                # Compute SHAP values
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(X_test)
+        # Select SHAP values for class 1 (scrap)
+        shap_values_single = shap_values_all[1][0] if isinstance(shap_values_all, list) else shap_values_all[0]
+        shap_values_single = np.array(shap_values_single).flatten()
 
-                # Create SHAP summary plot
-                shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
-                fig = plt.gcf()  # Get current figure
-                st.pyplot(fig)
-            except Exception as e:
-                st.error(f"SHAP plot failed to render: {e}")
+        # Compute total SHAP magnitude
+        total_shap = np.sum(np.abs(shap_values_single))
+
+        # Build feature contribution list
+        contributions = []
+        for i, feature in enumerate(input_data.columns):
+            shap_val = shap_values_single[i]
+            percent = round((abs(shap_val) / total_shap) * 100, 2)
+            direction = "↑" if shap_val > 0 else "↓"
+            contributions.append((feature, percent, shap_val, direction))
+
+        # Sort by % contribution
+        contributions.sort(key=lambda x: x[1], reverse=True)
+
+        # Select top features until cumulative % ≥ 80
+        pareto_features = []
+        cumulative = 0
+        for item in contributions:
+            pareto_features.append(item)
+            cumulative += item[1]
+            if cumulative >= 80:
+                break
+
+        # Display table
+        st.write("**Top Features Contributing to 80% of Scrap Risk:**")
+        for feature, percent, shap_val, direction in pareto_features:
+            st.write(f"- {feature}: {percent}% ({direction} SHAP = {round(shap_val, 3)})")
+
+        # Optional bar chart
+        chart_data = pd.DataFrame({
+            "Feature": [f for f, _, _, _ in pareto_features],
+            "Contribution (%)": [p for _, p, _, _ in pareto_features]
+        })
+        st.bar_chart(chart_data.set_index("Feature"))
+
+    except Exception as e:
+        st.error(f"Pareto panel failed: {e}")
+
 
 
 
