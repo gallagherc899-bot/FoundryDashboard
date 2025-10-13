@@ -78,54 +78,30 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
+        # SHAP summary (Post-SMOTE only)
     if model_choice == "Post-SMOTE":
-        st.subheader("🧠 Dynamic Prediction Summary")
+        st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
 
-    try:
-        # Compute SHAP values
-        explainer = shap.TreeExplainer(model)
-        shap_values_all = explainer.shap_values(input_data)
+        # Validate input data
+        expected_cols = ['order_quantity', 'piece_weight_lbs', 'part_id']
+        missing_cols = [col for col in expected_cols if col not in X_test.columns]
 
-        # Select SHAP values for class 1 (scrap)
-        if isinstance(shap_values_all, list):
-            shap_values_single = shap_values_all[1]  # Class 1 SHAP values
+        if X_test.empty:
+            st.warning("⚠️ SHAP cannot be computed: X_test is empty.")
+        elif missing_cols:
+            st.warning(f"⚠️ SHAP cannot be computed: Missing columns in X_test: {missing_cols}")
         else:
-            shap_values_single = shap_values_all
+            try:
+                # Compute SHAP values
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(X_test)
 
-        # Ensure it's a 2D array and extract the first row
-        shap_values_single = np.array(shap_values_single)
-        if shap_values_single.ndim == 2:
-            shap_values_single = shap_values_single[0]
-
-        # Confirm SHAP values match input features
-        if len(shap_values_single) != len(input_data.columns):
-            raise ValueError(f"SHAP values length ({len(shap_values_single)}) does not match input features ({len(input_data.columns)})")
-
-        # Compute total SHAP magnitude
-        total_shap = float(np.sum(np.abs(shap_values_single)))
-        confidence = "High" if total_shap > 0.4 else "Medium" if total_shap > 0.2 else "Low"
-
-        # Display confidence
-        st.write(f"**Confidence Level:** {confidence} (SHAP magnitude = {round(total_shap, 2)})")
-
-        # Feature contributions
-        st.write("**Feature Contributions:**")
-        for i, feature in enumerate(input_data.columns):
-            value = input_data.iloc[0, i]
-            shap_val = shap_values_single[i]
-            direction = "increased" if shap_val > 0 else "decreased"
-            st.write(f"- {feature} ({value}) {direction} scrap risk by {round(abs(shap_val), 2)}")
-
-        # Narrative summary
-        key_features = [input_data.columns[i] for i in range(len(shap_values_single)) if abs(shap_values_single[i]) > 0.1]
-        if key_features:
-            joined = " and ".join(key_features)
-            st.markdown(f"> This prediction was driven primarily by {joined}. The model is **{confidence.lower()}** in its scrap classification.")
-        else:
-            st.markdown("> This prediction was influenced by minor feature contributions. Confidence is low.")
-
-    except Exception as e:
-        st.error(f"Dynamic summary failed: {e}")
+                # Create SHAP summary plot
+                shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+                fig = plt.gcf()  # Get current figure
+                st.pyplot(fig)
+            except Exception as e:
+                st.error(f"SHAP plot failed to render: {e}")
 
 
 
