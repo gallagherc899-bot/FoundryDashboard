@@ -78,23 +78,19 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
-                   # Dynamic SHAP summary for Post-SMOTE
     if model_choice == "Post-SMOTE":
         st.subheader("🧠 Dynamic Prediction Summary")
 
     try:
         # Compute SHAP values
         explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(input_data)
+        shap_values_all = explainer.shap_values(input_data)
 
-        # Select class 1 SHAP values (scrap class)
-        if isinstance(shap_values, list):
-            shap_values_single = shap_values[1][0]
-        else:
-            shap_values_single = shap_values[0]
+        # Select SHAP values for class 1 (scrap)
+        shap_values_single = shap_values_all[1][0] if isinstance(shap_values_all, list) else shap_values_all[0]
 
         # Compute total SHAP magnitude
-        total_shap = np.sum(np.abs(shap_values_single))
+        total_shap = float(np.sum(np.abs(shap_values_single)))
         confidence = "High" if total_shap > 0.4 else "Medium" if total_shap > 0.2 else "Low"
 
         # Display confidence
@@ -109,8 +105,8 @@ if st.button("Predict Scrap Risk"):
             st.write(f"- {feature} ({value}) {direction} scrap risk by {round(abs(shap_val), 2)}")
 
         # Narrative summary
-        key_features = [feature for i, feature in enumerate(input_data.columns) if abs(shap_values_single[i]) > 0.1]
-        if key_features:
+        key_features = [input_data.columns[i] for i in range(len(shap_values_single)) if abs(shap_values_single[i]) > 0.1]
+        if len(key_features) > 0:
             joined = " and ".join(key_features)
             st.markdown(f"> This prediction was driven primarily by {joined}. The model is **{confidence.lower()}** in its scrap classification.")
         else:
@@ -118,6 +114,7 @@ if st.button("Predict Scrap Risk"):
 
     except Exception as e:
         st.error(f"Dynamic summary failed: {e}")
+
 
 
 
