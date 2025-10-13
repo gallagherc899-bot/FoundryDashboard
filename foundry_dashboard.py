@@ -127,6 +127,48 @@ if st.button("Predict Scrap Risk"):
 
     except Exception as e:
         st.error(f"Pareto panel failed: {e}")
+        # 🔍 Likely Defects (Pareto 80%)
+st.subheader("🔍 Likely Defects (Pareto 80%)")
+
+try:
+    # Identify defect columns
+    defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
+
+    # Get defect data for selected part
+    defect_data = df[df["part_id"] == part_id_input][defect_cols].sum()
+    total_defects = defect_data.sum()
+
+    # Skip if no defect data
+    if total_defects == 0:
+        st.info("No defect data available for this part.")
+    else:
+        # Sort defects by contribution
+        sorted_defects = defect_data.sort_values(ascending=False)
+        cumulative = 0
+        top_defects = []
+
+        for defect, count in sorted_defects.items():
+            percent = round((count / total_defects) * 100, 2)
+            cumulative += percent
+            likelihood = "High" if percent > 40 else "Medium" if percent > 20 else "Low"
+            top_defects.append((defect.replace("_rate", "").replace("_", " ").title(), likelihood, f"{percent}% of total defects"))
+            if cumulative >= 80:
+                break
+
+        # Display defect list
+        for defect, likelihood, reason in top_defects:
+            st.write(f"- **{defect}**: {likelihood} likelihood ({reason})")
+
+        # Optional bar chart
+        chart_df = pd.DataFrame({
+            "Defect Type": [d for d, _, _ in top_defects],
+            "Contribution (%)": [float(r.split('%')[0]) for _, _, r in top_defects]
+        })
+        st.bar_chart(chart_df.set_index("Defect Type"))
+
+except Exception as e:
+    st.error(f"Defect panel failed: {e}")
+
 
 
 
