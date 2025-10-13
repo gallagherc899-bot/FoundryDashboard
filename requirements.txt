@@ -6,6 +6,8 @@ altair
 matplotlib
 imbalanced-learn
 shap
+plotly>=5.0.0
+
 
 
 
