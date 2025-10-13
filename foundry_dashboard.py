@@ -128,7 +128,7 @@ if st.button("Predict Scrap Risk"):
     except Exception as e:
         st.error(f"Pareto panel failed: {e}")
         # 🔍 Likely Defects (Pareto 80%)
-st.subheader("🔍 Likely Defects (Pareto 80%)")
+        st.subheader("🔍 Likely Defects (Pareto 80%)")
 
 try:
     # Identify defect columns
