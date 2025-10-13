@@ -78,7 +78,7 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
-                # Dynamic SHAP summary for Post-SMOTE
+                   # Dynamic SHAP summary for Post-SMOTE
     if model_choice == "Post-SMOTE":
         st.subheader("🧠 Dynamic Prediction Summary")
 
@@ -120,6 +120,7 @@ if st.button("Predict Scrap Risk"):
 
         except Exception as e:
             st.error(f"Dynamic summary failed: {e}")
+
 
 
 
