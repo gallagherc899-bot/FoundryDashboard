@@ -9,6 +9,8 @@ from imblearn.over_sampling import SMOTE
 import shap
 import altair as alt
 import matplotlib.pyplot as plt
+import plotly.figure_factory as ff
+
 
 # Load and clean data
 df = pd.read_csv("anonymized_parts.csv")
@@ -78,6 +80,13 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
+        # Cost-weighted evaluation
+        y_pred = model.predict(X_test)
+        cm = confusion_matrix(y_test, y_pred)
+        tn, fp, fn, tp = cm.ravel()
+        cost = fn * 100 + fp * 20
+        st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
+
     if model_choice == "Post-SMOTE":
         st.subheader("📊 Pareto Risk Drivers")
 
