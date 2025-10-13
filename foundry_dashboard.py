@@ -1,3 +1,29 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.preprocessing import LabelEncoder
+from imblearn.over_sampling import SMOTE
+import shap
+import altair as alt
+import matplotlib.pyplot as plt
+import plotly.figure_factory as ff
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 if st.button("Predict Scrap Risk"):
     part_known = selected_part != "New"
     part_id_input = int(float(selected_part)) if part_known else None
