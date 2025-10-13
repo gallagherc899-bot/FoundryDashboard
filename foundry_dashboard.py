@@ -89,6 +89,9 @@ if st.button("Predict Scrap Risk"):
         # Select SHAP values for class 1 (scrap)
         shap_values_single = shap_values_all[1][0] if isinstance(shap_values_all, list) else shap_values_all[0]
 
+        # Ensure it's a 1D array
+        shap_values_single = np.array(shap_values_single).flatten()
+
         # Compute total SHAP magnitude
         total_shap = float(np.sum(np.abs(shap_values_single)))
         confidence = "High" if total_shap > 0.4 else "Medium" if total_shap > 0.2 else "Low"
@@ -114,6 +117,7 @@ if st.button("Predict Scrap Risk"):
 
     except Exception as e:
         st.error(f"Dynamic summary failed: {e}")
+
 
 
 
