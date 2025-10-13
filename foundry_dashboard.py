@@ -80,46 +80,45 @@ if st.button("Predict Scrap Risk"):
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
                    # Dynamic SHAP summary for Post-SMOTE
     if model_choice == "Post-SMOTE":
-        st.subheader("🧠 Dynamic Prediction Summary")
+    st.subheader("🧠 Dynamic Prediction Summary")
 
-        try:
-            # Compute SHAP values for the input
-            explainer = shap.TreeExplainer(model)
-            shap_values_all = explainer.shap_values(input_data)
-            shap_values_single = shap_values_all[0] if isinstance(shap_values_all, list) else shap_values_all
+    try:
+        # Compute SHAP values
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(input_data)
 
-            # Ensure it's a 1D array
-            shap_values_single = shap_values_single[0] if shap_values_single.ndim > 1 else shap_values_single
+        # Select class 1 SHAP values (scrap class)
+        if isinstance(shap_values, list):
+            shap_values_single = shap_values[1][0]
+        else:
+            shap_values_single = shap_values[0]
 
-            # Compute total SHAP magnitude
-            total_shap = float(np.sum(np.abs(shap_values_single)))
+        # Compute total SHAP magnitude
+        total_shap = np.sum(np.abs(shap_values_single))
+        confidence = "High" if total_shap > 0.4 else "Medium" if total_shap > 0.2 else "Low"
 
-            # Confidence level
-            if total_shap > 0.4:
-                confidence = "High"
-            elif total_shap > 0.2:
-                confidence = "Medium"
-            else:
-                confidence = "Low"
+        # Display confidence
+        st.write(f"**Confidence Level:** {confidence} (SHAP magnitude = {round(total_shap, 2)})")
 
-            # Feature contributions
-            st.write(f"**Confidence Level:** {confidence} (Total SHAP magnitude = {round(total_shap, 2)})")
-            st.write("**Feature Contributions:**")
-            for feature, value, shap_val in zip(input_data.columns, input_data.values[0], shap_values_single):
-                direction = "increased" if shap_val > 0 else "decreased"
-                st.write(f"- {feature} ({value}) {direction} scrap risk by {round(abs(shap_val), 2)}")
+        # Feature contributions
+        st.write("**Feature Contributions:**")
+        for i, feature in enumerate(input_data.columns):
+            value = input_data.iloc[0, i]
+            shap_val = shap_values_single[i]
+            direction = "increased" if shap_val > 0 else "decreased"
+            st.write(f"- {feature} ({value}) {direction} scrap risk by {round(abs(shap_val), 2)}")
 
-            # Narrative summary
-            key_features = [f for f, s in zip(input_data.columns, shap_values_single) if abs(s) > 0.1]
-            if key_features:
-                st.markdown(f"> This prediction was driven primarily by "
-                            f"{' and '.join(key_features)}. "
-                            f"The model is **{confidence.lower()}** in its scrap classification.")
-            else:
-                st.markdown("> This prediction was influenced by minor feature contributions. Confidence is low.")
+        # Narrative summary
+        key_features = [feature for i, feature in enumerate(input_data.columns) if abs(shap_values_single[i]) > 0.1]
+        if key_features:
+            joined = " and ".join(key_features)
+            st.markdown(f"> This prediction was driven primarily by {joined}. The model is **{confidence.lower()}** in its scrap classification.")
+        else:
+            st.markdown("> This prediction was influenced by minor feature contributions. Confidence is low.")
 
-        except Exception as e:
-            st.error(f"Dynamic summary failed: {e}")
+    except Exception as e:
+        st.error(f"Dynamic summary failed: {e}")
+
 
 
 
