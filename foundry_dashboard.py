@@ -86,6 +86,15 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
+        # Confusion Matrix Visualization
+st.subheader("📊 Confusion Matrix")
+z = [[tp, fn], [fp, tn]]
+x = ['Predicted Scrap', 'Predicted Non-Scrap']
+y = ['Actual Scrap', 'Actual Non-Scrap']
+fig = ff.create_annotated_heatmap(z, x=x, y=y, colorscale='Blues', showscale=True)
+fig.update_layout(title=f'Confusion Matrix: {model_choice} Model')
+st.plotly_chart(fig, use_container_width=True)
+
 
     if model_choice == "Post-SMOTE":
         st.subheader("📊 Pareto Risk Drivers")
