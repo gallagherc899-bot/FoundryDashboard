@@ -80,7 +80,7 @@ if st.button("Predict Scrap Risk"):
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
                    # Dynamic SHAP summary for Post-SMOTE
     if model_choice == "Post-SMOTE":
-    st.subheader("🧠 Dynamic Prediction Summary")
+        st.subheader("🧠 Dynamic Prediction Summary")
 
     try:
         # Compute SHAP values
