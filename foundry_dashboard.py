@@ -78,65 +78,48 @@ if st.button("Predict Scrap Risk"):
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
-            # Dynamic SHAP summary for Post-SMOTE
+                # Dynamic SHAP summary for Post-SMOTE
     if model_choice == "Post-SMOTE":
         st.subheader("🧠 Dynamic Prediction Summary")
 
-        # Compute SHAP values for the input
-        explainer = shap.TreeExplainer(model)
-        shap_values_single = explainer.shap_values(input_data)[0]
-        total_shap = sum(abs(val) for val in shap_values_single)
+        try:
+            # Compute SHAP values for the input
+            explainer = shap.TreeExplainer(model)
+            shap_values_all = explainer.shap_values(input_data)
+            shap_values_single = shap_values_all[0] if isinstance(shap_values_all, list) else shap_values_all
 
-        # Confidence level
-        if total_shap > 0.4:
-            confidence = "High"
-        elif total_shap > 0.2:
-            confidence = "Medium"
-        else:
-            confidence = "Low"
+            # Ensure it's a 1D array
+            shap_values_single = shap_values_single[0] if shap_values_single.ndim > 1 else shap_values_single
 
-        # Feature contributions
-        st.write(f"**Confidence Level:** {confidence} (Total SHAP magnitude = {round(total_shap, 2)})")
-        st.write("**Feature Contributions:**")
-        for feature, value, shap_val in zip(input_data.columns, input_data.values[0], shap_values_single):
-            direction = "increased" if shap_val > 0 else "decreased"
-            st.write(f"- {feature} ({value}) {direction} scrap risk by {round(abs(shap_val), 2)}")
+            # Compute total SHAP magnitude
+            total_shap = float(np.sum(np.abs(shap_values_single)))
 
-        # Narrative summary
-        key_features = [f for f, s in zip(input_data.columns, shap_values_single) if abs(s) > 0.1]
-        if key_features:
-            st.markdown(f"> This prediction was driven primarily by "
-                        f"{' and '.join(key_features)}. "
-                        f"The model is **{confidence.lower()}** in its scrap classification.")
-        else:
-            st.markdown("> This prediction was influenced by minor feature contributions. Confidence is low.")
+            # Confidence level
+            if total_shap > 0.4:
+                confidence = "High"
+            elif total_shap > 0.2:
+                confidence = "Medium"
+            else:
+                confidence = "Low"
 
-                # SHAP summary (Post-SMOTE only)
-    if model_choice == "Post-SMOTE":
-        st.subheader("🔎 SHAP Feature Importance (Post-SMOTE)")
+            # Feature contributions
+            st.write(f"**Confidence Level:** {confidence} (Total SHAP magnitude = {round(total_shap, 2)})")
+            st.write("**Feature Contributions:**")
+            for feature, value, shap_val in zip(input_data.columns, input_data.values[0], shap_values_single):
+                direction = "increased" if shap_val > 0 else "decreased"
+                st.write(f"- {feature} ({value}) {direction} scrap risk by {round(abs(shap_val), 2)}")
 
-        # Validate input data
-        expected_cols = ['order_quantity', 'piece_weight_lbs', 'part_id']
-        missing_cols = [col for col in expected_cols if col not in X_test.columns]
+            # Narrative summary
+            key_features = [f for f, s in zip(input_data.columns, shap_values_single) if abs(s) > 0.1]
+            if key_features:
+                st.markdown(f"> This prediction was driven primarily by "
+                            f"{' and '.join(key_features)}. "
+                            f"The model is **{confidence.lower()}** in its scrap classification.")
+            else:
+                st.markdown("> This prediction was influenced by minor feature contributions. Confidence is low.")
 
-        if X_test.empty:
-            st.warning("⚠️ SHAP cannot be computed: X_test is empty.")
-        elif missing_cols:
-            st.warning(f"⚠️ SHAP cannot be computed: Missing columns in X_test: {missing_cols}")
-        else:
-            try:
-                # Compute SHAP values
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(X_test)
-
-                # Create SHAP summary plot
-                shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
-                fig = plt.gcf()  # Get current figure
-                st.pyplot(fig)
-            except Exception as e:
-                st.error(f"SHAP plot failed to render: {e}")
-                
-
+        except Exception as e:
+            st.error(f"Dynamic summary failed: {e}")
 
 
 
