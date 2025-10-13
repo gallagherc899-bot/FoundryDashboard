@@ -87,10 +87,19 @@ if st.button("Predict Scrap Risk"):
         shap_values_all = explainer.shap_values(input_data)
 
         # Select SHAP values for class 1 (scrap)
-        shap_values_single = shap_values_all[1][0] if isinstance(shap_values_all, list) else shap_values_all[0]
+        if isinstance(shap_values_all, list):
+            shap_values_single = shap_values_all[1]  # Class 1 SHAP values
+        else:
+            shap_values_single = shap_values_all
 
-        # Ensure it's a 1D array
-        shap_values_single = np.array(shap_values_single).flatten()
+        # Ensure it's a 2D array and extract the first row
+        shap_values_single = np.array(shap_values_single)
+        if shap_values_single.ndim == 2:
+            shap_values_single = shap_values_single[0]
+
+        # Confirm SHAP values match input features
+        if len(shap_values_single) != len(input_data.columns):
+            raise ValueError(f"SHAP values length ({len(shap_values_single)}) does not match input features ({len(input_data.columns)})")
 
         # Compute total SHAP magnitude
         total_shap = float(np.sum(np.abs(shap_values_single)))
@@ -109,7 +118,7 @@ if st.button("Predict Scrap Risk"):
 
         # Narrative summary
         key_features = [input_data.columns[i] for i in range(len(shap_values_single)) if abs(shap_values_single[i]) > 0.1]
-        if len(key_features) > 0:
+        if key_features:
             joined = " and ".join(key_features)
             st.markdown(f"> This prediction was driven primarily by {joined}. The model is **{confidence.lower()}** in its scrap classification.")
         else:
@@ -117,6 +126,7 @@ if st.button("Predict Scrap Risk"):
 
     except Exception as e:
         st.error(f"Dynamic summary failed: {e}")
+
 
 
 
