@@ -169,4 +169,5 @@ date_range = st.date_input("Select Time Window", value=[df["week_ending"].min(),
 selected_parts = st.multiselect("Select up to 5 Part IDs", options=sorted(df["part_id"].unique()), max_selections=5)
 
 if selected_parts and len(date_range) == 2:
-    start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[
+    start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+
