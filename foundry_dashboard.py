@@ -20,7 +20,7 @@ df = df.dropna(subset=["part_id", "scrap%", "order_quantity", "piece_weight_lbs"
 # Encode features
 features = ["order_quantity", "piece_weight_lbs", "part_id"]
 X = df[features].copy()
-y = (df["scrap%"] > 5.0).astype(int)
+y = (df["scrap%"] > 1.50).astype(int)
 X["part_id"] = LabelEncoder().fit_transform(X["part_id"])
 X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
