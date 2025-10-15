@@ -1,3 +1,5 @@
+
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -17,11 +19,22 @@ df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replac
 df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
 df = df.dropna(subset=["part_id", "scrap%", "order_quantity", "piece_weight_lbs", "week_ending"])
 
+# Calculate MTTFscrap
+threshold = 5.0
+df["scrap_flag"] = df["scrap%"] > threshold
+mtbf_df = df.groupby("part_id").agg(
+    total_runs=("scrap%", "count"),
+    failures=("scrap_flag", "sum")
+)
+mtbf_df["mttf_scrap"] = mtbf_df["total_runs"] / mtbf_df["failures"].replace(0, np.nan)
+mtbf_df["mttf_scrap"] = mtbf_df["mttf_scrap"].fillna(mtbf_df["total_runs"])
+df = df.merge(mtbf_df[["mttf_scrap"]], on="part_id", how="left")
+
 # Encode features
-features = ["order_quantity", "piece_weight_lbs", "part_id"]
-X = df[features].copy()
-y = (df["scrap%"] > 1.50).astype(int)
-X["part_id"] = LabelEncoder().fit_transform(X["part_id"])
+df["part_id_encoded"] = LabelEncoder().fit_transform(df["part_id"])
+features = ["order_quantity", "piece_weight_lbs", "part_id_encoded", "mttf_scrap"]
+X = df[features]
+y = (df["scrap%"] > threshold).astype(int)
 X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
 # Train Pre-SMOTE model
@@ -58,8 +71,10 @@ if st.button("Predict Scrap Risk"):
     part_id_input = int(float(selected_part)) if part_known else None
 
     if part_known:
-        input_data = pd.DataFrame([[quantity, weight, part_id_input]], columns=features)
-        input_data["part_id"] = LabelEncoder().fit_transform(input_data["part_id"])
+        mttf_value = mtbf_df.loc[part_id_input, "mttf_scrap"] if part_id_input in mtbf_df.index else 1.0
+        input_data = pd.DataFrame([[quantity, weight, part_id_input, mttf_value]], columns=features)
+        input_data["part_id_encoded"] = LabelEncoder().fit_transform(input_data["part_id_encoded"])
+
         predicted_class = model.predict(input_data)[0]
         predicted_proba = model.predict_proba(input_data)[0][1]
 
@@ -154,20 +169,4 @@ if st.button("Predict Scrap Risk"):
                 st.write(f"- **{defect}**: {likelihood} likelihood ({reason})")
 
             chart_df = pd.DataFrame({
-                "Defect Type": [d for d, _, _ in top_defects],
-                "Contribution (%)": [float(r.split('%')[0]) for _, _, r in top_defects]
-            })
-            st.bar_chart(chart_df.set_index("Defect Type"))
-
-    except Exception as e:
-        st.error(f"Defect panel failed: {e}")
-
-# MTBF Trend Visualization
-st.markdown("---")
-st.subheader("📈 MTBFscrap Trend by Week")
-date_range = st.date_input("Select Time Window", value=[df["week_ending"].min(), df["week_ending"].max()])
-selected_parts = st.multiselect("Select up to 5 Part IDs", options=sorted(df["part_id"].unique()), max_selections=5)
-
-if selected_parts and len(date_range) == 2:
-    start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-
+                "Defect Type": [d for d, _,
