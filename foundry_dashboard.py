@@ -169,4 +169,9 @@ if st.button("Predict Scrap Risk"):
                 st.write(f"- **{defect}**: {likelihood} likelihood ({reason})")
 
             chart_df = pd.DataFrame({
-                "Defect Type": [d for d, _,
+                chart_df = pd.DataFrame({
+    "Defect Type": [d for d, _, _ in top_defects],
+    "Contribution (%)": [float(r.split('%')[0]) for _, _, r in top_defects]
+})
+st.bar_chart(chart_df.set_index("Defect Type"))
+
