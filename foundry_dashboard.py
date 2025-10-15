@@ -1,5 +1,3 @@
-
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,8 +7,6 @@ from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import SMOTE
 import shap
-import altair as alt
-import matplotlib.pyplot as plt
 import plotly.figure_factory as ff
 
 # Load and clean data
@@ -30,42 +26,37 @@ mtbf_df["mttf_scrap"] = mtbf_df["total_runs"] / mtbf_df["failures"].replace(0, n
 mtbf_df["mttf_scrap"] = mtbf_df["mttf_scrap"].fillna(mtbf_df["total_runs"])
 df = df.merge(mtbf_df[["mttf_scrap"]], on="part_id", how="left")
 
-# Encode features
+# Encode part_id
 df["part_id_encoded"] = LabelEncoder().fit_transform(df["part_id"])
+
+# Define features and target
 features = ["order_quantity", "piece_weight_lbs", "part_id_encoded", "mttf_scrap"]
 X = df[features]
 y = (df["scrap%"] > threshold).astype(int)
 X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
-# Train Pre-SMOTE model
+# Train models
 rf_pre = RandomForestClassifier(random_state=42)
 rf_pre.fit(X_train, y_train)
 
-# Train Post-SMOTE model
 smote = SMOTE(random_state=42)
 X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 rf_post = RandomForestClassifier(random_state=42)
 rf_post.fit(X_resampled, y_resampled)
 
-# UI Header
+# Dashboard UI
 st.title("🧪 Foundry Scrap Risk & Reliability Dashboard")
-st.markdown("Compare Pre-SMOTE and Post-SMOTE predictions, interpret SHAP values, and evaluate cost impact.")
-
-# Model toggle
 model_choice = st.radio("Select Model Version", ["Pre-SMOTE", "Post-SMOTE"])
 model = rf_pre if model_choice == "Pre-SMOTE" else rf_post
 
-# Scrap Prediction Panel
 st.subheader("🔍 Scrap Risk Prediction")
 part_ids = sorted(df["part_id"].unique())
 part_id_options = ["New"] + [str(int(pid)) for pid in part_ids]
 selected_part = st.selectbox("Select Part ID", part_id_options)
 quantity = st.number_input("Number of Parts", min_value=1, step=1)
 weight = st.number_input("Weight per Part (lbs)", min_value=0.1, step=0.1)
-threshold = st.slider("Scrap % Threshold for Failure (MTBF)", min_value=1.0, max_value=10.0, value=5.0)
-st.write(f"Current failure threshold: **{threshold}%**")
+threshold = st.slider("Scrap % Threshold", min_value=1.0, max_value=10.0, value=5.0)
 
-# Prediction button
 if st.button("Predict Scrap Risk"):
     part_known = selected_part != "New"
     part_id_input = int(float(selected_part)) if part_known else None
@@ -85,17 +76,16 @@ if st.button("Predict Scrap Risk"):
 
         st.success(f"✅ Known Part ID: {part_id_input}")
         st.metric(f"{model_choice} Predicted Scrap Risk", f"{round(predicted_proba * 100, 2)}%")
-        st.metric("MTBFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
+        st.metric("MTTFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
         st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
 
-        # Cost-weighted evaluation
+        # Confusion Matrix
         y_pred = model.predict(X_test)
         cm = confusion_matrix(y_test, y_pred)
         tn, fp, fn, tp = cm.ravel()
         cost = fn * 100 + fp * 20
         st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
 
-        # Confusion Matrix Visualization
         st.subheader("📊 Confusion Matrix")
         z = [[tp, fn], [fp, tn]]
         x_labels = ['Predicted Scrap', 'Predicted Non-Scrap']
@@ -104,9 +94,8 @@ if st.button("Predict Scrap Risk"):
         fig.update_layout(title=f'Confusion Matrix: {model_choice} Model')
         st.plotly_chart(fig, use_container_width=True)
 
-        if model_choice == "Post-SMOTE":
-            st.subheader("📊 Pareto Risk Drivers")
-
+        # SHAP Interpretability
+        st.subheader("📊 Pareto Risk Drivers")
         try:
             explainer = shap.TreeExplainer(model)
             shap_values_all = explainer.shap_values(input_data)
@@ -122,9 +111,8 @@ if st.button("Predict Scrap Risk"):
                 contributions.append((feature, percent, shap_val, direction))
 
             contributions.sort(key=lambda x: x[1], reverse=True)
-
-            pareto_features = []
             cumulative = 0
+            pareto_features = []
             for item in contributions:
                 pareto_features.append(item)
                 cumulative += item[1]
@@ -135,43 +123,5 @@ if st.button("Predict Scrap Risk"):
             for feature, percent, shap_val, direction in pareto_features:
                 st.write(f"- {feature}: {percent}% ({direction} SHAP = {round(shap_val, 3)})")
 
-            chart_data = pd.DataFrame({
-                "Feature": [f for f, _, _, _ in pareto_features],
-                "Contribution (%)": [p for _, p, _, _ in pareto_features]
-            })
-            st.bar_chart(chart_data.set_index("Feature"))
-
         except Exception as e:
-            st.error(f"Pareto panel failed: {e}")
-
-    st.subheader("🔍 Likely Defects (Pareto 80%)")
-    try:
-        defect_cols = [col for col in df.columns if col.endswith("rate") and "scrap" not in col]
-        defect_data = df[df["part_id"] == part_id_input][defect_cols].sum()
-        total_defects = defect_data.sum()
-
-        if total_defects == 0:
-            st.info("No defect data available for this part.")
-        else:
-            sorted_defects = defect_data.sort_values(ascending=False)
-            cumulative = 0
-            top_defects = []
-
-            for defect, count in sorted_defects.items():
-                percent = round((count / total_defects) * 100, 2)
-                cumulative += percent
-                likelihood = "High" if percent > 40 else "Medium" if percent > 20 else "Low"
-                top_defects.append((defect.replace("_rate", "").replace("_", " ").title(), likelihood, f"{percent}% of total defects"))
-                if cumulative >= 80:
-                    break
-
-            for defect, likelihood, reason in top_defects:
-                st.write(f"- **{defect}**: {likelihood} likelihood ({reason})")
-
-            chart_df = pd.DataFrame({
-    "Defect Type": [d for d, _, _ in top_defects],
-    "Contribution (%)": [float(r.split('%')[0]) for _, _, r in top_defects]
-})
-st.bar_chart(chart_df.set_index("Defect Type"))
-
-
+            st.error(f"SHAP panel failed: {e}")
