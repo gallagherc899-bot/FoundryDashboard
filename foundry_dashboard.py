@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import SMOTE
 import shap
@@ -15,9 +15,9 @@ df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replac
 df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
 df = df.dropna(subset=["part_id", "scrap%", "order_quantity", "piece_weight_lbs", "week_ending"])
 
-# Calculate MTTFscrap
-threshold = 5.0
-df["scrap_flag"] = df["scrap%"] > threshold
+# Initial threshold for MTTFscrap calculation
+initial_threshold = 5.0
+df["scrap_flag"] = df["scrap%"] > initial_threshold
 mtbf_df = df.groupby("part_id").agg(
     total_runs=("scrap%", "count"),
     failures=("scrap_flag", "sum")
@@ -32,7 +32,7 @@ df["part_id_encoded"] = LabelEncoder().fit_transform(df["part_id"])
 # Define features and target
 features = ["order_quantity", "piece_weight_lbs", "part_id_encoded", "mttf_scrap"]
 X = df[features]
-y = (df["scrap%"] > threshold).astype(int)
+y = (df["scrap%"] > initial_threshold).astype(int)
 X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
 # Train models
@@ -56,6 +56,7 @@ selected_part = st.selectbox("Select Part ID", part_id_options)
 quantity = st.number_input("Number of Parts", min_value=1, step=1)
 weight = st.number_input("Weight per Part (lbs)", min_value=0.1, step=0.1)
 threshold = st.slider("Scrap % Threshold", min_value=1.0, max_value=10.0, value=5.0)
+cost_per_part = st.number_input("Cost per Part ($)", min_value=0.01, step=0.01)
 
 if st.button("Predict Scrap Risk"):
     part_known = selected_part != "New"
@@ -76,6 +77,8 @@ if st.button("Predict Scrap Risk"):
 
         st.success(f"✅ Known Part ID: {part_id_input}")
         st.metric(f"{model_choice} Predicted Scrap Risk", f"{round(predicted_proba * 100, 2)}%")
+        st.caption("This prediction reflects what the algorithm sees right now, based on features like weight, quantity, and part history.")
+
         st.metric("MTTFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
         st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
 
@@ -84,7 +87,14 @@ if st.button("Predict Scrap Risk"):
         reliability_next_run = np.exp(-lambda_scrap * 1)
         reliability_display = f"{round(reliability_next_run * 100, 2)}%" if lambda_scrap > 0 else "100%"
         st.metric("Reliability for Next Run", reliability_display)
-        st.caption("Calculated using R(t) = exp(-λt), where λ = 1 / MTTFscrap and t = 1 run")
+        st.caption("This tells you how likely it is that the part won’t scrap in the next run — based on past performance. \( R(t) = e^{-\\lambda t} \), where \( \\lambda = 1 / \text{MTTFscrap} \).")
+
+        # Financial impact
+        expected_scrap_count = round(predicted_proba * quantity)
+        expected_loss = round(expected_scrap_count * cost_per_part, 2)
+        st.subheader("💰 Financial Impact")
+        st.write(f"At a threshold of {threshold}%, the model predicts {round(predicted_proba * 100, 2)}% scrap.")
+        st.write(f"For {quantity} parts at ${cost_per_part} each, this results in an expected loss of **${expected_loss}**.")
 
         # Confusion Matrix
         y_pred = model.predict(X_test)
