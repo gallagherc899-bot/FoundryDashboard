@@ -157,8 +157,9 @@ comparison_data = {
     "FN": [33, 33, 27, 27],
     "Cost Impact ($)": [3380, 3380, 2940, 2940],
     "Interpretability": ["❌", "✅", "❌", "✅"],
-    "Probability of Scrap (%)": [40, 40, 40, 40],
-    "Reliability (%)": [60, 60, 60, 60]
+    "Probability of Scrap (%)": [round(predicted_proba * 100, 2)] * 4,
+    "Reliability (%)": [round(reliability_next_run * 100, 2)] * 4
+
 }
 
 comparison_df = pd.DataFrame(comparison_data)
