@@ -143,6 +143,19 @@ if st.button("Predict Scrap Risk"):
 # 📊 Model Comparison Table
 st.subheader("🧮 Model Configuration Comparison Table")
 
+# Run both models on the same input
+input_data = pd.DataFrame([[quantity, weight, part_id_input, mttf_value]], columns=features)
+input_data["part_id_encoded"] = LabelEncoder().fit_transform(input_data["part_id_encoded"])
+
+proba_pre = rf_pre.predict_proba(input_data)[0][1]
+proba_post = rf_post.predict_proba(input_data)[0][1]
+
+probabilities = [round(proba_pre * 100, 2), round(proba_pre * 100, 2),
+                 round(proba_post * 100, 2), round(proba_post * 100, 2)]
+
+reliability_value = round(np.exp(-1 / mttf_value) * 100, 2)
+reliabilities = [reliability_value] * 4
+
 comparison_data = {
     "Configuration": [
         "No SMOTE, No SHAP",
@@ -157,13 +170,13 @@ comparison_data = {
     "FN": [33, 33, 27, 27],
     "Cost Impact ($)": [3380, 3380, 2940, 2940],
     "Interpretability": ["❌", "✅", "❌", "✅"],
-    "Probability of Scrap (%)": [round(predicted_proba * 100, 2)] * 4,
-    "Reliability (%)": [round(reliability_next_run * 100, 2)] * 4
-
+    "Probability of Scrap (%)": probabilities,
+    "Reliability (%)": reliabilities
 }
 
 comparison_df = pd.DataFrame(comparison_data)
 
 st.markdown("**Accuracy Formula:**  \n\\( \\text{Accuracy} = \\frac{TP + TN}{TP + TN + FP + FN} \\)")
 st.dataframe(comparison_df, use_container_width=True)
+
 
