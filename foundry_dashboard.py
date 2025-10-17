@@ -79,6 +79,13 @@ if st.button("Predict Scrap Risk"):
         st.metric("MTTFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
         st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
 
+        # Reliability for next run
+        lambda_scrap = 1 / mtbf_scrap if mtbf_scrap != float("inf") else 0
+        reliability_next_run = np.exp(-lambda_scrap * 1)
+        reliability_display = f"{round(reliability_next_run * 100, 2)}%" if lambda_scrap > 0 else "100%"
+        st.metric("Reliability for Next Run", reliability_display)
+        st.caption("Calculated using R(t) = exp(-λt), where λ = 1 / MTTFscrap and t = 1 run")
+
         # Confusion Matrix
         y_pred = model.predict(X_test)
         cm = confusion_matrix(y_test, y_pred)
