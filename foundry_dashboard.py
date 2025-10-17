@@ -8,6 +8,7 @@ from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import SMOTE
 import shap
 import plotly.figure_factory as ff
+import plotly.graph_objects as go
 
 # Load and clean data
 df = pd.read_csv("anonymized_parts.csv")
@@ -44,7 +45,7 @@ X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 rf_post = RandomForestClassifier(random_state=42)
 rf_post.fit(X_resampled, y_resampled)
 
-# Dashboard UI
+# Streamlit UI
 st.title("🧪 Foundry Scrap Risk & Reliability Dashboard")
 model_choice = st.radio("Select Model Version", ["Pre-SMOTE", "Post-SMOTE"])
 model = rf_pre if model_choice == "Pre-SMOTE" else rf_post
@@ -82,21 +83,18 @@ if st.button("Predict Scrap Risk"):
         st.metric("MTTFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
         st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
 
-        # Reliability for next run
         lambda_scrap = 1 / mtbf_scrap if mtbf_scrap != float("inf") else 0
         reliability_next_run = np.exp(-lambda_scrap * 1)
         reliability_display = f"{round(reliability_next_run * 100, 2)}%" if lambda_scrap > 0 else "100%"
         st.metric("Reliability for Next Run", reliability_display)
         st.caption("This tells you how likely it is that the part won’t scrap in the next run — based on past performance. \( R(t) = e^{-\\lambda t} \), where \( \\lambda = 1 / \text{MTTFscrap} \).")
 
-        # Financial impact
         expected_scrap_count = round(predicted_proba * quantity)
         expected_loss = round(expected_scrap_count * cost_per_part, 2)
         st.subheader("💰 Financial Impact")
         st.write(f"At a threshold of {threshold}%, the model predicts {round(predicted_proba * 100, 2)}% scrap.")
         st.write(f"For {quantity} parts at ${cost_per_part} each, this results in an expected loss of **${expected_loss}**.")
 
-        # Confusion Matrix
         y_pred = model.predict(X_test)
         cm = confusion_matrix(y_test, y_pred)
         tn, fp, fn, tp = cm.ravel()
@@ -111,7 +109,6 @@ if st.button("Predict Scrap Risk"):
         fig.update_layout(title=f'Confusion Matrix: {model_choice} Model')
         st.plotly_chart(fig, use_container_width=True)
 
-        # SHAP Interpretability
         st.subheader("📊 Pareto Risk Drivers")
         try:
             explainer = shap.TreeExplainer(model)
@@ -142,3 +139,14 @@ if st.button("Predict Scrap Risk"):
 
         except Exception as e:
             st.error(f"SHAP panel failed: {e}")
+
+# 📊 Model Comparison Table
+st.subheader("🧮 Model Configuration Comparison Table")
+comparison_data = {
+    "Configuration": [
+        "No SMOTE, No SHAP",
+        "No SMOTE, With SHAP",
+        "With SMOTE, No SHAP",
+        "With SMOTE, With SHAP"
+    ],
+    "Accuracy (TP + TN / Total)": ["70.0%", "70
