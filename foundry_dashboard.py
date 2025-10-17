@@ -142,6 +142,7 @@ if st.button("Predict Scrap Risk"):
 
 # 📊 Model Comparison Table
 st.subheader("🧮 Model Configuration Comparison Table")
+
 comparison_data = {
     "Configuration": [
         "No SMOTE, No SHAP",
@@ -149,4 +150,19 @@ comparison_data = {
         "With SMOTE, No SHAP",
         "With SMOTE, With SHAP"
     ],
-    "Accuracy (TP + TN / Total)": ["70.0%", "70
+    "Accuracy (TP + TN / Total)": ["70.0%", "70.0%", "75.0%", "75.0%"],
+    "TP": [30, 30, 36, 36],
+    "TN": [170, 170, 165, 165],
+    "FP": [19, 19, 24, 24],
+    "FN": [33, 33, 27, 27],
+    "Cost Impact ($)": [3380, 3380, 2940, 2940],
+    "Interpretability": ["❌", "✅", "❌", "✅"],
+    "Probability of Scrap (%)": [40, 40, 40, 40],
+    "Reliability (%)": [60, 60, 60, 60]
+}
+
+comparison_df = pd.DataFrame(comparison_data)
+
+st.markdown("**Accuracy Formula:**  \n\\( \\text{Accuracy} = \\frac{TP + TN}{TP + TN + FP + FN} \\)")
+st.dataframe(comparison_df, use_container_width=True)
+
