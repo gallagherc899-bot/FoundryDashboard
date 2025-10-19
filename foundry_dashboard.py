@@ -17,7 +17,7 @@ df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replac
 df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
 df = df.dropna(subset=["part_id", "scrap%", "order_quantity", "piece_weight_lbs", "week_ending"])
 
-# Initial threshold for MTTFscrap calculation
+# Calculate MTTFscrap
 initial_threshold = 5.0
 df["scrap_flag"] = df["scrap%"] > initial_threshold
 mtbf_df = df.groupby("part_id").agg(
@@ -28,46 +28,33 @@ mtbf_df["mttf_scrap"] = mtbf_df["total_runs"] / mtbf_df["failures"].replace(0, n
 mtbf_df["mttf_scrap"] = mtbf_df["mttf_scrap"].fillna(mtbf_df["total_runs"])
 df = df.merge(mtbf_df[["mttf_scrap"]], on="part_id", how="left")
 
-# Encode part_id
+# Encode categorical features
 df["part_id_encoded"] = LabelEncoder().fit_transform(df["part_id"])
 
-# Define features and target
+# Define features and labels
 features = ["order_quantity", "piece_weight_lbs", "part_id_encoded", "mttf_scrap"]
 X = df[features]
 y = (df["scrap%"] > initial_threshold).astype(int)
 
-# Split into train, calibration, and test sets
+# Split data
 X_temp, X_test, y_temp, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
-X_train, X_calib, y_train, y_calib = train_test_split(X_temp, y_temp, stratify=y_temp, test_size=0.25, random_state=42)  # 60/20/20 split
+X_train, X_calib, y_train, y_calib = train_test_split(X_temp, y_temp, stratify=y_temp, test_size=0.25, random_state=42)
 
-# Train post-SMOTE model
+# Handle class imbalance
 smote = SMOTE(random_state=42)
 X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
-rf_post = RandomForestClassifier(random_state=42)
-rf_post.fit(X_resampled, y_resampled)
 
-# Calibrate using Platt scaling
-platt_model_post = CalibratedClassifierCV(base_estimator=rf_post, method='sigmoid', cv='prefit')
-platt_model_post.fit(X_calib, y_calib)
+# Train base model
+rf_model = RandomForestClassifier(random_state=42)
+rf_model.fit(X_resampled, y_resampled)
 
-# Optimized scrap prediction weights
-optimal_weights = [0.1283, 2.2272]  # [order_quantity, piece_weight_lbs]
-benchmark_df = df.head(20).copy()
-benchmark_df['actual_scrap_pounds'] = benchmark_df['order_quantity'] * benchmark_df['piece_weight_lbs'] * (benchmark_df['scrap%'] / 100)
-benchmark_df['optimized_predicted_scrap'] = (
-    benchmark_df['order_quantity'] * optimal_weights[0] +
-    benchmark_df['piece_weight_lbs'] * optimal_weights[1]
-)
-benchmark_df['lower_bound'] = benchmark_df['actual_scrap_pounds'] * 0.90
-benchmark_df['upper_bound'] = benchmark_df['actual_scrap_pounds'] * 1.10
-benchmark_df['within_tolerance'] = (
-    (benchmark_df['optimized_predicted_scrap'] >= benchmark_df['lower_bound']) &
-    (benchmark_df['optimized_predicted_scrap'] <= benchmark_df['upper_bound'])
-)
+# Calibrate model
+calibrated_model = CalibratedClassifierCV(base_estimator=rf_model, method='sigmoid', cv='prefit')
+calibrated_model.fit(X_calib, y_calib)
 
-# Dashboard UI
+# Streamlit UI
 st.title("🧪 Foundry Scrap Risk & Reliability Dashboard")
-st.subheader("🔍 Scrap Risk Prediction (Post-SMOTE + Calibrated)")
+st.subheader("🔍 Scrap Risk Prediction")
 
 part_ids = sorted(df["part_id"].unique())
 part_id_options = ["New"] + [str(int(pid)) for pid in part_ids]
@@ -79,77 +66,56 @@ cost_per_part = st.number_input("Cost per Part ($)", min_value=0.01, step=0.01)
 
 if st.button("Predict Scrap Risk"):
     part_known = selected_part != "New"
-    part_id_input = int(float(selected_part)) if part_known else None
+    part_id_input = int(float(selected_part)) if part_known else -1
+    mttf_value = mtbf_df.loc[part_id_input, "mttf_scrap"] if part_known and part_id_input in mtbf_df.index else 1.0
+
+    part_id_encoded = LabelEncoder().fit(df["part_id"]).transform([part_id_input])[0] if part_known else -1
+    input_data = pd.DataFrame([[quantity, weight, part_id_encoded, mttf_value]], columns=features)
+
+    predicted_class = calibrated_model.predict(input_data)[0]
+    predicted_proba = calibrated_model.predict_proba(input_data)[0][1]
+
+    st.metric("Calibrated Scrap Risk", f"{round(predicted_proba * 100, 2)}%")
 
     if part_known:
-        mttf_value = mtbf_df.loc[part_id_input, "mttf_scrap"] if part_id_input in mtbf_df.index else 1.0
-        input_data = pd.DataFrame([[quantity, weight, part_id_input, mttf_value]], columns=features)
-        input_data["part_id_encoded"] = LabelEncoder().fit_transform(input_data["part_id_encoded"])
-
-        predicted_class = platt_model_post.predict(input_data)[0]
-        predicted_proba = platt_model_post.predict_proba(input_data)[0][1]
-
         part_df = df[df["part_id"] == part_id_input]
         N = len(part_df)
         failures = (part_df["scrap%"] > threshold).sum()
         mtbf_scrap = N / failures if failures > 0 else float("inf")
 
-        st.success(f"✅ Known Part ID: {part_id_input}")
-        st.metric("Calibrated Scrap Risk", f"{round(predicted_proba * 100, 2)}%")
-        st.metric("MTTFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs per failure")
-        st.write(f"Failures above threshold: **{failures}** out of **{N}** runs")
-
-        # Reliability for next run
         lambda_scrap = 1 / mtbf_scrap if mtbf_scrap != float("inf") else 0
-        reliability_next_run = np.exp(-lambda_scrap * 1)
+        reliability_next_run = np.exp(-lambda_scrap)
         reliability_display = f"{round(reliability_next_run * 100, 2)}%" if lambda_scrap > 0 else "100%"
-        st.metric("Reliability for Next Run", reliability_display)
+        st.metric("MTTFscrap", f"{'∞' if mtbf_scrap == float('inf') else round(mtbf_scrap, 2)} runs/failure")
+        st.metric("Reliability Next Run", reliability_display)
 
-        # Financial impact
-        expected_scrap_count = round(predicted_proba * quantity)
-        expected_loss = round(expected_scrap_count * cost_per_part, 2)
-        st.subheader("💰 Financial Impact")
-        st.write(f"At a threshold of {threshold}%, the model predicts {round(predicted_proba * 100, 2)}% scrap.")
-        st.write(f"For {quantity} parts at ${cost_per_part} each, this results in an expected loss of **${expected_loss}**.")
+    expected_scrap_count = round(predicted_proba * quantity)
+    expected_loss = round(expected_scrap_count * cost_per_part, 2)
+    st.subheader("💰 Financial Impact")
+    st.write(f"Predicted scrap: {round(predicted_proba * 100, 2)}% for {quantity} parts.")
+    st.write(f"Expected loss: **${expected_loss}**.")
 
-        # Confusion Matrix
-        y_pred = platt_model_post.predict(X_test)
-        cm = confusion_matrix(y_test, y_pred)
-        tn, fp, fn, tp = cm.ravel()
-        cost = fn * 100 + fp * 20
-        st.write(f"Estimated Cost Impact (FN=$100, FP=$20): **${cost}**")
+    y_pred = calibrated_model.predict(X_test)
+    cm = confusion_matrix(y_test, y_pred)
+    tn, fp, fn, tp = cm.ravel()
+    cost = fn * 100 + fp * 20
 
-        st.subheader("📊 Confusion Matrix")
-        z = [[tp, fn], [fp, tn]]
-        x_labels = ['Predicted Scrap', 'Predicted Non-Scrap']
-        y_labels = ['Actual Scrap', 'Actual Non-Scrap']
-        fig = ff.create_annotated_heatmap(z, x=x_labels, y=y_labels, colorscale='Blues', showscale=True)
-        fig.update_layout(title='Confusion Matrix: Calibrated Post-SMOTE Model')
-        st.plotly_chart(fig, use_container_width=True)
+    st.subheader("📊 Confusion Matrix")
+    z = [[tp, fn], [fp, tn]]
+    x_labels = ['Predicted Scrap', 'Predicted Non-Scrap']
+    y_labels = ['Actual Scrap', 'Actual Non-Scrap']
+    fig = ff.create_annotated_heatmap(z, x=x_labels, y=y_labels, colorscale='Blues', showscale=True)
+    fig.update_layout(title='Confusion Matrix')
+    st.plotly_chart(fig, use_container_width=True)
 
-        # SHAP Interpretability
-        st.subheader("📊 Pareto Risk Drivers")
-        try:
-            explainer = shap.TreeExplainer(platt_model_post.base_estimator)
-            shap_values_all = explainer.shap_values(input_data)
-            shap_values_single = shap_values_all[1][0] if isinstance(shap_values_all, list) else shap_values_all[0]
-            shap_values_single = np.array(shap_values_single).flatten()
-            total_shap = np.sum(np.abs(shap_values_single))
-
-            contributions = []
-            for i, feature in enumerate(input_data.columns):
-                shap_val = shap_values_single[i]
-                percent = round((abs(shap_val) / total_shap) * 100, 2)
-                direction = "↑" if shap_val > 0 else "↓"
-                contributions.append((feature, percent, shap_val, direction))
-
-            contributions.sort(key=lambda x: x[1], reverse=True)
-            cumulative = 0
-            pareto_features = []
-            for item in contributions:
-                pareto_features.append(item)
-                cumulative += item[1]
-                if cumulative >= 80:
-                    break
-
-            st
+    # SHAP interpretability
+    st.subheader("📊 Feature Contributions")
+    explainer = shap.TreeExplainer(rf_model)
+    shap_values = explainer.shap_values(input_data)
+    shap_values = shap_values[1][0] if isinstance(shap_values, list) else shap_values[0]
+    shap_df = pd.DataFrame({
+        "Feature": features,
+        "SHAP Value": shap_values,
+        "Abs SHAP": np.abs(shap_values)
+    }).sort_values(by="Abs SHAP", ascending=False)
+    st.dataframe(shap_df[["Feature", "SHAP Value"]])
