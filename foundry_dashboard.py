@@ -363,7 +363,7 @@ return s
 def make_xy(df, thr_label: float, use_rate_cols: bool):
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
     if use_rate_cols:
-    feats += [c for c in df.columns if c.endswith("_rate")]
+        feats += [c for c in df.columns if c.endswith("_rate")]
 X = df[feats].copy()
 y = (df["scrap%"] > thr_label).astype(int)
 return X, y, feats
