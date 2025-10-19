@@ -15,6 +15,64 @@ from scipy.stats import wilcoxon
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss, accuracy_score
+# streamlit_app.py
+# Run with: streamlit run streamlit_app.py
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+import os
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from dateutil.relativedelta import relativedelta
+from scipy.stats import wilcoxon
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import brier_score_loss, accuracy_score
+
+# --- Default Settings ---
+DEFAULTS = {
+    "scrap_threshold": 6.5,
+    "prior_shift": True,
+    "prior_shift_guard": 20,
+    "use_quick_hook": False,
+    "manual_s": 1.0,
+    "manual_gamma": 0.5,
+    "rolling_validation": True,
+    "include_rate_features": True
+}
+
+# --- Sidebar Controls ---
+st.sidebar.header("Dashboard Settings")
+
+# Reset Toggle
+reset_defaults = st.sidebar.checkbox("Reset to Recommended Defaults", value=False)
+
+# Settings State
+if reset_defaults:
+    settings = DEFAULTS.copy()
+else:
+    settings = {
+        "scrap_threshold": st.sidebar.slider("Scrap % Threshold", 1.0, 15.0, 6.5, step=0.1),
+        "prior_shift_guard": st.sidebar.slider("Prior Shift Guard", 0, 50, 20),
+        "prior_shift": st.sidebar.checkbox("Enable Prior Shift", True),
+        "include_rate_features": st.sidebar.checkbox("Include *_rate Features", True),
+        "use_quick_hook": st.sidebar.checkbox("Use Manual Quick-Hook", False),
+        "rolling_validation": st.sidebar.checkbox("Run 6-2-1 Rolling Validation", True)
+    }
+
+    if settings["use_quick_hook"]:
+        settings["manual_s"] = st.sidebar.slider("Manual s", 0.1, 2.0, 1.0, step=0.1)
+        settings["manual_gamma"] = st.sidebar.slider("Manual γ", 0.1, 1.0, 0.5, step=0.05)
+    else:
+        settings["manual_s"] = DEFAULTS["manual_s"]
+        settings["manual_gamma"] = DEFAULTS["manual_gamma"]
+
+# Now settings dict can be used downstream in your model and prediction logic
+
 
 # -----------------------------
 # Page / constants
