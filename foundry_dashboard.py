@@ -43,9 +43,9 @@ st.sidebar.header("Dashboard Settings")
 
 # Reset to Defaults
 if st.sidebar.button("Reset to Recommended Defaults"):
-for key, val in DEFAULTS.items():
-    st.session_state[key] = val
-st.experimental_rerun()
+    for key, val in DEFAULTS.items():
+        st.session_state[key] = val
+            st.experimental_rerun()
 
 # Scrap % Threshold
 st.sidebar.slider(
