@@ -691,19 +691,20 @@ with tabs[0]:
 
         # Historical exceedance prevalence at current threshold
         part_prev_card = np.nan
-if 'part_prev_train' in locals() and selected_part in part_prev_train:
-        part_prev_card = float(part_prev_train[selected_part])
+        if 'part_prev_train' in locals() and selected_part in part_prev_train:
+            part_prev_card = float(part_prev_train[selected_part])
 
-exceedance_rate_text = (
-    f"{part_prev_card * 100:.2f}%"
-    if not np.isnan(part_prev_card)
-    else "N/A"
+        exceedance_rate_text = (
+            f"{part_prev_card * 100:.2f}%"
+            if not np.isnan(part_prev_card)
+            else "N/A"
 )
 
-st.markdown(
-    f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
-    f"{exceedance_rate_text} ({N} runs)"
+        st.markdown(
+            f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
+            f"{exceedance_rate_text} ({N} runs)"
 )
+
 
         )
     if not np.isnan(part_prev_card):
