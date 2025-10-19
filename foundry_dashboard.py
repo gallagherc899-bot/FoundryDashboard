@@ -343,9 +343,9 @@ df_test  = df_test[~df_test.part_id.isin(train_parts.union(calib_parts))].copy()
 return df_train, df_calib, df_test
 
 def compute_mtbf_on_train(df_train: pd.DataFrame, thr_label: float) -> pd.DataFrame:
-t = df_train.copy()
-t["scrap_flag"] = (t["scrap%"] > thr_label).astype(int)
-mtbf = t.groupby("part_id").agg(
+    t = df_train.copy()
+    t["scrap_flag"] = (t["scrap%"] > thr_label).astype(int)
+    mtbf = t.groupby("part_id").agg(
     total_runs=("scrap%", "count"),
     failures=("scrap_flag", "sum")
 )
