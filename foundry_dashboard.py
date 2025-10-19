@@ -69,24 +69,26 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
 # -----------------------------
 def show_pareto_tables(hist_pareto, pred_pareto):
     st.dataframe(
-        hist_pareto.assign(
-            hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
-        ).assign(**{
-            "share_%": lambda d: d["share_%"].round(2),
-            "cumulative_%": lambda d: d["cumulative_%"].round(1),
-        }),
-        use_container_width=True
-    )
+    hist_pareto.assign(
+        hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
+    ).assign(**{
+        "share_%": lambda d: d["share_%"].round(2),
+        "cumulative_%": lambda d: d["cumulative_%"].round(1),
+    }),
+    use_container_width=True
+)
+
 
     st.dataframe(
-        pred_pareto.assign(
-            delta_prob_raw=lambda d: (d["delta_prob_raw"] * 100).round(2)
-        ).assign(**{
-            "share_%": lambda d: d["share_%"].round(2),
-            "cumulative_%": lambda d: d["cumulative_%"].round(1),
-        }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
-        use_container_width=True
-    )
+    pred_pareto.assign(
+        delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2)
+    ).assign(**{
+        "share_%": lambda d: d["share_%"].round(2),
+        "cumulative_%": lambda d: d["cumulative_%"].round(1),
+    }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
+    use_container_width=True
+)
+
 
 # streamlit_app.py
 # Run with: streamlit run streamlit_app.py
