@@ -32,27 +32,16 @@ y = (df["scrap%"] > initial_threshold).astype(int)
 # Train/test split
 X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
-from sklearn.pipeline import make_pipeline
-
 # Apply SMOTE to training data
 smote = SMOTE(random_state=42)
 X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 
 # Calibrate with Platt scaling and Isotonic regression using 5-fold CV
-platt_model = CalibratedClassifierCV(
-    base_estimator=RandomForestClassifier(random_state=42),
-    method='sigmoid',
-    cv=5
-)
+platt_model = CalibratedClassifierCV(base_estimator=RandomForestClassifier(random_state=42), method='sigmoid', cv=5)
 platt_model.fit(X_resampled, y_resampled)
 
-isotonic_model = CalibratedClassifierCV(
-    base_estimator=RandomForestClassifier(random_state=42),
-    method='isotonic',
-    cv=5
-)
+isotonic_model = CalibratedClassifierCV(base_estimator=RandomForestClassifier(random_state=42), method='isotonic', cv=5)
 isotonic_model.fit(X_resampled, y_resampled)
-)
 
 # Predict probabilities
 df["platt_scrap_probability"] = platt_model.predict_proba(X)[:, 1]
