@@ -625,22 +625,32 @@ with tabs[0]:
             with c_left:
                 st.markdown("**Historical Pareto (Top defect rates for this part)**")
                 if len(hist_pareto):
-                    st.dataframe(hist_pareto.assign(
-                        hist_mean_rate=lambda d: d["hist_mean_rate"].round(4),
-                        share_%=lambda d: d["share_%"].round(2),
-                        cumulative_%=lambda d: d["cumulative_%"].round(1)
-                    ), use_container_width=True)
+                    st.dataframe(
+    hist_pareto.assign(
+        hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
+    ).assign(**{
+        "share_%": lambda d: d["share_%"].round(2),
+        "cumulative_%": lambda d: d["cumulative_%"].round(1),
+    }),
+    use_container_width=True
+)
+
                 else:
                     st.info("No historical defect rates found for this part in the training window.")
 
             with c_right:
                 st.markdown("**Predicted Pareto (Local drivers of current prediction)**")
                 if len(pred_pareto):
-                    st.dataframe(pred_pareto.assign(
-                        delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2),  # show in pp
-                        share_%=lambda d: d["share_%"].round(2),
-                        cumulative_%=lambda d: d["cumulative_%"].round(1)
-                    ).rename(columns={"delta_prob_raw": "Δ prob (pp)"}), use_container_width=True)
+                    st.dataframe(
+    pred_pareto.assign(
+        delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2)
+    ).assign(**{
+        "share_%": lambda d: d["share_%"].round(2),
+        "cumulative_%": lambda d: d["cumulative_%"].round(1),
+    }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
+    use_container_width=True
+)
+
                     st.caption("For each defect-rate feature, we set it to the 75th percentile and measure the +∆ in the raw calibrated probability vs base. Larger +∆ means stronger risk driver **for this prediction**.")
                 else:
                     st.info("Predicted Pareto unavailable (no *_rate features in model or all deltas <= 0).")
