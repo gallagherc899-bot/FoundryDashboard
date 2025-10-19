@@ -37,9 +37,19 @@ X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 rf_model = RandomForestClassifier(random_state=42)
 rf_model.fit(X_resampled, y_resampled)
 
-# Calibrate with Platt scaling and Isotonic regression
-platt_model = CalibratedClassifierCV(base_estimator=rf_model, method='sigmoid', cv='prefit')
+# Ensure rf_model is trained
+rf_model.fit(X_resampled, y_resampled)
+
+# Check that X_test and y_test are valid
+assert X_test.shape[0] > 0 and y_test.shape[0] > 0, "Test data is empty or misaligned"
+
+# Calibrate using Platt scaling and Isotonic regression
+platt_model = CalibratedClassifierCV(rf_model, method='sigmoid', cv=5)
 platt_model.fit(X_test, y_test)
+
+isotonic_model = CalibratedClassifierCV(rf_model, method='isotonic', cv=5)
+isotonic_model.fit(X_test, y_test)
+
 
 isotonic_model = CalibratedClassifierCV(base_estimator=rf_model, method='isotonic', cv='prefit')
 isotonic_model.fit(X_test, y_test)
