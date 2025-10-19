@@ -30,6 +30,7 @@ MIN_SAMPLES_LEAF = 2
 
 S_GRID = np.linspace(0.6, 1.2, 13)       # {0.60,...,1.20}
 GAMMA_GRID = np.linspace(0.5, 1.2, 15)   # {0.50,...,1.20}
+TOP_K_PARETO = 8
 
 # -----------------------------
 # Helpers
@@ -146,7 +147,7 @@ def prior_shift_logit(p_raw, src_prev, tgt_prev):
     p_adj = 1/(1 + np.exp(-(logit + delta)))
     return np.clip(p_adj, 1e-6, 1-1e-6)
 
-# NEW: exceedance-based baselines at current threshold
+# Exceedance baselines at current threshold
 def compute_part_exceedance_baselines(df_train: pd.DataFrame, thr_label: float):
     """Per-part prevalence of exceeding the threshold, and a scale vs global prevalence."""
     part_prev = (
@@ -157,6 +158,103 @@ def compute_part_exceedance_baselines(df_train: pd.DataFrame, thr_label: float):
     global_prev = float(part_prev.mean()) if len(part_prev) else 0.5
     part_scale = (part_prev / max(global_prev, 1e-6)).fillna(1.0).clip(lower=0.25, upper=4.0)
     return part_prev, part_scale, global_prev
+
+def build_input_row_for_part(selected_part: int,
+                             quantity: float,
+                             weight: float,
+                             mttf_value: float,
+                             part_freq_value: float,
+                             FEATURES: list,
+                             df_train: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build a one-row dataframe aligned to FEATURES.
+    For *_rate columns, fill with the part's historical mean (fallback = global mean).
+    """
+    base = {"order_quantity": quantity,
+            "piece_weight_lbs": weight,
+            "mttf_scrap": mttf_value,
+            "part_freq": part_freq_value}
+
+    row = pd.DataFrame([base], columns=["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"])
+
+    rate_cols = [c for c in FEATURES if c.endswith("_rate")]
+    if rate_cols:
+        part_hist = df_train[df_train["part_id"] == selected_part][rate_cols].mean()
+        global_hist = df_train[rate_cols].mean()
+        filled = part_hist.fillna(global_hist).fillna(0.0)
+        for c in rate_cols:
+            row[c] = float(filled.get(c, float(global_hist.get(c, 0.0))))
+    # Reorder to FEATURES exactly
+    row = row.reindex(columns=FEATURES, fill_value=0.0)
+    return row
+
+def local_defect_drivers(calibrated_model,
+                         input_row: pd.DataFrame,
+                         FEATURES: list,
+                         df_train: pd.DataFrame,
+                         strategy: str = "p75",
+                         k: int = TOP_K_PARETO) -> pd.DataFrame:
+    """
+    Compute a local 'predicted Pareto' by measuring the positive delta in raw calibrated probability
+    when bumping each *_rate feature to a higher-risk value (default: 75th percentile).
+
+    Returns a dataframe with columns: ['defect', 'delta_prob', 'share_%', 'cumulative_%'].
+    """
+    rate_cols = [c for c in FEATURES if c.endswith("_rate")]
+    if not rate_cols:
+        return pd.DataFrame(columns=["defect", "delta_prob", "share_%", "cumulative_%"])
+
+    base_p = float(calibrated_model.predict_proba(input_row)[0, 1])
+
+    deltas = []
+    for col in rate_cols:
+        tmp = input_row.copy()
+        if strategy == "p75":
+            hi = float(np.nanpercentile(df_train[col].values, 75))
+            tmp[col] = hi
+        else:
+            # simple +2 percentage points (if features are in [0,1] scale already, this can be tuned)
+            tmp[col] = float(input_row[col].iloc[0]) + 0.02
+
+        new_p = float(calibrated_model.predict_proba(tmp)[0, 1])
+        delta = max(0.0, new_p - base_p)  # only positive risk drivers for Pareto
+        deltas.append((col, delta))
+
+    dd = pd.DataFrame(deltas, columns=["defect", "delta_prob"])
+    dd = dd.sort_values("delta_prob", ascending=False).head(k)
+    total = float(dd["delta_prob"].sum())
+    if total > 0:
+        dd["share_%"] = dd["delta_prob"] / total * 100.0
+        dd["cumulative_%"] = dd["share_%"].cumsum()
+    else:
+        dd["share_%"] = 0.0
+        dd["cumulative_%"] = 0.0
+    return dd
+
+def historical_defect_pareto_for_part(selected_part: int,
+                                      df_train: pd.DataFrame,
+                                      k: int = TOP_K_PARETO) -> pd.DataFrame:
+    """Top-K historical defect rates (means) for the part."""
+    rate_cols = [c for c in df_train.columns if c.endswith("_rate")]
+    if not rate_cols:
+        return pd.DataFrame(columns=["defect", "mean_rate", "share_%", "cumulative_%"])
+
+    part_hist = df_train[df_train["part_id"] == selected_part]
+    if part_hist.empty:
+        return pd.DataFrame(columns=["defect", "mean_rate", "share_%", "cumulative_%"])
+
+    means = part_hist[rate_cols].mean().fillna(0.0)
+    means = means.sort_values(ascending=False).head(k)
+    total = float(means.sum())
+    out = pd.DataFrame({"defect": means.index,
+                        "mean_rate": means.values})
+    if total > 0:
+        out["share_%"] = out["mean_rate"] / total * 100.0
+        out["cumulative_%"] = out["share_%"].cumsum()
+    else:
+        out["share_%"] = 0.0
+        out["cumulative_%"] = 0.0
+    return out
 
 # -----------------------------
 # Sidebar
@@ -191,7 +289,7 @@ if not os.path.exists(csv_path):
 df = load_and_clean(csv_path)
 
 st.title("🧪 Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTF & Exceedance)")
-st.caption("RF + calibrated probs • tuned (s, γ) quick-hook • optional guarded prior-shift • per-part **exceedance** scaling • rolling 6–2–1 validation with Wilcoxon • MTTFscrap & reliability")
+st.caption("RF + calibrated probs • tuned (s, γ) quick-hook • optional guarded prior-shift • per-part **exceedance** scaling • rolling 6–2–1 validation with Wilcoxon • MTTFscrap & reliability • Historical & Predicted Pareto")
 
 tabs = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
 
@@ -205,9 +303,9 @@ with tabs[0]:
 
     # Train-only features at current threshold
     mtbf_train = compute_mtbf_on_train(df_train, thr_label)
-    default_mtbf = mtbf_train["mttf_scrap"].median()
+    default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
     part_freq_train = df_train["part_id"].value_counts(normalize=True)
-    default_freq = part_freq_train.median() if len(part_freq_train) else 0.0
+    default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
 
     df_train_f = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
     df_calib_f = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
@@ -253,11 +351,22 @@ with tabs[0]:
     with c4:
         cost_per_part = st.number_input("Cost per Part ($)", 0.01, 100.0, 0.01)
 
-    mttf_value = mtbf_train.loc[selected_part, "mttf_scrap"] if selected_part in mtbf_train.index else default_mtbf
+    mttf_value = float(mtbf_train.loc[selected_part, "mttf_scrap"]) if selected_part in mtbf_train.index else default_mtbf
     part_freq_value = float(part_freq_train.get(selected_part, default_freq))
-    input_row = pd.DataFrame([[quantity, weight, mttf_value, part_freq_value]], columns=FEATURES)
+
+    # Build an input row ALIGNED to FEATURES, including *_rate columns if in use
+    input_row = build_input_row_for_part(
+        selected_part=selected_part,
+        quantity=quantity,
+        weight=weight,
+        mttf_value=mttf_value,
+        part_freq_value=part_freq_value,
+        FEATURES=FEATURES,
+        df_train=df_train_f
+    )
 
     if st.button("Predict", type="primary", use_container_width=True):
+        # Base & adjusted predictions
         base_p = float(calibrated_model.predict_proba(input_row)[0, 1])
 
         adj_factor = float(part_scale.get(selected_part, 1.0)) ** float(gamma_star)
@@ -291,7 +400,7 @@ with tabs[0]:
         r3.metric("Failures / Runs", f"{failures} / {N}")
         st.caption("Reliability computed as R(1) = exp(−1/MTTFscrap). Threshold slider sets both labels and MTTF calculation.")
 
-        # Correct baseline: Historical exceedance prevalence at current threshold
+        # Historical exceedance prevalence at current threshold
         part_prev_card = float(part_prev_train.get(selected_part, np.nan)) if 'part_prev_train' in locals() else np.nan
         st.markdown(
             f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
@@ -304,6 +413,54 @@ with tabs[0]:
                 st.success("⬇️ Prediction below historical exceedance rate for this part.")
             else:
                 st.info("≈ Equal to historical exceedance rate.")
+
+        # -----------------------------
+        # NEW: Historical vs Predicted Pareto
+        # -----------------------------
+        st.subheader("Pareto of Defects — Historical vs Predicted (this run)")
+
+        rate_cols_in_model = [c for c in FEATURES if c.endswith("_rate")]
+        if not use_rate_cols or not rate_cols_in_model:
+            st.info("To view Predicted Pareto, enable **Include *_rate process features** in the sidebar and re-run.")
+        else:
+            # Historical Pareto for the selected part
+            hist_pareto = historical_defect_pareto_for_part(selected_part, df_train_f, k=TOP_K_PARETO)
+            hist_pareto = hist_pareto.rename(columns={"mean_rate": "hist_mean_rate"})
+
+            # Local (predicted) drivers for the current input
+            pred_pareto = local_defect_drivers(
+                calibrated_model=calibrated_model,
+                input_row=input_row,
+                FEATURES=FEATURES,
+                df_train=df_train_f,
+                strategy="p75",
+                k=TOP_K_PARETO
+            ).rename(columns={"delta_prob": "delta_prob_raw"})
+
+            # Left-right display
+            c_left, c_right = st.columns(2)
+            with c_left:
+                st.markdown("**Historical Pareto (Top defect rates for this part)**")
+                if len(hist_pareto):
+                    st.dataframe(hist_pareto.assign(
+                        hist_mean_rate=lambda d: d["hist_mean_rate"].round(4),
+                        share_%=lambda d: d["share_%"].round(2),
+                        cumulative_%=lambda d: d["cumulative_%"].round(1)
+                    ), use_container_width=True)
+                else:
+                    st.info("No historical defect rates found for this part in the training window.")
+
+            with c_right:
+                st.markdown("**Predicted Pareto (Local drivers of current prediction)**")
+                if len(pred_pareto):
+                    st.dataframe(pred_pareto.assign(
+                        delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2),  # show in pp
+                        share_%=lambda d: d["share_%"].round(2),
+                        cumulative_%=lambda d: d["cumulative_%"].round(1)
+                    ).rename(columns={"delta_prob_raw": "Δ prob (pp)"}), use_container_width=True)
+                    st.caption("For each defect-rate feature, we set it to the 75th percentile and measure the +∆ in the raw calibrated probability vs base. Larger +∆ means stronger risk driver **for this prediction**.")
+                else:
+                    st.info("Predicted Pareto unavailable (no *_rate features in model or all deltas <= 0).")
 
     # Diagnostics
     st.subheader("Model Diagnostics")
@@ -338,9 +495,9 @@ with tabs[1]:
                     start_date += relativedelta(months=1); continue
 
                 mtbf_tr = compute_mtbf_on_train(train, thr_label)
-                default_mtbf = mtbf_tr["mttf_scrap"].median()
+                default_mtbf = float(mtbf_tr["mttf_scrap"].median()) if len(mtbf_tr) else 1.0
                 part_freq_tr = train["part_id"].value_counts(normalize=True)
-                default_freq = part_freq_tr.median() if len(part_freq_tr) else 0.0
+                default_freq = float(part_freq_tr.median()) if len(part_freq_tr) else 0.0
 
                 train_f = attach_train_features(train, mtbf_tr, part_freq_tr, default_mtbf, default_freq)
                 val_f   = attach_train_features(val,   mtbf_tr, part_freq_tr, default_mtbf, default_freq)
