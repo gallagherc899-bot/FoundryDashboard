@@ -707,7 +707,7 @@ with tabs[0]:
 
 
         
-    if not np.isnan(part_prev_card):
+        if not np.isnan(part_prev_card):
             if corrected_p > part_prev_card:
                 st.warning("⬆️ Prediction above historical exceedance rate for this part.")
             elif corrected_p < part_prev_card:
