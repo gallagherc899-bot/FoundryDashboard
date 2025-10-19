@@ -199,20 +199,10 @@ def show_pareto_tables(hist_pareto, pred_pareto):
 # streamlit_app.py
 # Run with: streamlit run streamlit_app.py
 
-import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-import os
-import numpy as np
-import pandas as pd
-import streamlit as st
 
-from dateutil.relativedelta import relativedelta
-from scipy.stats import wilcoxon
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import brier_score_loss, accuracy_score
 
 # -----------------------------
 # Page / constants
@@ -233,8 +223,6 @@ TOP_K_PARETO = 8
 # -----------------------------
 # Helpers
 # -----------------------------
-@st.cache_data(show_spinner=False)
-def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df.columns = (
         df.columns.str.strip()
@@ -265,7 +253,6 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
 # -----------------------------
 # Example Fixed Assign Block
 # -----------------------------
-def show_pareto_tables(hist_pareto, pred_pareto):
     st.dataframe(
         hist_pareto.assign(
             hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
@@ -290,20 +277,10 @@ def show_pareto_tables(hist_pareto, pred_pareto):
 # streamlit_app.py
 # Run with: streamlit run streamlit_app.py
 
-import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-import os
-import numpy as np
-import pandas as pd
-import streamlit as st
 
-from dateutil.relativedelta import relativedelta
-from scipy.stats import wilcoxon
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import brier_score_loss, accuracy_score
 
 # -----------------------------
 # Page / constants
@@ -324,8 +301,6 @@ TOP_K_PARETO = 8
 # -----------------------------
 # Helpers
 # -----------------------------
-@st.cache_data(show_spinner=False)
-def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df.columns = (
         df.columns.str.strip()
