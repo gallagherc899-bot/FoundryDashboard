@@ -45,6 +45,33 @@ X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 rf_post = RandomForestClassifier(random_state=42)
 rf_post.fit(X_resampled, y_resampled)
 
+# 🔁 Batch Prediction Across All Rows
+selected_model = rf_post  # or rf_pre if you want to compare both
+
+# Prepare input features
+df["input_part_id_encoded"] = LabelEncoder().fit_transform(df["part_id"])
+df["input_mttf_scrap"] = df["mttf_scrap"]
+
+batch_features = ["order_quantity", "piece_weight_lbs", "input_part_id_encoded", "input_mttf_scrap"]
+X_batch = df[batch_features]
+
+# Predict scrap probabilities
+df["predicted_scrap_probability"] = selected_model.predict_proba(X_batch)[:, 1]
+
+# Estimate expected scrap pieces and pounds
+df["expected_scrap_pieces"] = df["order_quantity"] * df["predicted_scrap_probability"]
+df["expected_scrap_pounds"] = df["expected_scrap_pieces"] * df["piece_weight_lbs"]
+
+# Estimate financial loss (adjust cost per pound if needed)
+cost_per_pound = 2.50
+df["expected_scrap_cost"] = df["expected_scrap_pounds"] * cost_per_pound
+
+# Optional: compare to actual scrap poundage
+df["actual_scrap_pounds"] = df["pieces_scrapped"] * df["piece_weight_lbs"]
+df["poundage_difference"] = df["actual_scrap_pounds"] - df["expected_scrap_pounds"]
+df["financial_savings"] = df["poundage_difference"] * cost_per_pound
+
+
 # Streamlit UI
 st.title("🧪 Foundry Scrap Risk & Reliability Dashboard")
 model_choice = st.radio("Select Model Version", ["Pre-SMOTE", "Post-SMOTE"])
