@@ -310,7 +310,7 @@ df.columns = (
 )
 needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
 missing = [c for c in needed if c not in df.columns]
-    if missing:
+if missing:
     raise ValueError(f"Missing column(s): {missing}")
 
 df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
