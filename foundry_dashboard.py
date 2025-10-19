@@ -695,7 +695,7 @@ with tabs[0]:
             f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
             f"{(part_prev_card*100 if not np.isnan(part_prev_card) else np.nan):.2f}%  ({N} runs)"
         )
-        if not np.isnan(part_prev_card):
+    if not np.isnan(part_prev_card):
             if corrected_p > part_prev_card:
                 st.warning("⬆️ Prediction above historical exceedance rate for this part.")
             elif corrected_p < part_prev_card:
@@ -703,9 +703,9 @@ with tabs[0]:
             else:
                 st.info("≈ Equal to historical exceedance rate.")
                 # --- Optional: 6–2–1 Rolling Validation (if enabled) ---
-if st.session_state.get("rolling_validation", False):
-    st.subheader("6–2–1 Rolling Validation Backtest")
-    try:
+    if st.session_state.get("rolling_validation", False):
+            st.subheader("6–2–1 Rolling Validation Backtest")
+            try:
         # Filter to selected part
         part_df = df_train[df_train["part_id"] == selected_part].sort_values("week")
 
