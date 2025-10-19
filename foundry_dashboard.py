@@ -707,14 +707,14 @@ with tabs[0]:
             st.subheader("6–2–1 Rolling Validation Backtest")
             try:
         # Filter to selected part
-        part_df = df_train[df_train["part_id"] == selected_part].sort_values("week")
+            part_df = df_train[df_train["part_id"] == selected_part].sort_values("week")
 
         # Set label threshold
-        part_df["label"] = (part_df["scrap%"] > thr_label).astype(int)
+            part_df["label"] = (part_df["scrap%"] > thr_label).astype(int)
 
         # Rolling validation logic: 6 training, 2 validation, 1 test
-        preds, labels = [], []
-        n = len(part_df)
+            preds, labels = [], []
+            n = len(part_df)
         for i in range(9, n):
             train = part_df.iloc[i-9:i-3]
             test = part_df.iloc[i]
