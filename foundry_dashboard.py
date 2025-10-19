@@ -354,10 +354,10 @@ mtbf["mttf_scrap"] = mtbf["mttf_scrap"].fillna(mtbf["total_runs"])
 return mtbf[["mttf_scrap"]]
 
 def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, default_freq):
-s = df_sub.merge(mtbf_train, on="part_id", how="left")
-s["mttf_scrap"] = s["mttf_scrap"].fillna(default_mtbf)
-s = s.merge(part_freq_train.rename("part_freq"), left_on="part_id", right_index=True, how="left")
-s["part_freq"] = s["part_freq"].fillna(default_freq)
+    s = df_sub.merge(mtbf_train, on="part_id", how="left")
+    s["mttf_scrap"] = s["mttf_scrap"].fillna(default_mtbf)
+    s = s.merge(part_freq_train.rename("part_freq"), left_on="part_id", right_index=True, how="left")
+    s["part_freq"] = s["part_freq"].fillna(default_freq)
 return s
 
 def make_xy(df, thr_label: float, use_rate_cols: bool):
