@@ -4,7 +4,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import confusion_matrix
 from imblearn.over_sampling import SMOTE
 
 # Load and clean data
@@ -30,29 +29,23 @@ features = ["order_quantity", "piece_weight_lbs", "part_id_encoded", "mttf_scrap
 X = df[features]
 y = (df["scrap%"] > initial_threshold).astype(int)
 
-# Train model with SMOTE
+# Train/test split
 X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
+
+# Apply SMOTE to training data
 smote = SMOTE(random_state=42)
 X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+
+# Train base model
 rf_model = RandomForestClassifier(random_state=42)
 rf_model.fit(X_resampled, y_resampled)
 
-# Ensure rf_model is trained
-rf_model.fit(X_resampled, y_resampled)
+# Calibrate with Platt scaling and Isotonic regression using 5-fold CV
+platt_model = CalibratedClassifierCV(base_estimator=rf_model, method='sigmoid', cv=5)
+platt_model.fit(X_train, y_train)
 
-# Check that X_test and y_test are valid
-assert X_test.shape[0] > 0 and y_test.shape[0] > 0, "Test data is empty or misaligned"
-
-# Calibrate using Platt scaling and Isotonic regression
-platt_model = CalibratedClassifierCV(rf_model, method='sigmoid', cv=5)
-platt_model.fit(X_test, y_test)
-
-isotonic_model = CalibratedClassifierCV(rf_model, method='isotonic', cv=5)
-isotonic_model.fit(X_test, y_test)
-
-
-isotonic_model = CalibratedClassifierCV(base_estimator=rf_model, method='isotonic', cv='prefit')
-isotonic_model.fit(X_test, y_test)
+isotonic_model = CalibratedClassifierCV(base_estimator=rf_model, method='isotonic', cv=5)
+isotonic_model.fit(X_train, y_train)
 
 # Predict probabilities
 df["original_scrap_probability"] = rf_model.predict_proba(X)[:, 1]
@@ -85,6 +78,7 @@ summary_cols = [
 ]
 
 summary = df[summary_cols].round(2)
+print("\n📊 Scrap Prediction Summary (First 20 Rows):")
 print(summary.head(20))
 
 # Total savings comparison
@@ -92,7 +86,7 @@ total_original = df["original_financial_savings"].sum()
 total_platt = df["platt_financial_savings"].sum()
 total_isotonic = df["isotonic_financial_savings"].sum()
 
-print("\nTotal Financial Impact Comparison:")
+print("\n💰 Total Financial Impact Comparison:")
 print(f"Original Model: ${total_original:,.2f}")
 print(f"Platt-Calibrated Model: ${total_platt:,.2f}")
 print(f"Isotonic-Calibrated Model: ${total_isotonic:,.2f}")
