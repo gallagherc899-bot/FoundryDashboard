@@ -48,11 +48,19 @@ st.sidebar.slider("Scrap % Threshold", 1.0, 15.0, step=0.1, key="scrap_threshold
 # Prior Shift Guard
 st.sidebar.slider("Prior Shift Guard", 0, 50, key="prior_shift_guard")
 
-# Include *_rate Features
-st.sidebar.checkbox("Include *_rate Features", key="include_rate_features")
+# Use temporary variables to force reactive updates
+include_rate_features = st.sidebar.checkbox(
+    "Include *_rate process features",
+    value=st.session_state.include_rate_features,
+    key="include_rate_features"
+)
 
-# Prior Shift
-st.sidebar.checkbox("Enable Prior Shift", key="prior_shift")
+prior_shift = st.sidebar.checkbox(
+    "Enable prior shift (validation → test)",
+    value=st.session_state.prior_shift,
+    key="prior_shift"
+)
+
 
 # Quick-Hook Toggle
 use_qh = st.sidebar.checkbox("Use manual quick-hook", key="use_quick_hook")
