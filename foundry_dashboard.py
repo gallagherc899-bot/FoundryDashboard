@@ -43,9 +43,9 @@ X_train, X_calib, y_train, y_calib = train_test_split(X_temp, y_temp, stratify=y
 # Train and calibrate model
 smote = SMOTE(random_state=42)
 X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
-rf_post = RandomForestClassifier(random_state=42)
-rf_post.fit(X_resampled, y_resampled)
-calibrated_model = CalibratedClassifierCV(estimator=rf_post, method='sigmoid', cv='prefit')
+rf_model = RandomForestClassifier(random_state=42)
+rf_model.fit(X_resampled, y_resampled)
+calibrated_model = CalibratedClassifierCV(estimator=rf_model, method='sigmoid', cv='prefit')
 calibrated_model.fit(X_calib, y_calib)
 
 # Optimized scrap prediction weights
@@ -67,22 +67,17 @@ st.title("🧪 Foundry Scrap Risk Dashboard")
 st.subheader("Scrap Risk Estimation")
 
 part_ids = sorted(df["part_id"].unique())
-part_id_options = ["New"] + [str(int(pid)) for pid in part_ids]
-selected_part = st.selectbox("Select Part ID", part_id_options)
+selected_part = st.selectbox("Select Part ID", part_ids)
 quantity = st.number_input("Order Quantity", min_value=1)
-weight = st.number_input("Piece Weight (lbs)", min_value=0.1)
-cost_per_part = st.number_input("Cost per Part ($)", min_value=0.01)
+weight = st.number_input("Piece Weight (lbs)", min_value=0.01, value=4.0)
+cost_per_part = st.number_input("Cost per Part ($)", min_value=0.01, value=0.01)
 
 if st.button("Predict Scrap Risk"):
-    part_known = selected_part != "New"
-    part_id_input = int(float(selected_part)) if part_known else -1
-    mttf_value = mtbf_df.loc[part_id_input, "mttf_scrap"] if part_known and part_id_input in mtbf_df.index else df["mttf_scrap"].mean()
-    part_encoded = le.transform([part_id_input])[0] if part_known else 0
+    part_id_input = int(float(selected_part))
+    mttf_value = mtbf_df.loc[part_id_input, "mttf_scrap"] if part_id_input in mtbf_df.index else 1.0
 
-    input_data = pd.DataFrame([[quantity, weight, part_encoded, mttf_value]], columns=features)
-    predicted_class = calibrated_model.predict(input_data)[0]
+    input_data = pd.DataFrame([[quantity, weight, le.transform([part_id_input])[0], mttf_value]], columns=features)
     predicted_proba = calibrated_model.predict_proba(input_data)[0][1]
-
     expected_scrap_count = round(predicted_proba * quantity)
     expected_loss = round(expected_scrap_count * cost_per_part, 2)
 
@@ -92,7 +87,7 @@ if st.button("Predict Scrap Risk"):
 
     # SHAP analysis
     try:
-        explainer = shap.TreeExplainer(calibrated_model.base_estimator)
+        explainer = shap.TreeExplainer(rf_model)
         shap_val = explainer.shap_values(input_data)[1][0]
         shap_df = pd.DataFrame({
             'Feature': features,
@@ -100,9 +95,12 @@ if st.button("Predict Scrap Risk"):
             'Impact': np.abs(shap_val)
         }).sort_values(by="Impact", ascending=False)
 
-        st.subheader("Top Risk Drivers")
-        for i, row in shap_df.iterrows():
-            direction = "↑" if row['SHAP Value'] > 0 else "↓"
-            st.write(f"- {row['Feature']}: {round(row['Impact'], 3)} ({direction})")
+        st.subheader("SHAP Analysis")
+        st.dataframe(shap_df)
+
     except Exception as e:
-        st.error(f"SHAP analysis failed: {e}")
+        st.warning(f"SHAP analysis failed: {e}")
+
+# Show Benchmark Table
+st.subheader("🔍 Benchmark Scrap Prediction Table")
+st.dataframe(benchmark_df)
