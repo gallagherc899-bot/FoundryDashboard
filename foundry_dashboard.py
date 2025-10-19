@@ -11,28 +11,25 @@ import streamlit as st
 
 from dateutil.relativedelta import relativedelta
 from scipy.stats import wilcoxon
-
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss, accuracy_score
 
 # -----------------------------
-# Configuration
+# Page & defaults
 # -----------------------------
+st.set_page_config(page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTF)", layout="wide")
+
 RANDOM_STATE = 42
-INITIAL_THRESHOLD = 5.0        # label: scrap% > 5
-TRAIN_FRAC = 0.60
-CALIB_FRAC = 0.20              # test = remainder
 DEFAULT_ESTIMATORS = 150
 MIN_SAMPLES_LEAF = 2
-S_GRID = np.linspace(0.6, 1.2, 13)     # {0.60,...,1.20}
-GAMMA_GRID = np.linspace(0.5, 1.2, 15) # {0.50,...,1.20}
 
-st.set_page_config(page_title="Foundry Scrap Risk Dashboard (Validated)", layout="wide")
+S_GRID = np.linspace(0.6, 1.2, 13)      # {0.60,...,1.20}
+GAMMA_GRID = np.linspace(0.5, 1.2, 15)  # {0.50,...,1.20}
 
-# =========================================================
-# Utilities
-# =========================================================
+# -----------------------------
+# Helpers
+# -----------------------------
 @st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
@@ -45,43 +42,33 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         .str.replace("#", "num", regex=False)
     )
     needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing column(s): {missing}")
-
+    miss = [c for c in needed if c not in df.columns]
+    if miss:
+        raise ValueError(f"Missing column(s): {miss}")
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df = df.dropna(subset=needed).copy()
-
     for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
-
-    # Best-effort pieces_scrapped if needed
     if "pieces_scrapped" not in df.columns:
-        df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]).astype(int)
-
+        df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0)/100.0)*df["order_quantity"]).astype(int)
     df = df.sort_values("week_ending").reset_index(drop=True)
     return df
 
-def time_split(df: pd.DataFrame, train_frac=TRAIN_FRAC, calib_frac=CALIB_FRAC):
-    """Chronological split with part holdout across splits (no leakage)."""
+def time_split(df: pd.DataFrame, train_frac=0.60, calib_frac=0.20):
     n = len(df)
-    train_end = int(train_frac * n)
-    calib_end = int((train_frac + calib_frac) * n)
-
-    df_train = df.iloc[:train_end].copy()
-    df_calib = df.iloc[train_end:calib_end].copy()
-    df_test  = df.iloc[calib_end:].copy()
-
-    # Disjoint parts
+    t_end = int(train_frac * n)
+    c_end = int((train_frac + calib_frac) * n)
+    df_train = df.iloc[:t_end].copy()
+    df_calib = df.iloc[t_end:c_end].copy()
+    df_test  = df.iloc[c_end:].copy()
     train_parts = set(df_train.part_id.unique())
     df_calib = df_calib[~df_calib.part_id.isin(train_parts)].copy()
     calib_parts = set(df_calib.part_id.unique())
     df_test  = df_test[~df_test.part_id.isin(train_parts.union(calib_parts))].copy()
-
     return df_train, df_calib, df_test
 
-def compute_mtbf_on_train(df_train: pd.DataFrame, thr=INITIAL_THRESHOLD) -> pd.DataFrame:
+def compute_mtbf_on_train(df_train: pd.DataFrame, thr: float) -> pd.DataFrame:
     t = df_train.copy()
     t["scrap_flag"] = (t["scrap%"] > thr).astype(int)
     mtbf = t.groupby("part_id").agg(total_runs=("scrap%", "count"),
@@ -97,16 +84,16 @@ def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, def
     s["part_freq"] = s["part_freq"].fillna(default_freq)
     return s
 
-def make_xy(df, use_rate_cols=False):
+def make_xy(df, thr_label: float, use_rate_cols: bool):
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
     if use_rate_cols:
         feats += [c for c in df.columns if c.endswith("_rate")]
     X = df[feats].copy()
-    y = (df["scrap%"] > INITIAL_THRESHOLD).astype(int)
+    y = (df["scrap%"] > thr_label).astype(int)
     return X, y, feats
 
 @st.cache_resource(show_spinner=True)
-def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators=DEFAULT_ESTIMATORS):
+def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
     rf = RandomForestClassifier(
         n_estimators=n_estimators,
         min_samples_leaf=MIN_SAMPLES_LEAF,
@@ -114,7 +101,6 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators=DEFAULT
         random_state=RANDOM_STATE,
         n_jobs=-1
     ).fit(X_train, y_train)
-
     has_both = (y_calib.sum() > 0) and (y_calib.sum() < len(y_calib))
     method = "isotonic" if has_both and len(y_calib) > 500 else "sigmoid"
     try:
@@ -124,31 +110,25 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators=DEFAULT
         method = "sigmoid"
     return rf, cal, method
 
-# -----------------------------
-# Part baseline / scaling & quick-hook tuning
-# -----------------------------
-def compute_part_baselines(df_train):
-    """Per-part baseline prevalence and scale (clipped at 25%)."""
-    part_baseline = (df_train.groupby("part_id")["scrap%"].mean() / 100.0).clip(upper=0.25)
-    global_mean = part_baseline.mean() if len(part_baseline) else 1.0
-    part_scale = (part_baseline / (global_mean if global_mean > 0 else 1.0)).fillna(1.0)
-    return part_baseline, part_scale, global_mean
+def compute_part_baselines(df_train: pd.DataFrame):
+    part_baseline = (df_train.groupby("part_id")["scrap%"].mean()/100.0).clip(upper=0.25)
+    gmean = part_baseline.mean() if len(part_baseline) else 1.0
+    part_scale = (part_baseline / (gmean if gmean>0 else 1.0)).fillna(1.0)
+    return part_baseline, part_scale, gmean
 
-def tune_s_gamma_on_validation(p_val_raw: np.ndarray, y_val: np.ndarray, part_ids_val: pd.Series, part_scale: pd.Series,
+def tune_s_gamma_on_validation(p_val_raw, y_val, part_ids_val, part_scale,
                                s_grid=S_GRID, gamma_grid=GAMMA_GRID):
-    """Find (s, gamma) minimizing Brier on validation for: p_adj = p_raw * (s * part_scale(part)^gamma)."""
     ps = part_scale.reindex(part_ids_val).fillna(1.0).to_numpy(dtype=float)
     best = (np.inf, 1.0, 1.0)
     for s in s_grid:
         for g in gamma_grid:
-            p_adj = np.clip(p_val_raw * (s * (ps ** g)), 0, 1)
+            p_adj = np.clip(p_val_raw * (s * (ps**g)), 0, 1)
             score = brier_score_loss(y_val, p_adj)
             if score < best[0]:
                 best = (score, s, g)
     return {"brier_val": best[0], "s": best[1], "gamma": best[2]}
 
 def prior_shift_logit(p_raw, src_prev, tgt_prev):
-    """Saerens–Latinne–Decaestecker prior correction on logits."""
     p = np.clip(p_raw, 1e-6, 1-1e-6)
     logit = np.log(p/(1-p))
     delta = np.log(np.clip(tgt_prev,1e-6,1-1e-6)/np.clip(1-tgt_prev,1e-6,1)) - \
@@ -157,136 +137,38 @@ def prior_shift_logit(p_raw, src_prev, tgt_prev):
     return np.clip(p_adj, 1e-6, 1-1e-6)
 
 # -----------------------------
-# Rolling 6–2–1 evaluator used in Validation tab
+# Sidebar
 # -----------------------------
-@st.cache_data(show_spinner=True)
-def rolling_eval(df: pd.DataFrame,
-                 use_rate_cols: bool,
-                 enable_prior_shift: bool,
-                 n_estimators: int,
-                 train_win_months=6, val_win_months=2, test_win_months=1):
-    rows = []
-    start_date, end_date = df["week_ending"].min(), df["week_ending"].max()
+st.sidebar.header("Data & Model")
+csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
+n_estimators = st.sidebar.slider("RandomForest Trees", 80, 600, DEFAULT_ESTIMATORS, 20)
 
-    while start_date + relativedelta(months=(train_win_months + val_win_months + test_win_months)) <= end_date:
-        train_end = start_date + relativedelta(months=train_win_months)
-        val_end   = train_end + relativedelta(months=val_win_months)
-        test_end  = val_end   + relativedelta(months=test_win_months)
+st.sidebar.header("Label & MTTF")
+thr_label = st.sidebar.slider("Scrap % Threshold (label & MTTF)", 1.0, 15.0, 5.0, 0.5)
 
-        train = df[(df.week_ending >= start_date) & (df.week_ending < train_end)].copy()
-        val   = df[(df.week_ending >= train_end) & (df.week_ending < val_end)].copy()
-        test  = df[(df.week_ending >= val_end) & (df.week_ending < test_end)].copy()
+st.sidebar.header("Features & Drift")
+use_rate_cols = st.sidebar.checkbox("Include *_rate process features", value=False)
+enable_prior_shift = st.sidebar.checkbox("Enable prior shift (validation ➜ test)", value=True)
 
-        if len(train) < 50 or len(test) < 10:
-            start_date += relativedelta(months=1)
-            continue
+st.sidebar.header("Quick-Hook Override")
+use_manual_hook = st.sidebar.checkbox("Use manual quick-hook", value=False)
+s_manual = st.sidebar.slider("Manual s", 0.60, 1.20, 1.00, 0.01)
+gamma_manual = st.sidebar.slider("Manual γ", 0.50, 1.20, 0.50, 0.01)
 
-        # Train-only features
-        mtbf_tr = compute_mtbf_on_train(train)
-        default_mtbf = mtbf_tr["mttf_scrap"].median()
-        part_freq_tr = train["part_id"].value_counts(normalize=True)
-        default_freq = part_freq_tr.median() if len(part_freq_tr) else 0.0
-
-        train_f = attach_train_features(train, mtbf_tr, part_freq_tr, default_mtbf, default_freq)
-        val_f   = attach_train_features(val,   mtbf_tr, part_freq_tr, default_mtbf, default_freq)
-        test_f  = attach_train_features(test,  mtbf_tr, part_freq_tr, default_mtbf, default_freq)
-
-        X_tr, y_tr, feats = make_xy(train_f, use_rate_cols)
-        X_va, y_va, _     = make_xy(val_f,   use_rate_cols)
-        X_te, y_te, _     = make_xy(test_f,  use_rate_cols)
-
-        base = RandomForestClassifier(
-            n_estimators=n_estimators,
-            min_samples_leaf=MIN_SAMPLES_LEAF,
-            class_weight="balanced",
-            random_state=RANDOM_STATE,
-            n_jobs=-1
-        )
-        X_calibfit = pd.concat([X_tr, X_va], axis=0)
-        y_calibfit = pd.concat([y_tr, y_va], axis=0)
-        cal = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=3).fit(X_calibfit, y_calibfit)
-
-        p_val_raw  = cal.predict_proba(X_va)[:, 1] if len(X_va) else np.array([])
-        p_test_raw = cal.predict_proba(X_te)[:, 1] if len(X_te) else np.array([])
-
-        if enable_prior_shift and len(p_val_raw) and len(p_test_raw):
-            prev_src = float(np.clip(p_val_raw.mean(), 1e-6, 1-1e-6))
-            prev_tgt = float(np.clip((test_f["scrap%"] > INITIAL_THRESHOLD).mean(), 1e-6, 1-1e-6))
-            p_test_raw = prior_shift_logit(p_test_raw, prev_src, prev_tgt)
-
-        part_baseline, part_scale, _ = compute_part_baselines(train)
-        tune = tune_s_gamma_on_validation(p_val_raw, y_va, val_f["part_id"], part_scale)
-        s_star, g_star = tune["s"], tune["gamma"]
-
-        pid_test = test_f["part_id"].to_numpy()
-        ps_test  = part_scale.reindex(pid_test).fillna(1.0).to_numpy(dtype=float)
-        p_test_adj = np.clip(p_test_raw * (s_star * (ps_test ** g_star)), 0, 1)
-
-        actual_prev = float((test_f["scrap%"] > INITIAL_THRESHOLD).mean())
-        brier_raw   = brier_score_loss(y_te, p_test_raw) if len(y_te) else np.nan
-        acc_raw     = accuracy_score(y_te, p_test_raw > 0.5) if len(y_te) else np.nan
-
-        rows.append({
-            "window_start": start_date.date(),
-            "train_rows": len(train),
-            "test_rows": len(test),
-            "s_tuned": round(s_star, 2),
-            "gamma_tuned": round(g_star, 2),
-            "actual_mean": round(actual_prev * 100, 2),
-            "pred_mean_raw": round(float(np.mean(p_test_raw))*100, 2),
-            "pred_mean_adj": round(float(np.mean(p_test_adj))*100, 2),
-            "brier_raw": round(brier_raw, 4) if not np.isnan(brier_raw) else np.nan,
-            "accuracy_raw": round(acc_raw, 3) if not np.isnan(acc_raw) else np.nan,
-        })
-
-        start_date += relativedelta(months=1)
-
-    res = pd.DataFrame(rows)
-    return res
-
-def wilcoxon_summary(results_df: pd.DataFrame, use_adjusted=True):
-    """Build multi-threshold Wilcoxon summary for mean_gain."""
-    if results_df.empty:
-        return None, None
-    pred_col = "pred_mean_adj" if use_adjusted else "pred_mean_raw"
-    actual = results_df["actual_mean"].to_numpy(dtype=float)
-    pred   = results_df[pred_col].to_numpy(dtype=float)
-    rel_err = np.where(actual > 0, np.abs(pred - actual) / actual,
-                       np.where(pred == 0, 0.0, 1.0))
-    gain = np.clip(1.0 - rel_err, 0.0, 1.0)
-
-    thresholds = [0.50, 0.80, 0.90]
-    summary_rows = []
-    if len(gain) >= 10:
-        for th in thresholds:
-            stat, p_value = wilcoxon(gain - th, alternative="greater")
-            within = (gain >= th).mean()*100
-            summary_rows.append([th, gain.mean(), np.median(gain), within, stat, p_value, "✅" if p_value < 0.05 else "❌"])
-    summary_df = pd.DataFrame(summary_rows, columns=["Threshold", "Mean Gain", "Median Gain",
-                                                     "% Windows ≥Threshold", "Statistic", "p-value", "Significant?"])
-    return gain, summary_df
-
-# =========================================================
-# UI
-# =========================================================
-st.title("🧪 Foundry Scrap Risk Dashboard — Validated Quick-Hook")
-st.caption("RF + calibrated probs • tuned (s, γ) quick-hook • optional prior shift • rolling 6–2–1 validation with Wilcoxon tests")
-
-with st.sidebar:
-    st.header("Data & Model")
-    csv_path = st.text_input("Path to CSV", value="anonymized_parts.csv")
-    n_estimators = st.slider("RandomForest Trees", 80, 600, DEFAULT_ESTIMATORS, 20)
-    use_rate_cols = st.checkbox("Include *_rate process features", value=False)
-    enable_prior_shift = st.checkbox("Enable prior shift (val→test)", value=True)
-
-    st.header("Validation Controls")
-    run_validation = st.checkbox("Run 6–2–1 rolling validation (slower)", value=False)
+st.sidebar.header("Validation Controls")
+run_validation = st.sidebar.checkbox("Run 6–2–1 rolling validation (slower)", value=False)
 
 if not os.path.exists(csv_path):
     st.error("CSV not found.")
     st.stop()
 
+# -----------------------------
+# Load data
+# -----------------------------
 df = load_and_clean(csv_path)
+
+st.title("🧪 Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTF)")
+st.caption("RF + calibrated probs • tuned (s, γ) quick-hook • optional prior shift • rolling 6–2–1 validation with Wilcoxon tests • MTTFscrap & reliability")
 
 tabs = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
 
@@ -294,53 +176,56 @@ tabs = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
 # TAB 1: Predict
 # -----------------------------
 with tabs[0]:
-    st.subheader("Prediction (single-fit with validation-tuned quick-hook)")
+    st.subheader("Prediction (validation-tuned quick-hook; threshold affects labels & MTTF)")
 
-    # Split
     df_train, df_calib, df_test = time_split(df)
 
-    # Train-only features
-    mtbf_train = compute_mtbf_on_train(df_train)
+    # train-only features at chosen threshold
+    mtbf_train = compute_mtbf_on_train(df_train, thr_label)
     default_mtbf = mtbf_train["mttf_scrap"].median()
     part_freq_train = df_train["part_id"].value_counts(normalize=True)
     default_freq = part_freq_train.median() if len(part_freq_train) else 0.0
 
-    # Attach features
     df_train_f = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
     df_calib_f = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
     df_test_f  = attach_train_features(df_test,  mtbf_train, part_freq_train, default_mtbf, default_freq)
 
-    X_train, y_train, FEATURES = make_xy(df_train_f, use_rate_cols)
-    X_calib, y_calib, _ = make_xy(df_calib_f, use_rate_cols)
-    X_test,  y_test,  _ = make_xy(df_test_f,  use_rate_cols)
+    X_train, y_train, FEATURES = make_xy(df_train_f, thr_label, use_rate_cols)
+    X_calib, y_calib, _        = make_xy(df_calib_f, thr_label, use_rate_cols)
+    X_test,  y_test,  _        = make_xy(df_test_f,  thr_label, use_rate_cols)
 
     rf_model, calibrated_model, calib_method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators)
+
     p_calib = calibrated_model.predict_proba(X_calib)[:, 1] if len(X_calib) else np.array([])
     p_test  = calibrated_model.predict_proba(X_test)[:, 1]  if len(X_test) else np.array([])
 
-    # Optional prior-shift for diagnostics set (test)
+    # optional prior shift (diagnostic set)
     if enable_prior_shift and len(p_calib) and len(p_test):
         prev_src = float(np.clip(p_calib.mean(), 1e-6, 1-1e-6))
-        prev_tgt = float(np.clip((df_test_f["scrap%"] > INITIAL_THRESHOLD).mean(), 1e-6, 1-1e-6))
+        prev_tgt = float(np.clip((df_test_f["scrap%"] > thr_label).mean(), 1e-6, 1-1e-6))
         p_test = prior_shift_logit(p_test, prev_src, prev_tgt)
     else:
         prev_src, prev_tgt = np.nan, np.nan
 
-    # Tune quick-hook (s, γ) on calibration
+    # quick-hook tuning on calibration
     part_baseline, part_scale, global_mean = compute_part_baselines(df_train)
-    tune = tune_s_gamma_on_validation(p_calib, y_calib, df_calib_f["part_id"], part_scale)
-    s_star, gamma_star = tune["s"], tune["gamma"]
+    tune = tune_s_gamma_on_validation(p_calib, y_calib, df_calib_f["part_id"], part_scale) if len(p_calib) else {"s":1.0,"gamma":1.0}
+    s_star, gamma_star = float(tune["s"]), float(tune["gamma"])
+
+    # manual override if selected
+    if use_manual_hook:
+        s_star, gamma_star = float(s_manual), float(gamma_manual)
 
     # UI inputs
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
         part_ids = sorted(df["part_id"].unique())
         selected_part = st.selectbox("Select Part ID", part_ids)
-    with col2:
+    with c2:
         quantity = st.number_input("Order Quantity", 1, 100000, 351)
-    with col3:
+    with c3:
         weight = st.number_input("Piece Weight (lbs)", 0.1, 100.0, 4.0)
-    with col4:
+    with c4:
         cost_per_part = st.number_input("Cost per Part ($)", 0.01, 100.0, 0.01)
 
     mttf_value = mtbf_train.loc[selected_part, "mttf_scrap"] if selected_part in mtbf_train.index else default_mtbf
@@ -350,28 +235,43 @@ with tabs[0]:
     if st.button("Predict", type="primary", use_container_width=True):
         base_p = float(calibrated_model.predict_proba(input_row)[0, 1])
 
-        # Apply tuned quick-hook: p_adj = p_raw × (s × part_scale^γ)
         adj_factor = float(part_scale.get(selected_part, 1.0)) ** float(gamma_star)
         corrected_p = np.clip(base_p * float(s_star) * adj_factor, 0, 1)
 
         expected_scrap_count = int(round(corrected_p * quantity))
         expected_loss = round(expected_scrap_count * cost_per_part, 2)
 
-        # Historical context
+        # MTTFscrap & reliability at chosen threshold
+        part_df = df_train[df_train["part_id"] == selected_part]
+        N = len(part_df)
+        failures = int((part_df["scrap%"] > thr_label).sum())
+        mttf_scrap = (N / failures) if failures > 0 else float("inf")
+        lam = 0.0 if mttf_scrap == float("inf") else 1.0 / mttf_scrap
+        reliability_next_run = np.exp(-lam * 1.0) if lam > 0 else 1.0
+
+        # historical mean (for context only)
         hist_avg = float(part_baseline.get(selected_part, np.nan))
-        n_obs = int(df_train[df_train["part_id"] == selected_part].shape[0])
+        n_obs = int(N)
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Predicted Scrap Risk (raw)", f"{base_p*100:.2f}%")
-        m2.metric("Adjusted Scrap Risk (s, γ, part)", f"{corrected_p*100:.2f}%")
+        m2.metric("Adjusted Scrap Risk (s·part^γ)", f"{corrected_p*100:.2f}%")
         m3.metric("Expected Scrap Count", f"{expected_scrap_count} parts")
         m4.metric("Expected Loss", f"${expected_loss:.2f}")
 
-        st.markdown(f"**Historical Scrap Avg (part):** {hist_avg*100:.2f}%  ({n_obs} runs)")
         st.markdown(f"**Quick-hook params:** s = {s_star:.2f}, γ = {gamma_star:.2f}  | Calibration: **{calib_method}**")
-        if enable_prior_shift:
-            st.caption(f"Prior shift applied: val prev = {prev_src*100:.2f}%, test prev = {prev_tgt*100:.2f}%")
+        if enable_prior_shift and not np.isnan(prev_src):
+            st.caption(f"Prior shift: val prev = {prev_src*100:.2f}%, test prev = {prev_tgt*100:.2f}%")
 
+        st.subheader("Reliability context (at current threshold)")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("MTTFscrap", "∞ runs" if mttf_scrap == float("inf") else f"{mttf_scrap:.2f} runs")
+        r2.metric("Reliability (next run)", f"{reliability_next_run*100:.2f}%")
+        r3.metric("Failures / Runs", f"{failures} / {N}")
+
+        st.caption("Reliability computed as R(1) = exp(-1/MTTFscrap). Threshold slider above sets both labels and MTTF calculation.")
+
+        st.markdown(f"**Historical Scrap Avg (part):** {hist_avg*100:.2f}%  ({n_obs} runs)")
         if not np.isnan(hist_avg):
             if corrected_p > hist_avg:
                 st.warning("⬆️ Prediction above historical average for this part.")
@@ -387,77 +287,119 @@ with tabs[0]:
     except Exception:
         test_brier = np.nan
     st.write(f"Calibration: **{calib_method}**, Test Brier: {test_brier:.4f}")
-    st.caption("Adjusted risk uses validation-tuned quick-hook (s, γ) and optional prior shift. Historical part mean shown for context.")
+    st.caption("Adjusted risk uses validation-tuned quick-hook (s, γ) with optional prior shift. MTTFscrap/reliability reflect the current threshold.")
 
 # -----------------------------
 # TAB 2: Validation (6–2–1 + Wilcoxon)
 # -----------------------------
 with tabs[1]:
     st.subheader("Rolling 6–2–1 Backtest with Wilcoxon Significance")
-
     if run_validation:
-        with st.spinner("Running rolling evaluation (this can take a minute)..."):
-            results_df = rolling_eval(
-                df=df,
-                use_rate_cols=use_rate_cols,
-                enable_prior_shift=enable_prior_shift,
-                n_estimators=n_estimators,
-                train_win_months=6, val_win_months=2, test_win_months=1
-            )
+        with st.spinner("Running rolling evaluation…"):
+            rows = []
+            start_date, end_date = df["week_ending"].min(), df["week_ending"].max()
+            while start_date + relativedelta(months=(6+2+1)) <= end_date:
+                train_end = start_date + relativedelta(months=6)
+                val_end   = train_end + relativedelta(months=2)
+                test_end  = val_end   + relativedelta(months=1)
 
-        if results_df.empty:
-            st.warning("No valid rolling windows found with current settings.")
-        else:
-            st.dataframe(results_df, use_container_width=True)
+                train = df[(df.week_ending >= start_date) & (df.week_ending < train_end)].copy()
+                val   = df[(df.week_ending >= train_end) & (df.week_ending < val_end)].copy()
+                test  = df[(df.week_ending >= val_end) & (df.week_ending < test_end)].copy()
 
-            # Wilcoxon summaries (adjusted and raw)
-            gain_adj, summary_adj = wilcoxon_summary(results_df, use_adjusted=True)
-            gain_raw, summary_raw = wilcoxon_summary(results_df, use_adjusted=False)
+                if len(train) < 50 or len(test) < 10:
+                    start_date += relativedelta(months=1); continue
 
-            colA, colB = st.columns(2)
-            with colA:
-                st.markdown("**Wilcoxon Summary — Adjusted (tuned s, γ)**")
-                if summary_adj is not None and not summary_adj.empty:
-                    st.dataframe(summary_adj, use_container_width=True)
-                else:
-                    st.info("Not enough windows for Wilcoxon test (need ≥10).")
-            with colB:
-                st.markdown("**Wilcoxon Summary — Raw (calibrated probs)**")
-                if summary_raw is not None and not summary_raw.empty:
-                    st.dataframe(summary_raw, use_container_width=True)
-                else:
-                    st.info("Not enough windows for Wilcoxon test (need ≥10).")
+                mtbf_tr = compute_mtbf_on_train(train, thr_label)
+                default_mtbf = mtbf_tr["mttf_scrap"].median()
+                part_freq_tr = train["part_id"].value_counts(normalize=True)
+                default_freq = part_freq_tr.median() if len(part_freq_tr) else 0.0
 
-            # Compact plot (matplotlib)
-            import matplotlib.pyplot as plt
-            if summary_adj is not None and not summary_adj.empty:
-                fig = plt.figure(figsize=(7,4.5))
-                x = summary_adj["Threshold"]*100
-                y = summary_adj["% Windows ≥Threshold"]
-                plt.plot(x, y, marker='o', linewidth=2, label="% Windows ≥ Threshold (Adj)")
-                plt.axhline(50, linestyle='--', alpha=0.5, label="50% reference")
-                plt.axvline(80, linestyle='--', alpha=0.7, label="80% cutoff")
-                plt.axvline(90, linestyle='--', alpha=0.7, label="90% target")
-                for i, row in summary_adj.iterrows():
-                    mark = "✓" if row["Significant?"] == "✅" else "✗"
-                    plt.text(row["Threshold"]*100, row["% Windows ≥Threshold"]+2, mark, ha="center")
-                plt.title("Predictive Reliability vs Accuracy Thresholds (Adjusted)")
-                plt.xlabel("Accuracy Threshold (%)")
-                plt.ylabel("Windows Meeting Threshold (%)")
-                plt.grid(alpha=0.3)
-                plt.legend()
-                st.pyplot(fig)
+                train_f = attach_train_features(train, mtbf_tr, part_freq_tr, default_mtbf, default_freq)
+                val_f   = attach_train_features(val,   mtbf_tr, part_freq_tr, default_mtbf, default_freq)
+                test_f  = attach_train_features(test,  mtbf_tr, part_freq_tr, default_mtbf, default_freq)
 
-            # Save CSVs
-            out1 = "rolling_window_results.csv"
-            out2 = "rolling_window_threshold_summary_adj.csv"
-            out3 = "rolling_window_threshold_summary_raw.csv"
-            try:
-                results_df.to_csv(out1, index=False)
-                if summary_adj is not None: summary_adj.to_csv(out2, index=False)
-                if summary_raw is not None: summary_raw.to_csv(out3, index=False)
-                st.caption(f"Saved: {out1} | {out2} | {out3}")
-            except Exception:
-                pass
+                X_tr, y_tr, _ = make_xy(train_f, thr_label, use_rate_cols)
+                X_va, y_va, _ = make_xy(val_f,   thr_label, use_rate_cols)
+                X_te, y_te, _ = make_xy(test_f,  thr_label, use_rate_cols)
+
+                base = RandomForestClassifier(
+                    n_estimators=n_estimators,
+                    min_samples_leaf=MIN_SAMPLES_LEAF,
+                    class_weight="balanced",
+                    random_state=RANDOM_STATE,
+                    n_jobs=-1
+                )
+                X_calibfit = pd.concat([X_tr, X_va], axis=0)
+                y_calibfit = pd.concat([y_tr, y_va], axis=0)
+                cal = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=3).fit(X_calibfit, y_calibfit)
+
+                p_val_raw  = cal.predict_proba(X_va)[:, 1]
+                p_test_raw = cal.predict_proba(X_te)[:, 1]
+
+                if enable_prior_shift and len(p_val_raw) and len(p_test_raw):
+                    prev_src = float(np.clip(p_val_raw.mean(), 1e-6, 1-1e-6))
+                    prev_tgt = float(np.clip((test_f["scrap%"] > thr_label).mean(), 1e-6, 1-1e-6))
+                    p_test_raw = prior_shift_logit(p_test_raw, prev_src, prev_tgt)
+
+                part_baseline_win, part_scale_win, _ = compute_part_baselines(train)
+                tune = tune_s_gamma_on_validation(p_val_raw, y_va, val_f["part_id"], part_scale_win)
+                s_star, gamma_star = tune["s"], tune["gamma"]
+
+                pid_test = test_f["part_id"].to_numpy()
+                ps_test  = part_scale_win.reindex(pid_test).fillna(1.0).to_numpy(dtype=float)
+                p_test_adj = np.clip(p_test_raw * (s_star * (ps_test ** gamma_star)), 0, 1)
+
+                actual_prev = float((test_f["scrap%"] > thr_label).mean())
+                rows.append({
+                    "window_start": start_date.date(),
+                    "train_rows": len(train), "test_rows": len(test),
+                    "s_tuned": round(s_star,2), "gamma_tuned": round(gamma_star,2),
+                    "actual_mean": round(actual_prev*100,2),
+                    "pred_mean_raw": round(float(np.mean(p_test_raw))*100,2),
+                    "pred_mean_adj": round(float(np.mean(p_test_adj))*100,2),
+                    "brier_raw": round(brier_score_loss(y_te, p_test_raw),4),
+                    "accuracy_raw": round(accuracy_score(y_te, p_test_raw>0.5),3)
+                })
+                start_date += relativedelta(months=1)
+
+            results_df = pd.DataFrame(rows)
+            if results_df.empty:
+                st.warning("No valid rolling windows found.")
+            else:
+                st.dataframe(results_df, use_container_width=True)
+
+                # Wilcoxon summaries
+                def wilcoxon_summary(df, col):
+                    actual = df["actual_mean"].to_numpy(float)
+                    pred   = df[col].to_numpy(float)
+                    rel_err = np.where(actual>0, np.abs(pred-actual)/actual,
+                                       np.where(pred==0, 0.0, 1.0))
+                    gain = np.clip(1.0-rel_err, 0.0, 1.0)
+                    out=[]
+                    if len(gain)>=10:
+                        for th in [0.50, 0.80, 0.90]:
+                            stat, p = wilcoxon(gain-th, alternative="greater")
+                            out.append([th, gain.mean(), np.median(gain), (gain>=th).mean()*100, stat, p, "✅" if p<0.05 else "❌"])
+                    return pd.DataFrame(out, columns=["Threshold","Mean Gain","Median Gain","% Windows ≥Threshold","Statistic","p-value","Significant?"])
+
+                colA, colB = st.columns(2)
+                with colA:
+                    st.markdown("**Wilcoxon — Adjusted (s, γ)**")
+                    summ_adj = wilcoxon_summary(results_df, "pred_mean_adj")
+                    st.dataframe(summ_adj, use_container_width=True) if not summ_adj.empty else st.info("Need ≥10 windows.")
+                with colB:
+                    st.markdown("**Wilcoxon — Raw (calibrated)**")
+                    summ_raw = wilcoxon_summary(results_df, "pred_mean_raw")
+                    st.dataframe(summ_raw, use_container_width=True) if not summ_raw.empty else st.info("Need ≥10 windows.")
+
+                # Save CSVs
+                try:
+                    results_df.to_csv("rolling_window_results.csv", index=False)
+                    if not summ_adj.empty: summ_adj.to_csv("rolling_window_threshold_summary_adj.csv", index=False)
+                    if not summ_raw.empty: summ_raw.to_csv("rolling_window_threshold_summary_raw.csv", index=False)
+                    st.caption("Saved CSVs to working directory.")
+                except Exception:
+                    pass
     else:
-        st.info("Tick **Run 6–2–1 rolling validation (slower)** in the sidebar to compute windowed backtests and Wilcoxon tests.")
+        st.info("Tick **Run 6–2–1 rolling validation** in the sidebar to compute windows and Wilcoxon tests.")
