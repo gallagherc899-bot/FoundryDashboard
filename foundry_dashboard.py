@@ -382,7 +382,7 @@ has_both = (y_calib.sum() > 0) and (y_calib.sum() < len(y_calib))
 method = "isotonic" if has_both and len(y_calib) > 500 else "sigmoid"
 try:
     cal = CalibratedClassifierCV(estimator=rf, method=method, cv="prefit").fit(X_calib, y_calib)
-    except Exception:
+except Exception:
     cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv="prefit").fit(X_calib, y_calib)
     method = "sigmoid"
 return rf, cal, method
