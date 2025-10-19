@@ -28,70 +28,40 @@ DEFAULTS = {
     "include_rate_features": True
 }
 
-# --- Session State Initialization ---
-for key, val in DEFAULTS.items():
-    if key not in st.session_state:
+# --- Reset Function ---
+def reset_defaults():
+    for key, val in DEFAULTS.items():
         st.session_state[key] = val
 
 # --- Sidebar Controls ---
 st.sidebar.header("Dashboard Settings")
-
-# --- Reset Button Logic ---
-if "reset_triggered" not in st.session_state:
-    st.session_state["reset_triggered"] = False
-
-if st.sidebar.button("Reset to Recommended Defaults"):
-    for key, val in DEFAULTS.items():
-        st.session_state[key] = val
-    st.session_state["reset_triggered"] = True
-
-# Perform rerun after resetting state (safe trigger)
-if st.session_state["reset_triggered"]:
-    st.session_state["reset_triggered"] = False
-    st.experimental_rerun()
-
+st.sidebar.button("Reset to Recommended Defaults", on_click=reset_defaults)
 
 # Scrap Threshold
-st.sidebar.slider(
-    "Scrap % Threshold", 1.0, 15.0, key="scrap_threshold", step=0.1
-)
+st.sidebar.slider("Scrap % Threshold", 1.0, 15.0, key="scrap_threshold", step=0.1)
 
 # Prior Shift Guard
-st.sidebar.slider(
-    "Prior Shift Guard", 0, 50, key="prior_shift_guard"
-)
+st.sidebar.slider("Prior Shift Guard", 0, 50, key="prior_shift_guard")
 
 # Include *_rate Features
-st.sidebar.checkbox(
-    "Include *_rate Features", key="include_rate_features"
-)
+st.sidebar.checkbox("Include *_rate Features", key="include_rate_features")
 
 # Prior Shift
-st.sidebar.checkbox(
-    "Enable Prior Shift", key="prior_shift"
-)
+st.sidebar.checkbox("Enable Prior Shift", key="prior_shift")
 
 # Quick-Hook Toggle
-st.sidebar.checkbox(
-    "Use Manual Quick-Hook", key="use_quick_hook"
-)
+st.sidebar.checkbox("Use Manual Quick-Hook", key="use_quick_hook")
 
 # Manual Quick-Hook Sliders
-if st.session_state["use_quick_hook"]:
-    st.sidebar.slider(
-        "Manual s", 0.1, 2.0, key="manual_s", step=0.1
-    )
-    st.sidebar.slider(
-        "Manual γ", 0.1, 1.0, key="manual_gamma", step=0.05
-    )
+if st.session_state.get("use_quick_hook", False):
+    st.sidebar.slider("Manual s", 0.1, 2.0, key="manual_s", step=0.1)
+    st.sidebar.slider("Manual γ", 0.1, 1.0, key="manual_gamma", step=0.05)
 
 # Rolling Validation
-st.sidebar.checkbox(
-    "Run 6-2-1 Rolling Validation", key="rolling_validation"
-)
+st.sidebar.checkbox("Run 6-2-1 Rolling Validation", key="rolling_validation")
 
 # --- Use settings in the pipeline ---
-settings = {key: st.session_state[key] for key in DEFAULTS}
+settings = {key: st.session_state.get(key, DEFAULTS[key]) for key in DEFAULTS}
 
 # Now settings dict can be used downstream in your model and prediction logic
 
