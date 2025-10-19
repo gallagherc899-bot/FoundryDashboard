@@ -327,9 +327,9 @@ df = df.sort_values("week_ending").reset_index(drop=True)
 return df
 
 def time_split(df: pd.DataFrame, train_frac=0.60, calib_frac=0.20):
-n = len(df)
-t_end = int(train_frac * n)
-c_end = int((train_frac + calib_frac) * n)
+    n = len(df)
+    t_end = int(train_frac * n)
+    c_end = int((train_frac + calib_frac) * n)
 
 df_train = df.iloc[:t_end].copy()
 df_calib = df.iloc[t_end:c_end].copy()
