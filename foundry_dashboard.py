@@ -36,11 +36,20 @@ for key, val in DEFAULTS.items():
 # --- Sidebar Controls ---
 st.sidebar.header("Dashboard Settings")
 
-# Reset Toggle
+# --- Reset Button Logic ---
+if "reset_triggered" not in st.session_state:
+    st.session_state["reset_triggered"] = False
+
 if st.sidebar.button("Reset to Recommended Defaults"):
     for key, val in DEFAULTS.items():
         st.session_state[key] = val
-    st.experimental_rerun()  # Force UI refresh
+    st.session_state["reset_triggered"] = True
+
+# Perform rerun after resetting state (safe trigger)
+if st.session_state["reset_triggered"]:
+    st.session_state["reset_triggered"] = False
+    st.experimental_rerun()
+
 
 # Scrap Threshold
 st.sidebar.slider(
