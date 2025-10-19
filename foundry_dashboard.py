@@ -112,7 +112,7 @@ from sklearn.metrics import brier_score_loss, accuracy_score
 # Page / constants
 # -----------------------------
 st.set_page_config(
-    page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTF & Exceedance)",
+    page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTFscrap & Exceedance)",
     layout="wide"
 )
 
@@ -203,7 +203,7 @@ from sklearn.metrics import brier_score_loss, accuracy_score
 # Page / constants
 # -----------------------------
 st.set_page_config(
-    page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTF & Exceedance)",
+    page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTFscrap & Exceedance)",
     layout="wide"
 )
 
@@ -446,8 +446,8 @@ st.sidebar.header("Data & Model")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
 n_estimators = st.sidebar.slider("RandomForest Trees", 80, 600, DEFAULT_ESTIMATORS, 20)
 
-st.sidebar.header("Label & MTTF")
-thr_label = st.sidebar.slider("Scrap % Threshold (label & MTTF)", 1.0, 15.0, 5.0, 0.5)
+st.sidebar.header("Label & MTTFscrap")
+thr_label = st.sidebar.slider("Scrap % Threshold (label & MTTFscrap)", 1.0, 15.0, 5.0, 0.5)
 
 st.sidebar.header("Features & Drift")
 use_rate_cols = st.sidebar.checkbox("Include *_rate process features", value=False)
@@ -471,7 +471,7 @@ if not os.path.exists(csv_path):
 # -----------------------------
 df = load_and_clean(csv_path)
 
-st.title("🧪 Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTF & Exceedance)")
+st.title("🧪 Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTFscrap & Exceedance)")
 st.caption("RF + calibrated probs • tuned (s, γ) quick-hook • optional guarded prior-shift • per-part **exceedance** scaling • rolling 6–2–1 validation with Wilcoxon • MTTFscrap & reliability • Historical & Predicted Pareto")
 
 tabs = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
@@ -480,7 +480,7 @@ tabs = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
 # TAB 1: Predict
 # -----------------------------
 with tabs[0]:
-    st.subheader("Prediction (validation-tuned quick-hook; threshold drives labels & MTTF)")
+    st.subheader("Prediction (validation-tuned quick-hook; threshold drives labels & MTTFscrap)")
 
     df_train, df_calib, df_test = time_split(df)
 
