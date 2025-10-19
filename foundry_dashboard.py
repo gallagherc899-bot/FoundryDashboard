@@ -11,7 +11,7 @@ import shap
 import plotly.figure_factory as ff
 import matplotlib.pyplot as plt
 
-# Load and preprocess data
+# Load and clean data
 df = pd.read_csv("anonymized_parts.csv")
 df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replace("(", "", regex=False).str.replace(")", "", regex=False)
 df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
@@ -32,26 +32,26 @@ df = df.merge(mtbf_df[["mttf_scrap"]], on="part_id", how="left")
 le = LabelEncoder()
 df["part_id_encoded"] = le.fit_transform(df["part_id"])
 
-# Features and target
+# Define features and target
 features = ["order_quantity", "piece_weight_lbs", "part_id_encoded", "mttf_scrap"]
 X = df[features]
 y = (df["scrap%"] > initial_threshold).astype(int)
 
-# Train/test split
+# Split data
 X_temp, X_test, y_temp, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 X_train, X_calib, y_train, y_calib = train_test_split(X_temp, y_temp, stratify=y_temp, test_size=0.25, random_state=42)
 
-# Resample using SMOTE
+# SMOTE resampling
 smote = SMOTE(random_state=42)
 X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 
-# Train RandomForest
-rf_model = RandomForestClassifier(random_state=42)
-rf_model.fit(X_resampled, y_resampled)
-
-# Calibrate model (cv='prefit' requires pre-trained model)
-platt_model = CalibratedClassifierCV(base_estimator=rf_model, method='sigmoid', cv='prefit')
-platt_model.fit(X_calib, y_calib)
+# Train and calibrate model using internal cross-validation (no prefit)
+platt_model = CalibratedClassifierCV(
+    base_estimator=RandomForestClassifier(random_state=42),
+    method='sigmoid',
+    cv=3  # internal 3-fold CV
+)
+platt_model.fit(X_resampled, y_resampled)
 
 # Streamlit UI
 st.title("🧪 Foundry Scrap Risk & Reliability Dashboard")
@@ -105,9 +105,9 @@ if st.button("Predict Scrap Risk"):
     fig.update_layout(title='Confusion Matrix')
     st.plotly_chart(fig, use_container_width=True)
 
-    # SHAP explanation
-    st.subheader("🔍 Feature Importance (SHAP)")
-    explainer = shap.TreeExplainer(rf_model)
+    # SHAP interpretation
+    st.subheader("🔍 Feature Contributions (SHAP)")
+    explainer = shap.TreeExplainer(platt_model.base_estimator)
     shap_values = explainer.shap_values(input_data)
     shap_val = shap_values[1][0] if isinstance(shap_values, list) else shap_values[0]
     shap_df = pd.DataFrame({
