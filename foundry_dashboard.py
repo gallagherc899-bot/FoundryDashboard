@@ -143,32 +143,30 @@ TOP_K_PARETO = 8
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
-df = pd.read_csv(csv_path)
-df.columns = (
-    df.columns.str.strip()
-    .str.lower()
-    .str.replace(" ", "_")
-    .str.replace("(", "", regex=False)
-    .str.replace(")", "", regex=False)
-    .str.replace("#", "num", regex=False)
-)
-needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
-missing = [c for c in needed if c not in df.columns]
+    df = pd.read_csv(csv_path)
+    df.columns = (
+        df.columns.str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("(", "", regex=False)
+        .str.replace(")", "", regex=False)
+        .str.replace("#", "num", regex=False)
+    )
+
+    needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
+    missing = [c for c in needed if c not in df.columns]
     if missing:
-    raise ValueError(f"Missing column(s): {missing}")
+        raise ValueError(f"Missing column(s): {missing}")
 
-df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-df = df.dropna(subset=needed).copy()
+    df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
+    df = df.dropna(subset=needed).copy()
 
-for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
-    df[c] = pd.to_numeric(df[c], errors="coerce")
-df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
+    for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
 
-    if "pieces_scrapped" not in df.columns:
-    df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]).astype(int)
+    return df
 
-df = df.sort_values("week_ending").reset_index(drop=True)
-return df
 
 # -----------------------------
 # Example Fixed Assign Block
