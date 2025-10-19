@@ -55,11 +55,15 @@ st.sidebar.checkbox("Include *_rate Features", key="include_rate_features")
 st.sidebar.checkbox("Enable Prior Shift", key="prior_shift")
 
 # Quick-Hook Toggle
-st.sidebar.checkbox("Use Manual Quick-Hook", key="use_quick_hook")
+use_qh = st.sidebar.checkbox("Use manual quick-hook", key="use_quick_hook")
 
-# Manual Quick-Hook Sliders (always render for session state reset)
-st.sidebar.slider("Manual s", 0.1, 2.0, step=0.1, key="manual_s", disabled=not st.session_state["use_quick_hook"])
-st.sidebar.slider("Manual γ", 0.1, 1.0, step=0.05, key="manual_gamma", disabled=not st.session_state["use_quick_hook"])
+# Always render Manual s and γ, but bind to state
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    st.slider("Manual s", 0.1, 2.0, step=0.1, key="manual_s", disabled=not use_qh)
+with col2:
+    st.slider("Manual γ", 0.1, 1.0, step=0.05, key="manual_gamma", disabled=not use_qh)
+
 
 # Rolling Validation
 st.sidebar.checkbox("Run 6-2-1 Rolling Validation", key="rolling_validation")
