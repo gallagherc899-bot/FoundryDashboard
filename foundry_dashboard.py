@@ -16,112 +16,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss, accuracy_score
 
-# --- Default Settings ---
-DEFAULTS = {
-    "scrap_threshold": 6.5,
-    "prior_shift": True,
-    "prior_shift_guard": 20,
-    "use_quick_hook": False,
-    "manual_s": 1.0,
-    "manual_gamma": 0.5,
-    "rolling_validation": True,
-    "include_rate_features": True
-}
-
-# --- Reset Function ---
-def reset_defaults():
-    for key, val in DEFAULTS.items():
-        st.session_state[key] = val
-
-# --- Initialize Session State ---
-for key, val in DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
-
-# --- Sidebar Controls ---
-st.sidebar.header("Dashboard Settings")
-
-# Reset to Defaults
-if st.sidebar.button("Reset to Recommended Defaults"):
-    for key, val in DEFAULTS.items():
-        st.session_state[key] = val
-    st.experimental_rerun()
-
-# Scrap % Threshold
-st.sidebar.slider(
-    "Scrap % Threshold",
-    min_value=1.0,
-    max_value=15.0,
-    step=0.1,
-    key="scrap_threshold",
-    value=st.session_state.get("scrap_threshold", DEFAULTS["scrap_threshold"])
-)
-
-# Prior Shift Guard
-st.sidebar.slider(
-    "Prior Shift Guard",
-    min_value=0,
-    max_value=50,
-    key="prior_shift_guard",
-    value=st.session_state.get("prior_shift_guard", DEFAULTS["prior_shift_guard"])
-)
-
-# Include *_rate Features
-st.sidebar.checkbox(
-    "Include *_rate process features",
-    value=st.session_state.get("include_rate_features", DEFAULTS["include_rate_features"]),
-    key="include_rate_features"
-)
-
-# Enable Prior Shift
-st.sidebar.checkbox(
-    "Enable prior shift (validation ➝ test)",
-    value=st.session_state.get("prior_shift", DEFAULTS["prior_shift"]),
-    key="prior_shift"
-)
-
-# Use Manual Quick-Hook
-st.sidebar.checkbox(
-    "Use manual quick-hook",
-    value=st.session_state.get("use_quick_hook", DEFAULTS["use_quick_hook"]),
-    key="use_quick_hook"
-)
-
-# Manual s and γ sliders (always rendered)
-st.sidebar.slider(
-    "Manual s",
-    0.1,
-    2.0,
-    step=0.1,
-    key="manual_s",
-    value=st.session_state.get("manual_s", DEFAULTS["manual_s"]),
-    disabled=not st.session_state.get("use_quick_hook", DEFAULTS["use_quick_hook"])
-)
-
-st.sidebar.slider(
-    "Manual γ",
-    0.1,
-    1.0,
-    step=0.05,
-    key="manual_gamma",
-    value=st.session_state.get("manual_gamma", DEFAULTS["manual_gamma"]),
-    disabled=not st.session_state.get("use_quick_hook", DEFAULTS["use_quick_hook"])
-)
-
-# Rolling Validation
-st.sidebar.checkbox(
-    "Run 6–2–1 Rolling Validation (slower)",
-    value=st.session_state.get("rolling_validation", DEFAULTS["rolling_validation"]),
-    key="rolling_validation"
-)
-
-
-# --- Use settings in the pipeline ---
-settings = {key: st.session_state[key] for key in DEFAULTS}
-
-# Now settings dict can be used downstream in your model and prediction logic
-
-
 # -----------------------------
 # Page / constants
 # -----------------------------
@@ -690,23 +584,11 @@ with tabs[0]:
         st.caption("Reliability computed as R(1) = exp(−1/MTTFscrap). Threshold slider sets both labels and MTTF calculation.")
 
         # Historical exceedance prevalence at current threshold
-        part_prev_card = np.nan
-        if 'part_prev_train' in locals() and selected_part in part_prev_train:
-            part_prev_card = float(part_prev_train[selected_part])
-
-        exceedance_rate_text = (
-            f"{part_prev_card * 100:.2f}%"
-            if not np.isnan(part_prev_card)
-            else "N/A"
-)
-
+        part_prev_card = float(part_prev_train.get(selected_part, np.nan)) if 'part_prev_train' in locals() else np.nan
         st.markdown(
             f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
-            f"{exceedance_rate_text} ({N} runs)"
-)
-
-
-        
+            f"{(part_prev_card*100 if not np.isnan(part_prev_card) else np.nan):.2f}%  ({N} runs)"
+        )
         if not np.isnan(part_prev_card):
             if corrected_p > part_prev_card:
                 st.warning("⬆️ Prediction above historical exceedance rate for this part.")
@@ -714,41 +596,6 @@ with tabs[0]:
                 st.success("⬇️ Prediction below historical exceedance rate for this part.")
             else:
                 st.info("≈ Equal to historical exceedance rate.")
- # --- Optional: 6–2–1 Rolling Validation (if enabled) ---
-if st.session_state.get("rolling_validation", False):
-    st.subheader("6–2–1 Rolling Validation Backtest")
-    try:
-        # Filter to selected part
-        part_df = df_train[df_train["part_id"] == selected_part].sort_values("week")
-
-        # Set label threshold
-        part_df["label"] = (part_df["scrap%"] > thr_label).astype(int)
-
-        # Rolling validation logic: 6 training, 2 validation, 1 test
-        preds, labels = [], []
-        n = len(part_df)
-        for i in range(9, n):
-            train = part_df.iloc[i - 9:i - 3]
-            test = part_df.iloc[i]
-
-            model = RandomForestClassifier(n_estimators=100, random_state=0)
-            model.fit(train[features], train["label"])
-            pred = model.predict([test[features].values])[0]
-            preds.append(pred)
-            labels.append(test["label"])
-
-        # Wilcoxon test
-        stat, p_val = wilcoxon(preds, labels)
-        st.write(f"**Wilcoxon p-value:** `{p_val:.4f}`")
-        if p_val < 0.05:
-            st.success("✅ Statistically significant: model differs from random (p < 0.05)")
-        else:
-            st.warning("⚠️ Not statistically significant (p ≥ 0.05)")
-
-    except Exception as e:
-        st.error(f"Validation failed: {e}")
-
-
 
         # -----------------------------
         # NEW: Historical vs Predicted Pareto
