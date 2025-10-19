@@ -320,7 +320,7 @@ for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
 
-    if "pieces_scrapped" not in df.columns:
+if "pieces_scrapped" not in df.columns:
     df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]).astype(int)
 
 df = df.sort_values("week_ending").reset_index(drop=True)
