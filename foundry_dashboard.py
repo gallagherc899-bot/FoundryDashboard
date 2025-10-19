@@ -40,41 +40,81 @@ for key, val in DEFAULTS.items():
 
 # --- Sidebar Controls ---
 st.sidebar.header("Dashboard Settings")
-st.sidebar.button("Reset to Recommended Defaults", on_click=reset_defaults)
 
-# Scrap Threshold
-st.sidebar.slider("Scrap % Threshold", 1.0, 15.0, step=0.1, key="scrap_threshold")
+# Reset to Defaults
+if st.sidebar.button("Reset to Recommended Defaults"):
+    for key, val in DEFAULTS.items():
+        st.session_state[key] = val
+    st.experimental_rerun()
+
+# Scrap % Threshold
+st.sidebar.slider(
+    "Scrap % Threshold",
+    min_value=1.0,
+    max_value=15.0,
+    step=0.1,
+    key="scrap_threshold",
+    value=st.session_state.get("scrap_threshold", DEFAULTS["scrap_threshold"])
+)
 
 # Prior Shift Guard
-st.sidebar.slider("Prior Shift Guard", 0, 50, key="prior_shift_guard")
+st.sidebar.slider(
+    "Prior Shift Guard",
+    min_value=0,
+    max_value=50,
+    key="prior_shift_guard",
+    value=st.session_state.get("prior_shift_guard", DEFAULTS["prior_shift_guard"])
+)
 
-# Use temporary variables to force reactive updates
-include_rate_features = st.sidebar.checkbox(
+# Include *_rate Features
+st.session_state.include_rate_features = st.sidebar.checkbox(
     "Include *_rate process features",
-    value=st.session_state.include_rate_features,
+    value=st.session_state.get("include_rate_features", DEFAULTS["include_rate_features"]),
     key="include_rate_features"
 )
 
-prior_shift = st.sidebar.checkbox(
-    "Enable prior shift (validation → test)",
-    value=st.session_state.prior_shift,
+# Enable Prior Shift
+st.session_state.prior_shift = st.sidebar.checkbox(
+    "Enable prior shift (validation ➝ test)",
+    value=st.session_state.get("prior_shift", DEFAULTS["prior_shift"]),
     key="prior_shift"
 )
 
+# Use Manual Quick-Hook
+st.session_state.use_quick_hook = st.sidebar.checkbox(
+    "Use manual quick-hook",
+    value=st.session_state.get("use_quick_hook", DEFAULTS["use_quick_hook"]),
+    key="use_quick_hook"
+)
 
-# Quick-Hook Toggle
-use_qh = st.sidebar.checkbox("Use manual quick-hook", key="use_quick_hook")
+# Manual s and γ (always shown, disable when toggle is off)
+st.sidebar.slider(
+    "Manual s",
+    0.1,
+    2.0,
+    step=0.1,
+    key="manual_s",
+    value=st.session_state.get("manual_s", DEFAULTS["manual_s"]),
+    disabled=not st.session_state.use_quick_hook
+)
 
-# Always render Manual s and γ, but bind to state
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    st.slider("Manual s", 0.1, 2.0, step=0.1, key="manual_s", disabled=not use_qh)
-with col2:
-    st.slider("Manual γ", 0.1, 1.0, step=0.05, key="manual_gamma", disabled=not use_qh)
-
+st.sidebar.slider(
+    "Manual γ",
+    0.1,
+    1.0,
+    step=0.05,
+    key="manual_gamma",
+    value=st.session_state.get("manual_gamma", DEFAULTS["manual_gamma"]),
+    disabled=not st.session_state.use_quick_hook
+)
 
 # Rolling Validation
-st.sidebar.checkbox("Run 6-2-1 Rolling Validation", key="rolling_validation")
+st.session_state.rolling_validation = st.sidebar.checkbox(
+    "Run 6–2–1 Rolling Validation (slower)",
+    value=st.session_state.get("rolling_validation", DEFAULTS["rolling_validation"]),
+    key="rolling_validation"
+)
+
 
 # --- Use settings in the pipeline ---
 settings = {key: st.session_state[key] for key in DEFAULTS}
