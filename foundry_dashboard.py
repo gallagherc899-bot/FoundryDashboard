@@ -8,6 +8,7 @@ from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import SMOTE
 import shap
 import plotly.figure_factory as ff
+import matplotlib.pyplot as plt
 
 # Load and clean data
 df = pd.read_csv("anonymized_parts.csv")
@@ -43,6 +44,27 @@ smote = SMOTE(random_state=42)
 X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 rf_post = RandomForestClassifier(random_state=42)
 rf_post.fit(X_resampled, y_resampled)
+
+# Optimized scrap prediction weights
+optimal_weights = [0.1283, 2.2272]  # [order_quantity, piece_weight_lbs]
+
+# Apply to first 20 rows for benchmarking
+benchmark_df = df.head(20).copy()
+benchmark_df['actual_scrap_pounds'] = benchmark_df['order_quantity'] * benchmark_df['piece_weight_lbs'] * (benchmark_df['scrap%'] / 100)
+
+# Predict scrap pounds using optimized weights
+benchmark_df['optimized_predicted_scrap'] = (
+    benchmark_df['order_quantity'] * optimal_weights[0] +
+    benchmark_df['piece_weight_lbs'] * optimal_weights[1]
+)
+
+# Add ±10% tolerance bands
+benchmark_df['lower_bound'] = benchmark_df['actual_scrap_pounds'] * 0.90
+benchmark_df['upper_bound'] = benchmark_df['actual_scrap_pounds'] * 1.10
+benchmark_df['within_tolerance'] = (
+    (benchmark_df['optimized_predicted_scrap'] >= benchmark_df['lower_bound']) &
+    (benchmark_df['optimized_predicted_scrap'] <= benchmark_df['upper_bound'])
+)
 
 # Dashboard UI
 st.title("🧪 Foundry Scrap Risk & Reliability Dashboard")
@@ -136,9 +158,4 @@ if st.button("Predict Scrap Risk"):
                 if cumulative >= 80:
                     break
 
-            st.write("**Top Features Contributing to 80% of Scrap Risk:**")
-            for feature, percent, shap_val, direction in pareto_features:
-                st.write(f"- {feature}: {percent}% ({direction} SHAP = {round(shap_val, 3)})")
-
-        except Exception as e:
-            st.error(f"SHAP panel failed: {e}")
+            st
