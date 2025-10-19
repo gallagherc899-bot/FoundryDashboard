@@ -36,25 +36,20 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=
 smote = SMOTE(random_state=42)
 X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 
-# Train base model
-rf_model = RandomForestClassifier(random_state=42)
-rf_model.fit(X_resampled, y_resampled)
-
 # Calibrate with Platt scaling and Isotonic regression using 5-fold CV
-platt_model = CalibratedClassifierCV(base_estimator=rf_model, method='sigmoid', cv=5)
-platt_model.fit(X_train, y_train)
+platt_model = CalibratedClassifierCV(base_estimator=RandomForestClassifier(random_state=42), method='sigmoid', cv=5)
+platt_model.fit(X_resampled, y_resampled)
 
-isotonic_model = CalibratedClassifierCV(base_estimator=rf_model, method='isotonic', cv=5)
-isotonic_model.fit(X_train, y_train)
+isotonic_model = CalibratedClassifierCV(base_estimator=RandomForestClassifier(random_state=42), method='isotonic', cv=5)
+isotonic_model.fit(X_resampled, y_resampled)
 
 # Predict probabilities
-df["original_scrap_probability"] = rf_model.predict_proba(X)[:, 1]
 df["platt_scrap_probability"] = platt_model.predict_proba(X)[:, 1]
 df["isotonic_scrap_probability"] = isotonic_model.predict_proba(X)[:, 1]
 
 # Estimate scrap and cost
 cost_per_pound = 2.50
-for method in ["original", "platt", "isotonic"]:
+for method in ["platt", "isotonic"]:
     prob_col = f"{method}_scrap_probability"
     df[f"{method}_expected_scrap_pieces"] = df["order_quantity"] * df[prob_col]
     df[f"{method}_expected_scrap_pounds"] = df[f"{method}_expected_scrap_pieces"] * df["piece_weight_lbs"]
@@ -64,17 +59,17 @@ for method in ["original", "platt", "isotonic"]:
 df["actual_scrap_pounds"] = df["pieces_scrapped"] * df["piece_weight_lbs"]
 
 # Financial savings
-for method in ["original", "platt", "isotonic"]:
+for method in ["platt", "isotonic"]:
     df[f"{method}_poundage_difference"] = df["actual_scrap_pounds"] - df[f"{method}_expected_scrap_pounds"]
     df[f"{method}_financial_savings"] = df[f"{method}_poundage_difference"] * cost_per_pound
 
 # Output summary
 summary_cols = [
     "part_id", "order_quantity", "piece_weight_lbs", "actual_scrap_pounds",
-    "original_scrap_probability", "platt_scrap_probability", "isotonic_scrap_probability",
-    "original_expected_scrap_pounds", "platt_expected_scrap_pounds", "isotonic_expected_scrap_pounds",
-    "original_expected_scrap_cost", "platt_expected_scrap_cost", "isotonic_expected_scrap_cost",
-    "original_financial_savings", "platt_financial_savings", "isotonic_financial_savings"
+    "platt_scrap_probability", "isotonic_scrap_probability",
+    "platt_expected_scrap_pounds", "isotonic_expected_scrap_pounds",
+    "platt_expected_scrap_cost", "isotonic_expected_scrap_cost",
+    "platt_financial_savings", "isotonic_financial_savings"
 ]
 
 summary = df[summary_cols].round(2)
@@ -82,11 +77,9 @@ print("\n📊 Scrap Prediction Summary (First 20 Rows):")
 print(summary.head(20))
 
 # Total savings comparison
-total_original = df["original_financial_savings"].sum()
 total_platt = df["platt_financial_savings"].sum()
 total_isotonic = df["isotonic_financial_savings"].sum()
 
 print("\n💰 Total Financial Impact Comparison:")
-print(f"Original Model: ${total_original:,.2f}")
 print(f"Platt-Calibrated Model: ${total_platt:,.2f}")
 print(f"Isotonic-Calibrated Model: ${total_isotonic:,.2f}")
