@@ -218,4 +218,195 @@ st.caption("Fast startup • Cached training • Cost-based decisions • Option
 st.sidebar.header("Data & Performance")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
 n_estimators_ui = st.sidebar.slider("RandomForest trees", min_value=80, max_value=600, value=DEFAULT_ESTIMATORS, step=20)
-enable_uncertainty = st.sidebar.chec_
+enable_uncertainty = st.sidebar.checkbox("Enable uncertainty band (bootstrap)", value=False)  # OFF by default
+n_boot = st.sidebar.slider("Bootstrap models (if enabled)", min_value=10, max_value=100, value=20, step=5, disabled=not enable_uncertainty)
+
+# Decision cost settings
+st.sidebar.header("Decision Cost Settings")
+default_cfp_factor = st.sidebar.slider(
+    "False-alarm handling cost as % of unit cost (per part)",
+    min_value=0, max_value=100, value=25, step=5
+)
+st.sidebar.caption(
+    "C_FP ≈ (percent of per-part cost) × cost_per_part. "
+    "C_FN ≈ cost_per_part × order quantity (loss if defect occurs and you didn't act)."
+)
+
+# Load data
+if not os.path.exists(csv_path):
+    st.error(f"CSV not found: {csv_path}")
+    st.stop()
+
+with st.spinner("Loading & preparing data..."):
+    df = load_and_clean(csv_path)
+
+# Time-based split
+df_train, df_calib, df_test = time_based_split(df, TRAIN_FRAC, CALIB_FRAC)
+
+if len(df_calib) == 0 or len(df_test) == 0:
+    st.warning("Calibration or test split is empty after group separation. Consider adjusting split fractions or checking data coverage.")
+
+# Train-only MTBF + part freq
+mtbf_train = compute_mtbf_on_train(df_train, threshold=INITIAL_THRESHOLD)
+default_mtbf = mtbf_train["mttf_scrap"].median()
+part_freq_train = df_train["part_id"].value_counts(normalize=True)
+default_freq = part_freq_train.median() if len(part_freq_train) else 0.0
+
+# Attach features
+df_train_f = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
+df_calib_f = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
+df_test_f  = attach_train_features(df_test,  mtbf_train, part_freq_train, default_mtbf, default_freq)
+
+# Build features/labels
+X_train, y_train, FEATURES = make_features(df_train_f)
+X_calib, y_calib, _ = make_features(df_calib_f)
+X_test,  y_test,  _ = make_features(df_test_f)
+
+# Train + calibrate (cached)
+with st.spinner("Training (cached) ..."):
+    rf_model, calibrated_model, calib_method = train_cached(
+        X_train, y_train, X_calib, y_calib,
+        n_estimators=n_estimators_ui,
+        min_samples_leaf=MIN_SAMPLES_LEAF
+    )
+
+# Quick calibration sanity metric
+try:
+    p_test = calibrated_model.predict_proba(X_test)[:, 1] if len(X_test) else np.array([])
+    test_brier = brier_score_loss(y_test, p_test) if len(p_test) else np.nan
+except Exception:
+    test_brier = np.nan
+
+# -----------------------------
+# Interactive Prediction
+# -----------------------------
+st.subheader("Scrap Risk Estimation")
+
+c1, c2, c3, c4 = st.columns([2,2,2,2])
+with c1:
+    part_ids = sorted(df["part_id"].unique().tolist())
+    selected_part = st.selectbox("Select Part ID", part_ids)
+with c2:
+    quantity = st.number_input("Order Quantity", min_value=1, step=1, value=351)
+with c3:
+    weight = st.number_input("Piece Weight (lbs)", min_value=0.01, step=0.01, value=4.00)
+with c4:
+    cost_per_part = st.number_input("Cost per Part ($)", min_value=0.01, step=0.01, value=0.01)
+
+# Cost-based threshold
+C_FP = (default_cfp_factor / 100.0) * float(cost_per_part)
+C_FN = float(cost_per_part) * float(quantity)
+t_star = cost_threshold(C_FP, C_FN)
+
+# Prepare the single-row input using train-derived features
+mttf_value = mtbf_train.loc[selected_part, "mttf_scrap"] if selected_part in mtbf_train.index else default_mtbf
+part_freq_value = float(part_freq_train.get(selected_part, default_freq))
+
+input_row = pd.DataFrame(
+    [[quantity, weight, mttf_value, part_freq_value]],
+    columns=FEATURES
+)
+
+predict_clicked = st.button("Predict", type="primary", use_container_width=True)
+if predict_clicked:
+    # Predicted probability
+    base_p = calibrated_model.predict_proba(input_row)[0, 1]
+
+    # Optional uncertainty interval via bootstrap
+    if enable_uncertainty:
+        with st.spinner("Computing uncertainty band (bootstrap) ..."):
+            mean_p, lo_p, hi_p = bootstrap_probability_interval(
+                input_row, df_train, FEATURES, y_train, mtbf_train, part_freq_train,
+                n_boot=n_boot, alpha=0.10
+            )
+    else:
+        mean_p, lo_p, hi_p = base_p, np.nan, np.nan
+
+    # Decision: act if conservative (lower) bound exceeds threshold (if enabled), else base prob
+    decision_prob = (lo_p if (enable_uncertainty and not np.isnan(lo_p)) else base_p)
+    action_flag = (decision_prob >= t_star)
+
+    expected_scrap_count = int(round(base_p * quantity))
+    expected_loss = round(expected_scrap_count * cost_per_part, 2)
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1: st.metric("Predicted Scrap Risk (p)", f"{base_p * 100:.2f}%")
+    with k2: st.metric("Decision Threshold t*", f"{t_star:.4f}")
+    with k3: st.metric("Expected Scrap Count", f"{expected_scrap_count} parts")
+    with k4: st.metric("Expected Loss", f"${expected_loss:.2f}")
+
+    if enable_uncertainty:
+        st.caption(f"90% probability band: **[{lo_p * 100:.2f}%, {hi_p * 100:.2f}%]**")
+    st.success("Decision: **⚠️ ACT**" if action_flag else "Decision: **✅ NO ACTION**")
+
+    # -----------------------------
+    # SHAP Analysis (lazy & optional)
+    # -----------------------------
+    with st.expander("🔍 Run SHAP analysis (optional — can be slow)"):
+        run_shap = st.checkbox("Compute SHAP now")
+        if run_shap:
+            with st.spinner("Computing SHAP..."):
+                # Lazy import so it doesn't slow initial load
+                import shap
+                explainer = shap.TreeExplainer(rf_model)
+                shap_values = explainer.shap_values(input_row)
+                # shap_values for RF is list [class0, class1]; use class1
+                if isinstance(shap_values, list) and len(shap_values) > 1:
+                    shap_val = shap_values[1][0]
+                else:
+                    shap_val = np.array(shap_values)[0]
+
+                shap_df = pd.DataFrame({
+                    "Feature": FEATURES,
+                    "SHAP Value": shap_val,
+                    "Impact (|SHAP|)": np.abs(shap_val)
+                }).sort_values(by="Impact (|SHAP|)", ascending=False)
+                st.dataframe(shap_df, use_container_width=True)
+
+    # -----------------------------
+    # Benchmark Table (UI-consistent weight)
+    # -----------------------------
+    st.subheader("📊 Benchmark Scrap Prediction Table")
+    bench = df.head(10).copy()
+
+    # Attach train features (so the model can score consistently)
+    bench = attach_train_features(bench, mtbf_train, part_freq_train, default_mtbf, default_freq)
+    # Build feature matrix and score
+    benchX = bench[FEATURES]
+    bench["predicted_prob"] = calibrated_model.predict_proba(benchX)[:, 1]
+    bench["predicted_scrap_pounds"] = bench["predicted_prob"] * bench["order_quantity"] * weight
+
+    # Actual scrap pounds — prefer measured pieces_scrapped if available
+    if "pieces_scrapped" in bench.columns and bench["pieces_scrapped"].notna().any():
+        bench["actual_scrap_pounds"] = bench["pieces_scrapped"].fillna(0) * weight
+    else:
+        # fallback from % (best-effort)
+        bench["actual_scrap_pounds"] = (bench["scrap%"].clip(lower=0) / 100.0) * bench["order_quantity"] * weight
+
+    bench["abs_error"] = (bench["actual_scrap_pounds"] - bench["predicted_scrap_pounds"]).abs()
+
+    st.dataframe(
+        bench[["part_id", "order_quantity", "scrap%", "predicted_prob",
+               "actual_scrap_pounds", "predicted_scrap_pounds", "abs_error"]],
+        use_container_width=True
+    )
+
+# -----------------------------
+# Model Diagnostics
+# -----------------------------
+st.subheader("Model Diagnostics")
+st.write(f"Calibration method: **{calib_method}**")
+if not np.isnan(test_brier):
+    st.write(f"Brier score (test): **{test_brier:.5f}** (lower is better)")
+
+with st.expander("Feature schema used by the model"):
+    st.json({"features": FEATURES})
+
+with st.expander("Notes & Tips"):
+    st.markdown("""
+- **Cached training** prevents retraining on every button click.
+- **Uncertainty band** is OFF by default — enable only when you need confidence bounds.
+- Start with fewer trees for speed; raise with the sidebar slider if needed.
+- MTBF and part frequency are computed on **train only** to avoid leakage.
+- SHAP is optional and only computed on demand to keep the UI snappy.
+""")
