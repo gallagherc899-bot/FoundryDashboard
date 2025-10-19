@@ -1,3 +1,95 @@
+
+# streamlit_app.py
+# Run with: streamlit run streamlit_app.py
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+import os
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from dateutil.relativedelta import relativedelta
+from scipy.stats import wilcoxon
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import brier_score_loss, accuracy_score
+
+# -----------------------------
+# Page / constants
+# -----------------------------
+st.set_page_config(
+    page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTF & Exceedance)",
+    layout="wide"
+)
+
+RANDOM_STATE = 42
+DEFAULT_ESTIMATORS = 150
+MIN_SAMPLES_LEAF = 2
+
+S_GRID = np.linspace(0.6, 1.2, 13)
+GAMMA_GRID = np.linspace(0.5, 1.2, 15)
+TOP_K_PARETO = 8
+
+# -----------------------------
+# Helpers
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def load_and_clean(csv_path: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    df.columns = (
+        df.columns.str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("(", "", regex=False)
+        .str.replace(")", "", regex=False)
+        .str.replace("#", "num", regex=False)
+    )
+    needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing column(s): {missing}")
+
+    df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
+    df = df.dropna(subset=needed).copy()
+
+    for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
+
+    if "pieces_scrapped" not in df.columns:
+        df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]).astype(int)
+
+    df = df.sort_values("week_ending").reset_index(drop=True)
+    return df
+
+# -----------------------------
+# Example Fixed Assign Block
+# -----------------------------
+def show_pareto_tables(hist_pareto, pred_pareto):
+    st.dataframe(
+        hist_pareto.assign(
+            hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
+        ).assign(**{
+            "share_%": lambda d: d["share_%"].round(2),
+            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+        }),
+        use_container_width=True
+    )
+
+    st.dataframe(
+        pred_pareto.assign(
+            delta_prob_raw=lambda d: (d["delta_prob_raw"] * 100).round(2)
+        ).assign(**{
+            "share_%": lambda d: d["share_%"].round(2),
+            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+        }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
+        use_container_width=True
+    )
+
+
 # streamlit_app.py
 # Run with: streamlit run streamlit_app.py
 
