@@ -370,7 +370,7 @@ return X, y, feats
 
 @st.cache_resource(show_spinner=True)
 def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
-rf = RandomForestClassifier(
+    rf = RandomForestClassifier(
     n_estimators=n_estimators,
     min_samples_leaf=MIN_SAMPLES_LEAF,
     class_weight="balanced",
