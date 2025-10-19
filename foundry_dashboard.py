@@ -30,13 +30,13 @@ DEFAULTS = {
 
 # --- Reset Function ---
 def reset_defaults():
-for key, val in DEFAULTS.items():
-    st.session_state[key] = val
+    for key, val in DEFAULTS.items():
+        st.session_state[key] = val
 
 # --- Initialize Session State ---
 for key, val in DEFAULTS.items():
     if key not in st.session_state:
-    st.session_state[key] = val
+        st.session_state[key] = val
 
 # --- Sidebar Controls ---
 st.sidebar.header("Dashboard Settings")
