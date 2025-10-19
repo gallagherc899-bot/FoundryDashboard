@@ -1,4 +1,3 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
@@ -66,23 +65,24 @@ for method in ["original", "platt", "isotonic"]:
     df[f"{method}_poundage_difference"] = df["actual_scrap_pounds"] - df[f"{method}_expected_scrap_pounds"]
     df[f"{method}_financial_savings"] = df[f"{method}_poundage_difference"] * cost_per_pound
 
-# Streamlit UI
-st.title("🧪 Scrap Risk Calibration Dashboard")
-
-st.subheader("📊 Total Financial Impact Comparison")
-for method in ["original", "platt", "isotonic"]:
-    savings = df[f"{method}_financial_savings"].sum()
-    st.metric(f"{method.capitalize()} Model Estimated Savings", f"${savings:,.2f}")
-
-st.subheader("📈 Scrap Probability Comparison (First 10 Rows)")
-st.dataframe(df[[
-    "part_id", "order_quantity", "piece_weight_lbs",
-    "original_scrap_probability", "platt_scrap_probability", "isotonic_scrap_probability"
-]].head(10).round(3))
-
-st.subheader("💰 Scrap Cost Comparison (First 10 Rows)")
-st.dataframe(df[[
-    "part_id", "actual_scrap_pounds",
+# Output summary
+summary_cols = [
+    "part_id", "order_quantity", "piece_weight_lbs", "actual_scrap_pounds",
+    "original_scrap_probability", "platt_scrap_probability", "isotonic_scrap_probability",
     "original_expected_scrap_pounds", "platt_expected_scrap_pounds", "isotonic_expected_scrap_pounds",
-    "original_expected_scrap_cost", "platt_expected_scrap_cost", "isotonic_expected_scrap_cost"
-]].head(10).round(2))
+    "original_expected_scrap_cost", "platt_expected_scrap_cost", "isotonic_expected_scrap_cost",
+    "original_financial_savings", "platt_financial_savings", "isotonic_financial_savings"
+]
+
+summary = df[summary_cols].round(2)
+print(summary.head(20))
+
+# Total savings comparison
+total_original = df["original_financial_savings"].sum()
+total_platt = df["platt_financial_savings"].sum()
+total_isotonic = df["isotonic_financial_savings"].sum()
+
+print("\nTotal Financial Impact Comparison:")
+print(f"Original Model: ${total_original:,.2f}")
+print(f"Platt-Calibrated Model: ${total_platt:,.2f}")
+print(f"Isotonic-Calibrated Model: ${total_isotonic:,.2f}")
