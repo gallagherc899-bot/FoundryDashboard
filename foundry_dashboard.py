@@ -702,6 +702,73 @@ with tabs[0]:
                 st.success("⬇️ Prediction below historical exceedance rate for this part.")
             else:
                 st.info("≈ Equal to historical exceedance rate.")
+                # --- Optional: 6–2–1 Rolling Validation (if enabled) ---
+if st.session_state.get("rolling_validation", False):
+    st.subheader("6–2–1 Rolling Validation Backtest")
+    try:
+        # Filter to selected part
+        part_df = df_train[df_train["part_id"] == selected_part].sort_values("week")
+
+        # Set label threshold
+        part_df["label"] = (part_df["scrap%"] > thr_label).astype(int)
+
+        # Rolling validation logic: 6 training, 2 validation, 1 test
+        preds, labels = [], []
+        n = len(part_df)
+        for i in range(9, n):
+            train = part_df.iloc[i-9:i-3]
+            test = part_df.iloc[i]
+
+            model = RandomForestClassifier(n_estimators=100, random_state=0)
+            model.fit(train[features], train["label"])
+            pred = model.predict([test[features].values])[0]
+            preds.append(pred)
+            labels.append(test["label"])
+
+        # Wilcoxon test
+        stat, p_val = wilcoxon(preds, labels)
+        st.write(f"**Wilcoxon p-value:** `{p_val:.4f}`")
+        if p_val < 0.05:
+            st.success("✅ Statistically significant: model differs from random (p < 0.05)")
+        else:
+            st.warning("⚠️ Not statistically significant (p ≥ 0.05)")
+
+    except Exception as e:
+        st.error(f"Validation failed: {e}")
+# --- Optional: 6–2–1 Rolling Validation (if enabled) ---
+if st.session_state.get("rolling_validation", False):
+    st.subheader("6–2–1 Rolling Validation Backtest")
+    try:
+        # Filter to selected part
+        part_df = df_train[df_train["part_id"] == selected_part].sort_values("week")
+
+        # Set label threshold
+        part_df["label"] = (part_df["scrap%"] > thr_label).astype(int)
+
+        # Rolling validation logic: 6 training, 2 validation, 1 test
+        preds, labels = [], []
+        n = len(part_df)
+        for i in range(9, n):
+            train = part_df.iloc[i-9:i-3]
+            test = part_df.iloc[i]
+
+            model = RandomForestClassifier(n_estimators=100, random_state=0)
+            model.fit(train[features], train["label"])
+            pred = model.predict([test[features].values])[0]
+            preds.append(pred)
+            labels.append(test["label"])
+
+        # Wilcoxon test
+        stat, p_val = wilcoxon(preds, labels)
+        st.write(f"**Wilcoxon p-value:** `{p_val:.4f}`")
+        if p_val < 0.05:
+            st.success("✅ Statistically significant: model differs from random (p < 0.05)")
+        else:
+            st.warning("⚠️ Not statistically significant (p ≥ 0.05)")
+
+    except Exception as e:
+        st.error(f"Validation failed: {e}")
+
 
         # -----------------------------
         # NEW: Historical vs Predicted Pareto
