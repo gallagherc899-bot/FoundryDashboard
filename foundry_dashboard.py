@@ -67,27 +67,27 @@ st.sidebar.slider(
 )
 
 # Include *_rate Features
-st.session_state.include_rate_features = st.sidebar.checkbox(
+st.sidebar.checkbox(
     "Include *_rate process features",
     value=st.session_state.get("include_rate_features", DEFAULTS["include_rate_features"]),
     key="include_rate_features"
 )
 
 # Enable Prior Shift
-st.session_state.prior_shift = st.sidebar.checkbox(
+st.sidebar.checkbox(
     "Enable prior shift (validation ➝ test)",
     value=st.session_state.get("prior_shift", DEFAULTS["prior_shift"]),
     key="prior_shift"
 )
 
 # Use Manual Quick-Hook
-st.session_state.use_quick_hook = st.sidebar.checkbox(
+st.sidebar.checkbox(
     "Use manual quick-hook",
     value=st.session_state.get("use_quick_hook", DEFAULTS["use_quick_hook"]),
     key="use_quick_hook"
 )
 
-# Manual s and γ (always shown, disable when toggle is off)
+# Manual s and γ sliders (always rendered)
 st.sidebar.slider(
     "Manual s",
     0.1,
@@ -95,7 +95,7 @@ st.sidebar.slider(
     step=0.1,
     key="manual_s",
     value=st.session_state.get("manual_s", DEFAULTS["manual_s"]),
-    disabled=not st.session_state.use_quick_hook
+    disabled=not st.session_state.get("use_quick_hook", DEFAULTS["use_quick_hook"])
 )
 
 st.sidebar.slider(
@@ -105,11 +105,11 @@ st.sidebar.slider(
     step=0.05,
     key="manual_gamma",
     value=st.session_state.get("manual_gamma", DEFAULTS["manual_gamma"]),
-    disabled=not st.session_state.use_quick_hook
+    disabled=not st.session_state.get("use_quick_hook", DEFAULTS["use_quick_hook"])
 )
 
 # Rolling Validation
-st.session_state.rolling_validation = st.sidebar.checkbox(
+st.sidebar.checkbox(
     "Run 6–2–1 Rolling Validation (slower)",
     value=st.session_state.get("rolling_validation", DEFAULTS["rolling_validation"]),
     key="rolling_validation"
