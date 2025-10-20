@@ -20,195 +20,12 @@ from sklearn.metrics import brier_score_loss, accuracy_score
 # Page / constants
 # -----------------------------
 st.set_page_config(
-    page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTF & Exceedance)",
-    layout="wide"
-)
-
-RANDOM_STATE = 42
-DEFAULT_ESTIMATORS = 150
-MIN_SAMPLES_LEAF = 2
-
-S_GRID = np.linspace(0.6, 1.2, 13)
-GAMMA_GRID = np.linspace(0.5, 1.2, 15)
-TOP_K_PARETO = 8
-
-# -----------------------------
-# Helpers
-# -----------------------------
-@st.cache_data(show_spinner=False)
-def load_and_clean(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    df.columns = (
-        df.columns.str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-        .str.replace("(", "", regex=False)
-        .str.replace(")", "", regex=False)
-        .str.replace("#", "num", regex=False)
-    )
-    needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing column(s): {missing}")
-
-    df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-    df = df.dropna(subset=needed).copy()
-
-    for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
-
-    if "pieces_scrapped" not in df.columns:
-        df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]).astype(int)
-
-    df = df.sort_values("week_ending").reset_index(drop=True)
-    return df
-
-# -----------------------------
-# Example Fixed Assign Block
-# -----------------------------
-def show_pareto_tables(hist_pareto, pred_pareto):
-    st.dataframe(
-    hist_pareto.assign(
-        hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
-    ).assign(**{
-        "share_%": lambda d: d["share_%"].round(2),
-        "cumulative_%": lambda d: d["cumulative_%"].round(1),
-    }),
-    use_container_width=True
-)
-
-
-    st.dataframe(
-    pred_pareto.assign(
-        delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2)
-    ).assign(**{
-        "share_%": lambda d: d["share_%"].round(2),
-        "cumulative_%": lambda d: d["cumulative_%"].round(1),
-    }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
-    use_container_width=True
-)
-
-
-# streamlit_app.py
-# Run with: streamlit run streamlit_app.py
-
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-
-import os
-import numpy as np
-import pandas as pd
-import streamlit as st
-
-from dateutil.relativedelta import relativedelta
-from scipy.stats import wilcoxon
-
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import brier_score_loss, accuracy_score
-
-# -----------------------------
-# Page / constants
-# -----------------------------
-st.set_page_config(
     page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTFscrap & Exceedance)",
     layout="wide"
 )
 
 RANDOM_STATE = 42
-DEFAULT_ESTIMATORS = 150
-MIN_SAMPLES_LEAF = 2
-
-S_GRID = np.linspace(0.6, 1.2, 13)
-GAMMA_GRID = np.linspace(0.5, 1.2, 15)
-TOP_K_PARETO = 8
-
-# -----------------------------
-# Helpers
-# -----------------------------
-@st.cache_data(show_spinner=False)
-def load_and_clean(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    df.columns = (
-        df.columns.str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-        .str.replace("(", "", regex=False)
-        .str.replace(")", "", regex=False)
-        .str.replace("#", "num", regex=False)
-    )
-    needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing column(s): {missing}")
-
-    df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-    df = df.dropna(subset=needed).copy()
-
-    for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
-
-    if "pieces_scrapped" not in df.columns:
-        df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]).astype(int)
-
-    df = df.sort_values("week_ending").reset_index(drop=True)
-    return df
-
-# -----------------------------
-# Example Fixed Assign Block
-# -----------------------------
-def show_pareto_tables(hist_pareto, pred_pareto):
-    st.dataframe(
-        hist_pareto.assign(
-            hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
-        ).assign(**{
-            "share_%": lambda d: d["share_%"].round(2),
-            "cumulative_%": lambda d: d["cumulative_%"].round(1),
-        }),
-        use_container_width=True
-    )
-
-    st.dataframe(
-        pred_pareto.assign(
-            delta_prob_raw=lambda d: (d["delta_prob_raw"] * 100).round(2)
-        ).assign(**{
-            "share_%": lambda d: d["share_%"].round(2),
-            "cumulative_%": lambda d: d["cumulative_%"].round(1),
-        }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
-        use_container_width=True
-    )
-
-
-# streamlit_app.py
-# Run with: streamlit run streamlit_app.py
-
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-
-import os
-import numpy as np
-import pandas as pd
-import streamlit as st
-
-from dateutil.relativedelta import relativedelta
-from scipy.stats import wilcoxon
-
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import brier_score_loss, accuracy_score
-
-# -----------------------------
-# Page / constants
-# -----------------------------
-st.set_page_config(
-    page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTFscrap & Exceedance)",
-    layout="wide"
-)
-
-RANDOM_STATE = 42
-DEFAULT_ESTIMATORS = 150
+DEFAULT_ESTIMATORS = 180       # UPDATED: Increased trees from 150 to 180
 MIN_SAMPLES_LEAF = 2
 
 S_GRID = np.linspace(0.6, 1.2, 13)       # {0.60,...,1.20}
@@ -444,23 +261,32 @@ def historical_defect_pareto_for_part(selected_part: int,
 # -----------------------------
 st.sidebar.header("Data & Model")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
+# Set default to 180 (from 150)
 n_estimators = st.sidebar.slider("RandomForest Trees", 80, 600, DEFAULT_ESTIMATORS, 20)
 
 st.sidebar.header("Label & MTTFscrap")
-thr_label = st.sidebar.slider("Scrap % Threshold (label & MTTFscrap)", 1.0, 15.0, 5.0, 0.5)
+# Set default to 6.50 (from 5.0)
+thr_label = st.sidebar.slider("Scrap % Threshold (label & MTTFscrap)", 1.0, 15.0, 6.50, 0.5)
 
 st.sidebar.header("Features & Drift")
-use_rate_cols = st.sidebar.checkbox("Include *_rate process features", value=False)
+# Set default to True (from False)
+use_rate_cols = st.sidebar.checkbox("Include *_rate process features", value=True)
+# Set default to True (from False)
 enable_prior_shift = st.sidebar.checkbox("Enable prior shift (validation ➜ test)", value=True)
+# Set default to 20 (from 20, confirmed)
 prior_shift_guard = st.sidebar.slider("Prior-shift guard (max Δ prevalence, pp)", 5, 50, 20, step=5)
 
 st.sidebar.header("Quick-Hook Override")
+# Set default to False (from False, confirmed)
 use_manual_hook = st.sidebar.checkbox("Use manual quick-hook", value=False)
+# Set default to 1.00 (from 1.00, confirmed)
 s_manual = st.sidebar.slider("Manual s", 0.60, 1.20, 1.00, 0.01)
+# Set default to 0.50 (from 0.50, confirmed)
 gamma_manual = st.sidebar.slider("Manual γ", 0.50, 1.20, 0.50, 0.01)
 
 st.sidebar.header("Validation Controls")
-run_validation = st.sidebar.checkbox("Run 6–2–1 rolling validation (slower)", value=False)
+# Set default to True (from False)
+run_validation = st.sidebar.checkbox("Run 6–2–1 rolling validation (slower)", value=True)
 
 if not os.path.exists(csv_path):
     st.error("CSV not found.")
@@ -662,7 +488,7 @@ with tabs[0]:
         test_brier = brier_score_loss(y_test, p_test) if len(X_test) and len(p_test) else np.nan
     except Exception:
         pass
-    st.write(f"Calibration: **{calib_method}**, Test Brier: {test_brier:.4f}")
+    st.write(f"Calibration: **{calib_method}** | Test Brier: {test_brier:.4f}")
     st.caption("Adjusted risk = calibrated prob × s × (part_scale^γ). part_scale is the per-part exceedance prevalence relative to train global prevalence.")
 
 # -----------------------------
