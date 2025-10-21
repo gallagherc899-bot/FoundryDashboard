@@ -473,13 +473,13 @@ st.markdown(
         f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
         f"{(part_prev_card*100 if not np.isnan(part_prev_card) else np.nan):.2f}%  ({N} runs)"
         )
-        if not np.isnan(part_prev_card):
-            if corrected_p > part_prev_card:
-                st.warning("⬆️ Prediction above historical exceedance rate for this part.")
-            elif corrected_p < part_prev_card:
-                st.success("⬇️ Prediction below historical exceedance rate for this part.")
-            else:
-                st.info("≈ Equal to historical exceedance rate.")
+if not np.isnan(part_prev_card):
+if corrected_p > part_prev_card:
+    st.warning("⬆️ Prediction above historical exceedance rate for this part.")
+        elif corrected_p < part_prev_card:
+            st.success("⬇️ Prediction below historical exceedance rate for this part.")
+        else:
+            st.info("≈ Equal to historical exceedance rate.")
 
         # -----------------------------
         # NEW: Historical vs Predicted Pareto
