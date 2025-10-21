@@ -460,8 +460,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
-
     st.subheader("Reliability context (at current threshold)")
         r1, r2, r3 = st.columns(3)
         r1.metric("MTTFscrap", "∞ runs" if mttf_scrap == float("inf") else f"{mttf_scrap:.2f} runs")
