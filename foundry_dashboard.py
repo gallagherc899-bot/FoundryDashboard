@@ -462,7 +462,7 @@ st.markdown(
 )
 
 
-        st.subheader("Reliability context (at current threshold)")
+    st.subheader("Reliability context (at current threshold)")
         r1, r2, r3 = st.columns(3)
         r1.metric("MTTFscrap", "∞ runs" if mttf_scrap == float("inf") else f"{mttf_scrap:.2f} runs")
         r2.metric("Reliability (next run)", f"{reliability_next_run*100:.2f}%")
