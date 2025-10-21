@@ -401,6 +401,66 @@ with tabs[0]:
 
         st.markdown(f"**Quick-hook params:** s = {s_star:.2f}, γ = {gamma_star:.2f}  | Calibration: **{calib_method}**")
         st.caption(shift_note)
+        # Add risk alert summary box based on corrected_p
+def get_alert_summary(prob):
+    if prob >= 0.90:
+        color = "red"
+        status = "🔴 High Alert for Scrap"
+        message = (
+            "Strong likelihood of scrap. Monitor **tear_up_rate** and **runout_rate**. "
+            "Review recent patterns and defects in historical vs. predicted Pareto."
+        )
+    elif prob >= 0.80:
+        color = "orange"
+        status = "🟠 Serious Concern for Scrap"
+        message = (
+            "Elevated risk of scrap. Investigate predicted defects and ensure quality controls are reinforced."
+        )
+    elif prob >= 0.60:
+        color = "gold"
+        status = "🟡 Elevated Risk"
+        message = (
+            "Moderate chance of scrap. Maintain quality vigilance and inspect critical defect trends."
+        )
+    elif prob >= 0.40:
+        color = "lightgray"
+        status = "⚪ Moderate Risk"
+        message = (
+            "Some uncertainty. Proceed with normal inspection and monitor any abnormal trends."
+        )
+    elif prob >= 0.20:
+        color = "lightgreen"
+        status = "🟢 Low Risk"
+        message = (
+            "Low likelihood of scrap. Scrap probability is well within historical norms."
+        )
+    else:
+        color = "green"
+        status = "🟢 Very Low Risk"
+        message = (
+            "Minimal expected scrap. System and process conditions appear highly favorable."
+        )
+    return color, status, message
+
+# Generate and display the alert
+color, status, message = get_alert_summary(corrected_p)
+
+st.markdown(
+    f"""
+    <div style='
+        background-color:{color};
+        padding:1em;
+        border-radius:10px;
+        color:white;
+        font-weight:bold;
+        margin-top: 1em;
+    '>
+        {status}<br><span style='font-weight:normal'>{message}</span>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 
         st.subheader("Reliability context (at current threshold)")
         r1, r2, r3 = st.columns(3)
