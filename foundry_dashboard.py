@@ -468,7 +468,7 @@ r3.metric("Failures / Runs", f"{failures} / {N}")
 st.caption("Reliability computed as R(1) = exp(−1/MTTFscrap). Threshold slider sets both labels and MTTF calculation.")
 
     # Historical exceedance prevalence at current threshold
-    part_prev_card = float(part_prev_train.get(selected_part, np.nan)) if 'part_prev_train' in locals() else np.nan
+part_prev_card = float(part_prev_train.get(selected_part, np.nan)) if 'part_prev_train' in locals() else np.nan
 st.markdown(
         f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
         f"{(part_prev_card*100 if not np.isnan(part_prev_card) else np.nan):.2f}%  ({N} runs)"
