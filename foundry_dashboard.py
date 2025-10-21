@@ -475,10 +475,10 @@ st.markdown(
         )
 if corrected_p > part_prev_card:
     st.warning("⬆️ Prediction above historical exceedance rate for this part.")
-        elif corrected_p < part_prev_card:
-            st.success("⬇️ Prediction below historical exceedance rate for this part.")
-        else:
-            st.info("≈ Equal to historical exceedance rate.")
+    elif corrected_p < part_prev_card:
+        st.success("⬇️ Prediction below historical exceedance rate for this part.")
+    else:
+        st.info("≈ Equal to historical exceedance rate.")
 
         # -----------------------------
         # NEW: Historical vs Predicted Pareto
