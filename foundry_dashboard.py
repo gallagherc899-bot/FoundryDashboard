@@ -483,10 +483,10 @@ else:
         # -----------------------------
         # NEW: Historical vs Predicted Pareto
         # -----------------------------
-        st.subheader("Pareto of Defects — Historical vs Predicted (this run)")
+    st.subheader("Pareto of Defects — Historical vs Predicted (this run)")
 
-        rate_cols_in_model = [c for c in FEATURES if c.endswith("_rate")]
-        if not use_rate_cols or not rate_cols_in_model:
+    rate_cols_in_model = [c for c in FEATURES if c.endswith("_rate")]
+if not use_rate_cols or not rate_cols_in_model:
             st.info("To view Predicted Pareto, enable **Include *_rate process features** in the sidebar and re-run.")
         else:
             # Historical Pareto for the selected part
