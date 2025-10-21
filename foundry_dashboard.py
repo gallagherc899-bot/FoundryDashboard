@@ -461,11 +461,11 @@ st.markdown(
     unsafe_allow_html=True
 )
 st.subheader("Reliability context (at current threshold)")
-    r1, r2, r3 = st.columns(3)
-    r1.metric("MTTFscrap", "∞ runs" if mttf_scrap == float("inf") else f"{mttf_scrap:.2f} runs")
-    r2.metric("Reliability (next run)", f"{reliability_next_run*100:.2f}%")
-    r3.metric("Failures / Runs", f"{failures} / {N}")
-    st.caption("Reliability computed as R(1) = exp(−1/MTTFscrap). Threshold slider sets both labels and MTTF calculation.")
+r1, r2, r3 = st.columns(3)
+r1.metric("MTTFscrap", "∞ runs" if mttf_scrap == float("inf") else f"{mttf_scrap:.2f} runs")
+r2.metric("Reliability (next run)", f"{reliability_next_run*100:.2f}%")
+r3.metric("Failures / Runs", f"{failures} / {N}")
+st.caption("Reliability computed as R(1) = exp(−1/MTTFscrap). Threshold slider sets both labels and MTTF calculation.")
 
     # Historical exceedance prevalence at current threshold
     part_prev_card = float(part_prev_train.get(selected_part, np.nan)) if 'part_prev_train' in locals() else np.nan
