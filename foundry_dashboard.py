@@ -56,7 +56,6 @@ def clean_col_name(col_raw):
     col = col.replace(' ', '_').replace('#', '_id').replace('%', '_percent')
     
     # 2. Aggressively remove all non-word characters (except underscore)
-    # This strips hidden characters that might be lingering
     col = re.sub(r'[^\w_]', '', col)
     
     # 3. Ensure no double underscores remain
@@ -68,8 +67,9 @@ def clean_col_name(col_raw):
 @st.cache_data
 def load_and_prepare_data():
     """
-    Loads, cleans, and prepares data, creating a guaranteed 'work_order_id' 
-    based on the row index, ignoring the problematic header name.
+    Loads, cleans, and prepares data. It explicitly drops the original Work Order ID column 
+    (regardless of its name after cleaning) and replaces it with the row index 
+    to guarantee a valid unique identifier for ML and aggregation.
     """
     try:
         df_historical = pd.read_csv('anonymized_parts.csv')
@@ -77,29 +77,33 @@ def load_and_prepare_data():
         # 1. Apply Hyper-aggressive, universal cleaning to ALL columns
         df_historical.columns = [clean_col_name(c) for c in df_historical.columns]
         
-        # 2. Explicit mapping of cleaned names to final target names, ignoring the original Work Order ID for naming purposes
+        # 2. CRITICAL: Identify and REMOVE the original work order ID column.
+        # It should have been cleaned to 'work_order_id' or similar.
+        work_order_cols_to_drop = [col for col in df_historical.columns if 'work_order' in col or 'w_o' in col or 'order_id' in col]
+        
+        if work_order_cols_to_drop:
+            df_historical.drop(columns=work_order_cols_to_drop, inplace=True)
+            
+        # 3. CRITICAL: Create a unique row identifier based on the index.
+        # This preserves transactional granularity (one row = one work order run).
+        df_historical['work_order_id'] = df_historical.index 
+
+        # 4. Standardize the rest of the columns
         final_rename_map = {}
         for col in df_historical.columns:
             if 'part_id' in col:
                 final_rename_map[col] = 'part_id'
             elif 'scrap_percent' in col:
-                final_rename_map[col] = 'scrap_percent'
+                final_rename_map[col] = 'scrap_percent_hist'
             elif 'order_quantity' in col:
                 final_rename_map[col] = 'order_quantity'
             elif 'pieces_scrapped' in col:
                 final_rename_map[col] = 'pieces_scrapped'
             elif 'piece_weight_lbs' in col:
                 final_rename_map[col] = 'piece_weight_lbs'
-            # We explicitly SKIP renaming for 'work_order' here to avoid KeyErrors
+            # Note: Rate columns are intentionally left with their cleaned names (e.g., 'dross_rate')
             
         df_historical.rename(columns=final_rename_map, inplace=True)
-        
-        # 3. CRITICAL: Create a unique row identifier regardless of the original column name.
-        # This preserves the transactional granularity for ML training and aggregation.
-        df_historical['work_order_id'] = df_historical.index 
-
-        # 4. Standardize Scrap Percentage column name
-        df_historical = df_historical.rename(columns={'scrap_percent': 'scrap_percent_hist'}, errors='ignore')
         
         # Convert historical scrap percentage to decimal
         if 'scrap_percent_hist' in df_historical.columns:
@@ -144,8 +148,8 @@ def load_and_prepare_data():
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
     except Exception as e:
         # Catch and display the specific error
-        st.error(f"An error occurred during data processing: {e}")
-        st.info("The issue appears to be a column naming problem. Please verify the 'Work Order #' column is present and properly formatted in your CSV.")
+        st.error(f"A serious error occurred during data processing: {e}")
+        st.info("The cleaning logic encountered an issue. Please verify the structure of your CSV, especially column headers.")
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
 
 # Load and prepare data
@@ -348,7 +352,8 @@ with tab_sim:
 
         # Financial Calculation
         total_material_value = max_savings_lbs * (MATERIAL_COST_PER_LB + LABOR_OVERHEAD_COST_PER_LB)
-        total_failures_avoided_cost = total_historical_scrap_pieces * AVG_NON_MATERIAL_COST_PER_FAILURE * 0.50
+        # Using 50% of the total historical scrap pieces to avoid double counting losses
+        total_failures_avoided_cost = total_historical_scrap_pieces * AVG_NON_MATERIAL_COST_PER_FAILURE * 0.50 
         total_cost_avoided = total_material_value + total_failures_avoided_cost
 
         report_data.append({
@@ -591,9 +596,12 @@ with tab_part_risk:
             'pieces_scrapped', # Use snake_case
             'Scrap_%', 
             'piece_weight_lbs', # Use snake_case
-            'week_ending' # Use snake_case
         ]
         
+        # We need to dynamically check if 'week_ending' exists after cleaning
+        if 'week_ending' in hist_df.columns:
+            display_cols.append('week_ending')
+            
         # Rename columns back for friendly display
         hist_df_display = hist_df[display_cols].rename(columns={
             'work_order_id': 'Run Index # (Unique ID)', # Renamed for clarity
@@ -604,7 +612,8 @@ with tab_part_risk:
         })
         
         st.dataframe(
-            hist_df_display.sort_values(by='Week Ending', ascending=False),
+            # Sort by run index instead of week ending, as week ending might not be perfectly chronological
+            hist_df_display.sort_values(by='Run Index # (Unique ID)', ascending=False),
             use_container_width=True,
             hide_index=True
         )
