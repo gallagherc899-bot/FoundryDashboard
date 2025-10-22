@@ -16,6 +16,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss
 from scipy.stats import mannwhitneyu
 from pandas.util import hash_pandas_object # Required for Streamlit caching fix
+from sklearn.base import clone # REQUIRED FOR FEATURE IMPORTANCE FIX
 
 # --- CONSTANTS AND CONFIG ---
 # Used for the single-sample filtering fix
@@ -205,11 +206,13 @@ if df_avg.empty or df_ml.empty:
 def train_random_forest_model(df_ml: pd.DataFrame):
     """
     Trains and calibrates a Random Forest Classifier.
-    Includes filtering for single-sample classes and diagnostic output.
+    Returns: model, X_train, X_test, y_train, y_test, feature_cols, calib_method, p_test
     """
     if df_ml.empty:
         st.error("The ML DataFrame is empty. Cannot train model.")
-        return None, pd.DataFrame(), pd.Series(dtype=int), [], "None", pd.Series(dtype=float)
+        # Return a tuple with None or empty dataframes for error handling
+        return None, pd.DataFrame(), pd.DataFrame(), pd.Series(), pd.Series(), [], "None", pd.Series()
+
 
     # =========================================================================
     # DEBUG START: Show initial class counts
@@ -225,8 +228,6 @@ def train_random_forest_model(df_ml: pd.DataFrame):
     class_counts = df_ml[TARGET_COLUMN].value_counts()
     
     # 2. Identify classes with only one sample (these cause the ValueError)
-    # NOTE: Since the target is now 0 (High Yield) and 1 (Low Yield), this filter 
-    #       is still necessary if one of the new classes only has one sample.
     single_sample_classes = class_counts[class_counts == 1].index.tolist()
     
     df_ml_original_len = len(df_ml)
@@ -257,7 +258,7 @@ def train_random_forest_model(df_ml: pd.DataFrame):
             "Final Error: After filtering, the data contains only one class or is empty. "
             "Model training cannot proceed without at least two classes (0 and 1)."
         )
-        return None, pd.DataFrame(), pd.Series(dtype=int), [], "None", pd.Series(dtype=float)
+        return None, pd.DataFrame(), pd.DataFrame(), pd.Series(), pd.Series(), [], "None", pd.Series()
 
     # Identify feature columns (ending with '_rate' from data loading)
     feature_cols = [col for col in df_ml.columns if col.endswith('_rate')] 
@@ -295,12 +296,12 @@ def train_random_forest_model(df_ml: pd.DataFrame):
 
     st.caption("NOTE: The model now predicts the probability of a run being **Low Yield** (High Scrap, above the median) versus High Yield (Low Scrap, at or below the median).")
 
+    # Return training data as well to fix the feature importance calculation
+    return model, X_train, X_test, y_train, y_test, feature_cols, calib_method, p_test
 
-    return model, X_test, y_test, feature_cols, calib_method, p_test
 
-
-# Train the model once the function is defined
-model, X_test, y_test, feature_cols, calib_method, p_test = train_random_forest_model(df_ml)
+# Train the model and retrieve all necessary data splits
+model, X_train, X_test, y_train, y_test, feature_cols, calib_method, p_test = train_random_forest_model(df_ml)
 
 if model is None:
     st.stop() # Stop the script if model training failed
@@ -331,18 +332,31 @@ def calculate_cycles_to_target(initial_scrap_rate, reduction_factor, target_scra
     # If the loop hits MAX_CYCLES, it means it failed to converge quickly
     return cycles if cycles < MAX_CYCLES else MAX_CYCLES 
 
-def calculate_feature_importances(model, feature_cols, X_test, y_test):
+def calculate_feature_importances(model, feature_cols, X_train, X_test, y_test):
     """
-    Calculates feature importance from the Random Forest model and adds 
-    statistical significance (Mann-Whitney U-test).
+    Calculates feature importance by re-fitting the base Random Forest estimator 
+    on the training data (X_train, y_train) to safely extract importances.
     """
-    # Use built-in feature importances from the base Random Forest estimator
-    rf_model = model.estimator
-    importances = pd.Series(
-        rf_model.feature_importances_, 
-        index=feature_cols
-    ).sort_values(ascending=False)
-    
+    # FIX: model.estimator is the UN-FITTED base model. We must clone and fit it 
+    # to the training data to get feature_importances_.
+    try:
+        base_rf = clone(model.estimator)
+        base_rf.fit(X_train, y_train) # Fit on the data used for the main model's CV folds
+
+        importances = pd.Series(
+            base_rf.feature_importances_, 
+            index=feature_cols
+        ).sort_values(ascending=False)
+    except Exception as e:
+        st.error(f"Error during feature importance calculation: {e}. Check X_train/y_train contents.")
+        # Return empty data if failure occurs
+        return pd.DataFrame({
+            'Feature': feature_cols, 
+            'Importance (Gini)': 0, 
+            'P-Value (Mann-Whitney U)': 1.0, 
+            'Significance': ''
+        })
+
     # Calculate U-test p-values (Mann-Whitney U-test for feature significance)
     p_values = {}
     X_df = X_test.copy()
@@ -439,7 +453,8 @@ st.markdown("---")
 # --- 5.1. Feature Importance & Model Performance ---
 st.header("1. Causal Feature Analysis & Model Performance")
 
-importance_df = calculate_feature_importances(model, feature_cols, X_test, y_test)
+# Updated call to include X_train and y_train
+importance_df = calculate_feature_importances(model, feature_cols, X_train, X_test, y_test)
 
 col_imp, col_diag = st.columns([0.6, 0.4])
 
