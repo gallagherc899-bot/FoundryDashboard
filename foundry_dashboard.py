@@ -49,39 +49,36 @@ MAX_CYCLES = 100
 def load_and_prepare_data():
     """
     Loads, cleans, and prepares data for simulation, ML, and historical context.
-    The primary fix here is a robust column cleaning pipeline.
+    All column names are converted to snake_case for consistency.
     """
     try:
         df_historical = pd.read_csv('anonymized_parts.csv')
         
         # --- Robust Column Name Cleaning (converts to snake_case) ---
-        # 1. Lowercase, replace spaces with underscores
-        df_historical.columns = df_historical.columns.str.lower().str.replace(' ', '_')
-        # 2. Clean up special characters and rename key columns
-        df_historical.columns = df_historical.columns.str.replace('#', '_id').str.replace('%', '_percent').str.replace('(', '').str.replace(')', '').str.replace('.', '').str.strip('_')
-        
-        # Normalize double underscores created by cleaning
-        df_historical.columns = [col.replace('__', '_') for col in df_historical.columns]
+        df_historical.columns = (
+            df_historical.columns.str.lower()
+            .str.replace(' ', '_', regex=True)
+            .str.replace('#', '_id', regex=True)
+            .str.replace('%', '_percent', regex=True)
+            .str.replace(r'[\(\)\.\/]+', '', regex=True) # Remove parentheses and dots
+            .str.replace('__', '_', regex=True)
+            .str.strip('_')
+        )
 
-        # --- Standardize Key Column Names for Code Use ---
-        # This renames the snake_case names into consistent mixed-case names used throughout the code
-        df_historical = df_historical.rename(columns={
-            'scrap_percent': 'Scrap_Percent_Hist',
-            'part_id': 'Part_ID',
-            'work_order_id': 'Work_Order_ID',
-            'order_quantity': 'Order_Quantity',
-            'pieces_scrapped': 'Pieces_Scrapped',
-            'piece_weight_lbs': 'Piece_Weight_lbs'
-        }, errors='ignore')
+        # --- Standardize Key Column Name for Scrap History ---
+        # The column that was "Scrap%" is now "scrap_percent". We rename it to "scrap_percent_hist"
+        df_historical = df_historical.rename(columns={'scrap_percent': 'scrap_percent_hist'}, errors='ignore')
+        
+        # Convert historical scrap percentage to decimal
+        df_historical['scrap_percent_hist'] = df_historical['scrap_percent_hist'] / 100.0
         
         # --- Data for Simulation (df_avg: Averages/Max rates per Part ID) ---
-        df_historical['Scrap_Percent_Hist'] = df_historical['Scrap_Percent_Hist'] / 100.0
-        
-        df_avg = df_historical.groupby('Part_ID').agg(
-            Scrap_Percent_Baseline=('Scrap_Percent_Hist', 'max'),
-            Avg_Order_Quantity=('Order_Quantity', 'mean'),
-            Avg_Piece_Weight=('Piece_Weight_lbs', 'mean'),
-            Total_Runs=('Work_Order_ID', 'count') # Using the corrected name
+        # NOTE: All column references are now snake_case
+        df_avg = df_historical.groupby('part_id').agg(
+            Scrap_Percent_Baseline=('scrap_percent_hist', 'max'),
+            Avg_Order_Quantity=('order_quantity', 'mean'),
+            Avg_Piece_Weight=('piece_weight_lbs', 'mean'),
+            Total_Runs=('work_order_id', 'count') 
         ).reset_index()
 
         df_avg['Est_Annual_Scrap_Weight_lbs'] = df_avg.apply(
@@ -90,18 +87,18 @@ def load_and_prepare_data():
         )
         
         # Calculate total historical scrap pieces for cost avoidance estimation
-        df_historical['Scrap_Pieces'] = df_historical['Pieces_Scrapped'] # Using the corrected name
-        total_historical_scrap_pieces = df_historical['Scrap_Pieces'].sum()
+        df_historical['scrap_pieces'] = df_historical['pieces_scrapped'] 
+        total_historical_scrap_pieces = df_historical['scrap_pieces'].sum()
         
         # --- Data for Machine Learning (df_ml: Work Orders with Binary Scrap Causes) ---
         df_ml = df_historical.copy()
         
         # Target variable for ML: 1 if scrap occurred, 0 otherwise
-        df_ml['Is_Scrapped'] = (df_ml['Scrap_Percent_Hist'] > 0).astype(int)
+        df_ml['is_scrapped'] = (df_ml['scrap_percent_hist'] > 0).astype(int)
         
         # Features for ML: Scrap Cause columns (Rate columns)
-        # Note: The original rate columns were already snake_case/cleaned in the first step
-        rate_cols = [col for col in df_ml.columns if 'rate' in col.lower() and col not in ['scrap_percent_hist', 'is_scrapped']]
+        # Find all columns ending in '_rate'
+        rate_cols = [col for col in df_ml.columns if col.endswith('_rate')]
         
         # Convert rate columns into binary features (1 if cause was present, 0 otherwise)
         for col in rate_cols:
@@ -123,7 +120,7 @@ df_avg, df_ml, total_historical_scrap_pieces, df_historical = load_and_prepare_d
 if df_avg.empty or df_ml.empty:
     st.stop() # Stop the script if data loading failed
 
-# --- 3. SIMULATION & CALCULATION FUNCTIONS (Unchanged) ---
+# --- 3. SIMULATION & CALCULATION FUNCTIONS (Unchanged logic, uses consistent column names) ---
 
 def calculate_cycles_to_target(initial_scrap_rate, reduction_factor, target_scrap):
     """Calculates the number of runs (cycles) required for a single part to hit the target."""
@@ -150,7 +147,8 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
     target_scrap_decimal = target_scrap_percent / 100.0
     improvement_factor = 1.0 - reduction_factor
     
-    current_part_status = df_avg[['Part_ID', 'Scrap_Percent_Baseline']].copy()
+    # Use 'part_id' column from df_avg (which was groupby'd by 'part_id')
+    current_part_status = df_avg[['part_id', 'Scrap_Percent_Baseline']].copy()
     current_part_status.rename(columns={'Scrap_Percent_Baseline': 'Latest_Scrap_Percent'}, inplace=True)
     
     total_cycles = 0
@@ -164,9 +162,9 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
         
         cycle_savings = 0.0
         
-        for part_id in parts_to_improve['Part_ID']:
-            current_scrap_rate = current_part_status[current_part_status['Part_ID'] == part_id]['Latest_Scrap_Percent'].iloc[0]
-            part_metrics = df_avg[df_avg['Part_ID'] == part_id].iloc[0]
+        for part_id in parts_to_improve['part_id']:
+            current_scrap_rate = current_part_status[current_part_status['part_id'] == part_id]['Latest_Scrap_Percent'].iloc[0]
+            part_metrics = df_avg[df_avg['part_id'] == part_id].iloc[0]
             
             new_scrap_rate = current_scrap_rate * improvement_factor
             new_scrap_rate = max(new_scrap_rate, target_scrap_decimal)
@@ -177,7 +175,7 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
             weight_saved = scrap_weight_before - scrap_weight_after
             cycle_savings += weight_saved
             
-            current_part_status.loc[current_part_status['Part_ID'] == part_id, 'Latest_Scrap_Percent'] = new_scrap_rate
+            current_part_status.loc[current_part_status['part_id'] == part_id, 'Latest_Scrap_Percent'] = new_scrap_rate
 
         total_cycles += 1
         total_cumulative_savings += cycle_savings
@@ -190,10 +188,10 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
 def train_random_forest_model(df_ml):
     """Trains a Calibrated Random Forest classifier to predict if a work order will scrap."""
     # Identify binary scrap cause columns as features (using the snake_case names)
-    feature_cols = [col for col in df_ml.columns if 'rate' in col.lower() and col not in ['scrap_percent_hist', 'is_scrapped']]
+    feature_cols = [col for col in df_ml.columns if col.endswith('_rate')]
 
     X = df_ml[feature_cols]
-    y = df_ml['Is_Scrapped']
+    y = df_ml['is_scrapped'] # Use snake_case
     
     # --- FIX for ValueError: Stratification issue ---
     class_counts = y.value_counts()
@@ -215,7 +213,6 @@ def train_random_forest_model(df_ml):
     base_model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
 
     # Calibrate the probabilities using Isotonic regression for better risk estimation
-    # cv=5 is used for internal cross-validation for calibration
     model = CalibratedClassifierCV(
         estimator=base_model,
         method='isotonic', 
@@ -232,13 +229,12 @@ def predict_part_risk(model, part_id, df_ml, feature_cols):
     and predicts the scrap probability.
     """
     # 1. Get the average feature profile for the selected part
-    part_data = df_ml[df_ml['Part_ID'] == part_id]
+    part_data = df_ml[df_ml['part_id'] == part_id] # Use snake_case
     
     if part_data.empty:
         return 0.0, None
 
     # Calculate the mean of the binary cause features for this specific part.
-    # This represents the historical probability of each cause being present for this part.
     mean_features = part_data[feature_cols].mean().to_frame().T
     
     # 2. Predict the probability of scrap (Is_Scrapped=1)
@@ -259,11 +255,11 @@ def run_statistical_validation(df_ml, df_avg):
     the distribution of scrap rates between all runs and the top 10 worst parts.
     """
     # 1. Scrap rates for all runs where scrap occurred
-    all_scrap_rates = df_ml[df_ml['Scrap_Percent_Hist'] > 0]['Scrap_Percent_Hist'] * 100
+    all_scrap_rates = df_ml[df_ml['scrap_percent_hist'] > 0]['scrap_percent_hist'] * 100 # Use snake_case
     
     # 2. Scrap rates for the top 10 worst parts (by max historical rate)
-    top_parts = df_avg.sort_values(by='Scrap_Percent_Baseline', ascending=False)['Part_ID'].head(10).tolist()
-    top_scrap_rates = df_ml[df_ml['Part_ID'].isin(top_parts) & (df_ml['Scrap_Percent_Hist'] > 0)]['Scrap_Percent_Hist'] * 100
+    top_parts = df_avg.sort_values(by='Scrap_Percent_Baseline', ascending=False)['part_id'].head(10).tolist() # Use snake_case
+    top_scrap_rates = df_ml[df_ml['part_id'].isin(top_parts) & (df_ml['scrap_percent_hist'] > 0)]['scrap_percent_hist'] * 100 # Use snake_case
     
     if all_scrap_rates.empty or top_scrap_rates.empty:
         return "Insufficient non-zero scrap data to run statistical test.", 1.0, 0, 0
@@ -286,11 +282,11 @@ def run_statistical_validation(df_ml, df_avg):
 # --- 5. STREAMLIT APP LAYOUT ---
 
 st.title("🏭 Foundry Scrap Risk Dashboard")
+# Use snake_case for access
 st.markdown(f"**Target Scrap Floor:** **{TARGET_SCRAP_PERCENT:.1f}%** | **Total Parts Analyzed:** {len(df_avg)}")
 
 # Train the model once for all tabs
 with st.spinner("Initializing ML Model for Predictions..."):
-    # The feature columns here will be the snake_case rate columns
     model, X_test, y_test, feature_cols = train_random_forest_model(df_ml)
 
 # Define the tabs
@@ -353,6 +349,7 @@ with tab_sim:
     st.header("2. Tactical Manager Actionable Dashboard")
     st.markdown(f"Prioritization tool: Showing the **Top 30 Parts** based on highest historical scrap rate and estimated annual weight loss.")
 
+    # Use snake_case for access
     df_dashboard = df_avg.sort_values(by='Scrap_Percent_Baseline', ascending=False).head(30).copy()
 
     for factor in [0.30, 0.25, 0.20]:
@@ -369,7 +366,7 @@ with tab_sim:
     df_dashboard['Est. Annual Scrap (lbs)'] = df_dashboard['Est_Annual_Scrap_Weight_lbs'].round(0).astype(int)
 
     dashboard_cols = [
-        'Part_ID',
+        'part_id', # Use snake_case
         'Max Hist. Scrap %',
         'Est. Annual Scrap (lbs)',
         '30% Cycles', '30% Days',
@@ -378,6 +375,7 @@ with tab_sim:
     ]
 
     df_dashboard = df_dashboard[dashboard_cols]
+    df_dashboard.rename(columns={'part_id': 'Part ID'}, inplace=True) # Rename back for display
 
     st.dataframe(
         df_dashboard.style.background_gradient(cmap='Reds', subset=['Est. Annual Scrap (lbs)']),
@@ -452,7 +450,7 @@ with tab_part_risk:
     st.markdown("Predict the probability of a future work order scrapping for a specific part based on its historical risk profile.")
     
     # --- Input Form ---
-    part_ids = sorted(df_avg['Part_ID'].unique().tolist())
+    part_ids = sorted(df_avg['part_id'].unique().tolist()) # Use snake_case
     
     col_form1, col_form2, col_form3 = st.columns(3)
     
@@ -464,7 +462,8 @@ with tab_part_risk:
     
     # Use average weight and quantity as initial values
     if selected_part_id:
-        avg_metrics = df_avg[df_avg['Part_ID'] == selected_part_id].iloc[0]
+        # Use snake_case
+        avg_metrics = df_avg[df_avg['part_id'] == selected_part_id].iloc[0] 
         default_weight = avg_metrics['Avg_Piece_Weight']
         default_quantity = avg_metrics['Avg_Order_Quantity']
     else:
@@ -488,7 +487,8 @@ with tab_part_risk:
     # --- Prediction Calculation ---
     prob_scrap, part_drivers = predict_part_risk(model, selected_part_id, df_ml, feature_cols)
     
-    max_hist_scrap_rate = df_avg[df_avg['Part_ID'] == selected_part_id]['Scrap_Percent_Baseline'].iloc[0]
+    # Use snake_case
+    max_hist_scrap_rate = df_avg[df_avg['part_id'] == selected_part_id]['Scrap_Percent_Baseline'].iloc[0]
     
     # Expected Scrap Pieces = Order Quantity * Max Historical Rate * Prob(Scrap)
     expected_scrap_pieces = order_quantity * max_hist_scrap_rate * prob_scrap
@@ -542,22 +542,31 @@ with tab_part_risk:
     with col_hist:
         st.subheader(f"Historical Work Orders for {selected_part_id}")
         
-        hist_df = df_historical[df_historical['Part_ID'] == selected_part_id].copy()
+        hist_df = df_historical[df_historical['part_id'] == selected_part_id].copy() # Use snake_case
         
-        hist_df['Scrap_%'] = (hist_df['Scrap_Percent_Hist'] * 100).round(2)
+        hist_df['Scrap_%'] = (hist_df['scrap_percent_hist'] * 100).round(2) # Use snake_case
         
         # Display relevant columns, using corrected names
         display_cols = [
-            'Work_Order_ID', 
-            'Order_Quantity', 
-            'Pieces_Scrapped', 
+            'work_order_id', # Use snake_case
+            'order_quantity', # Use snake_case
+            'pieces_scrapped', # Use snake_case
             'Scrap_%', 
-            'Piece_Weight_lbs', 
-            'Week_Ending'
+            'piece_weight_lbs', # Use snake_case
+            'week_ending' # Use snake_case
         ]
         
+        # Rename columns back for friendly display
+        hist_df_display = hist_df[display_cols].rename(columns={
+            'work_order_id': 'Work Order ID',
+            'order_quantity': 'Order Quantity',
+            'pieces_scrapped': 'Pieces Scrapped',
+            'piece_weight_lbs': 'Piece Weight (lbs)',
+            'week_ending': 'Week Ending'
+        })
+        
         st.dataframe(
-            hist_df[display_cols].sort_values(by='Week_Ending', ascending=False),
+            hist_df_display.sort_values(by='Week Ending', ascending=False),
             use_container_width=True,
             hide_index=True
         )
