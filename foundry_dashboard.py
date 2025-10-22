@@ -1,391 +1,681 @@
+# streamlit_app.py
+# Run with: streamlit run streamlit_app.py
+
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-import pandas as pd
+import os
 import numpy as np
+import pandas as pd
 import streamlit as st
-import math
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
-from scipy.stats import mannwhitneyu
 
-# Use the existing Streamlit page configuration structure
+from dateutil.relativedelta import relativedelta
+from scipy.stats import wilcoxon
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import brier_score_loss, accuracy_score
+
+# -----------------------------
+# Page / constants
+# -----------------------------
 st.set_page_config(
-    page_title="Foundry Scrap Risk Dashboard — Actionable Insights",
+    page_title="Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTFscrap & Exceedance)",
     layout="wide"
 )
 
-# --- 1. CONFIGURATION (Moved to Streamlit Sidebar) ---
-st.sidebar.title("Simulation Configuration")
+RANDOM_STATE = 42
+DEFAULT_ESTIMATORS = 180         # UPDATED: Increased trees from 150 to 180
+MIN_SAMPLES_LEAF = 2
 
-# Financial Inputs
-st.sidebar.subheader("Financial Metrics (USD)")
-MATERIAL_COST_PER_LB = st.sidebar.number_input(
-    "Material Cost/Value per lb ($)", value=2.50, step=0.10, format="%.2f"
-)
-LABOR_OVERHEAD_COST_PER_LB = st.sidebar.number_input(
-    "Labor/Overhead Cost per lb ($)", value=0.50, step=0.10, format="%.2f"
-)
-AVG_NON_MATERIAL_COST_PER_FAILURE = st.sidebar.number_input(
-    "Non-Material Cost per Failure ($)", value=150.00, step=10.00
-)
+S_GRID = np.linspace(0.6, 1.2, 13)      # {0.60,...,1.20}
+GAMMA_GRID = np.linspace(0.5, 1.2, 15)  # {0.50,...,1.20}
+TOP_K_PARETO = 8
 
-# Simulation Target and Effort
-st.sidebar.subheader("Target & Effort")
-TARGET_SCRAP_PERCENT = st.sidebar.slider(
-    "Ultimate Scrap Target (%)", min_value=0.5, max_value=5.0, value=1.5, step=0.1
-)
-REDUCTION_SCENARIOS = [
-    0.30, 0.25, 0.20, 0.15, 0.10, 0.05
-]
-# Hardcoded max cycles for simulation stability
-MAX_CYCLES = 100
+# -----------------------------
+# Helpers
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def load_and_clean(csv_path: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    df.columns = (
+        df.columns.str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("(", "", regex=False)
+        .str.replace(")", "", regex=False)
+        .str.replace("#", "num", regex=False)
+    )
+    needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing column(s): {missing}")
 
-# --- 2. DATA LOADING AND PREPARATION ---
+    df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
+    df = df.dropna(subset=needed).copy()
 
-@st.cache_data
-def load_and_prepare_data():
-    """
-    Loads, cleans, and prepares data for both the simulation (df_avg) and 
-    machine learning (df_ml).
-    """
+    for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
+
+    if "pieces_scrapped" not in df.columns:
+        df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]).astype(int)
+
+    df = df.sort_values("week_ending").reset_index(drop=True)
+    return df
+
+def time_split(df: pd.DataFrame, train_frac=0.60, calib_frac=0.20):
+    n = len(df)
+    t_end = int(train_frac * n)
+    c_end = int((train_frac + calib_frac) * n)
+
+    df_train = df.iloc[:t_end].copy()
+    df_calib = df.iloc[t_end:c_end].copy()
+    df_test  = df.iloc[c_end:].copy()
+
+    # prevent part leakage
+    train_parts = set(df_train.part_id.unique())
+    df_calib = df_calib[~df_calib.part_id.isin(train_parts)].copy()
+    calib_parts = set(df_calib.part_id.unique())
+    df_test  = df_test[~df_test.part_id.isin(train_parts.union(calib_parts))].copy()
+    return df_train, df_calib, df_test
+
+def compute_mtbf_on_train(df_train: pd.DataFrame, thr_label: float) -> pd.DataFrame:
+    t = df_train.copy()
+    t["scrap_flag"] = (t["scrap%"] > thr_label).astype(int)
+    mtbf = t.groupby("part_id").agg(
+        total_runs=("scrap%", "count"),
+        failures=("scrap_flag", "sum")
+    )
+    mtbf["mttf_scrap"] = mtbf["total_runs"] / mtbf["failures"].replace(0, np.nan)
+    mtbf["mttf_scrap"] = mtbf["mttf_scrap"].fillna(mtbf["total_runs"])
+    return mtbf[["mttf_scrap"]]
+
+def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, default_freq):
+    s = df_sub.merge(mtbf_train, on="part_id", how="left")
+    s["mttf_scrap"] = s["mttf_scrap"].fillna(default_mtbf)
+    s = s.merge(part_freq_train.rename("part_freq"), left_on="part_id", right_index=True, how="left")
+    s["part_freq"] = s["part_freq"].fillna(default_freq)
+    return s
+
+def make_xy(df, thr_label: float, use_rate_cols: bool):
+    feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
+    if use_rate_cols:
+        feats += [c for c in df.columns if c.endswith("_rate")]
+    X = df[feats].copy()
+    y = (df["scrap%"] > thr_label).astype(int)
+    return X, y, feats
+
+@st.cache_resource(show_spinner=True)
+def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
+    rf = RandomForestClassifier(
+        n_estimators=n_estimators,
+        min_samples_leaf=MIN_SAMPLES_LEAF,
+        class_weight="balanced",
+        random_state=RANDOM_STATE,
+        n_jobs=-1
+    ).fit(X_train, y_train)
+
+    has_both = (y_calib.sum() > 0) and (y_calib.sum() < len(y_calib))
+    method = "isotonic" if has_both and len(y_calib) > 500 else "sigmoid"
     try:
-        df_historical = pd.read_csv('anonymized_parts.csv')
-        df_historical = df_historical.rename(columns={'Scrap%': 'Scrap_Percent_Hist', 'Part ID': 'Part_ID'})
-        df_historical['Scrap_Percent_Hist'] = df_historical['Scrap_Percent_Hist'] / 100.0
-        
-        # --- Data for Simulation (df_avg: Averages/Max rates per Part ID) ---
-        df_avg = df_historical.groupby('Part_ID').agg(
-            Scrap_Percent_Baseline=('Scrap_Percent_Hist', 'max'),
-            Avg_Order_Quantity=('Order Quantity', 'mean'),
-            Avg_Piece_Weight=('Piece Weight (lbs)', 'mean'),
-            Total_Runs=('Work Order #', 'count')
-        ).reset_index()
+        cal = CalibratedClassifierCV(estimator=rf, method=method, cv="prefit").fit(X_calib, y_calib)
+    except Exception:
+        cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv="prefit").fit(X_calib, y_calib)
+        method = "sigmoid"
+    return rf, cal, method
 
-        df_avg['Est_Annual_Scrap_Weight_lbs'] = df_avg.apply(
-            lambda row: row['Scrap_Percent_Baseline'] * row['Avg_Order_Quantity'] * row['Avg_Piece_Weight'] * min(52, row['Total_Runs']), 
-            axis=1
-        )
-        
-        # Calculate total historical scrap pieces for cost avoidance estimation
-        df_historical['Scrap_Pieces'] = df_historical['Pieces Scrapped']
-        total_historical_scrap_pieces = df_historical['Scrap_Pieces'].sum()
-        
-        # --- Data for Machine Learning (df_ml: Work Orders with Binary Scrap Causes) ---
-        df_ml = df_historical.copy()
-        
-        # Target variable for ML: 1 if scrap occurred, 0 otherwise
-        df_ml['Is_Scrapped'] = (df_ml['Scrap_Percent_Hist'] > 0).astype(int)
-        
-        # Features for ML: Scrap Cause columns (Rate columns)
-        rate_cols = [col for col in df_ml.columns if 'Rate' in col]
-        
-        # Convert rate columns into binary features (1 if cause was present, 0 otherwise)
-        for col in rate_cols:
-            df_ml[col] = (df_ml[col] > 0).astype(int)
+def tune_s_gamma_on_validation(p_val_raw, y_val, part_ids_val, part_scale,
+                               s_grid=S_GRID, gamma_grid=GAMMA_GRID):
+    """Minimize Brier on validation for p_adj = p_raw * s * (part_scale^gamma)."""
+    ps = part_scale.reindex(part_ids_val).fillna(1.0).to_numpy(dtype=float)
+    best = (np.inf, 1.0, 1.0)
+    for s in s_grid:
+        for g in gamma_grid:
+            p_adj = np.clip(p_val_raw * (s * (ps ** g)), 0, 1)
+            score = brier_score_loss(y_val, p_adj)
+            if score < best[0]:
+                best = (score, s, g)
+    return {"brier_val": best[0], "s": best[1], "gamma": best[2]}
 
-        return df_avg, df_ml, total_historical_scrap_pieces
+def prior_shift_logit(p_raw, src_prev, tgt_prev):
+    """Saerens–Latinne prior correction on logits."""
+    p = np.clip(p_raw, 1e-6, 1-1e-6)
+    logit = np.log(p/(1-p))
+    delta = np.log(np.clip(tgt_prev,1e-6,1-1e-6)) - np.log(np.clip(1-tgt_prev,1e-6,1))
+    delta -= np.log(np.clip(src_prev,1e-6,1-1e-6)) - np.log(np.clip(1-src_prev,1e-6,1))
+    p_adj = 1/(1 + np.exp(-(logit + delta)))
+    return np.clip(p_adj, 1e-6, 1-1e-6)
 
-    except FileNotFoundError:
-        st.error("Error: 'anonymized_parts.csv' not found. Please ensure the file is correctly named and available.")
-        return pd.DataFrame(), pd.DataFrame(), 0
-    except Exception as e:
-        st.error(f"An error occurred during data processing: {e}")
-        return pd.DataFrame(), pd.DataFrame(), 0
-
-
-df_avg, df_ml, total_historical_scrap_pieces = load_and_prepare_data()
-
-if df_avg.empty or df_ml.empty:
-    st.stop() # Stop the script if data loading failed
-
-# --- 3. SIMULATION & CALCULATION FUNCTIONS ---
-
-def calculate_cycles_to_target(initial_scrap_rate, reduction_factor, target_scrap):
-    """Calculates the number of runs (cycles) required for a single part to hit the target."""
-    target_scrap_decimal = target_scrap / 100.0
-    if initial_scrap_rate <= target_scrap_decimal:
-        return 0
-    
-    improvement_factor = 1.0 - reduction_factor
-    current_rate = initial_scrap_rate
-    cycles = 0
-    
-    buffer = 1e-9 
-    
-    while current_rate > target_scrap_decimal + buffer and cycles < MAX_CYCLES: 
-        current_rate *= improvement_factor
-        current_rate = max(current_rate, target_scrap_decimal)
-        cycles += 1
-        
-    return cycles
-
-
-def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_percent):
-    """Runs the full simulation to get total cycles and savings."""
-    target_scrap_decimal = target_scrap_percent / 100.0
-    improvement_factor = 1.0 - reduction_factor
-    
-    current_part_status = df_avg[['Part_ID', 'Scrap_Percent_Baseline']].copy()
-    current_part_status.rename(columns={'Scrap_Percent_Baseline': 'Latest_Scrap_Percent'}, inplace=True)
-    
-    total_cycles = 0
-    total_cumulative_savings = 0.0
-    
-    while total_cycles < MAX_CYCLES:
-        parts_to_improve = current_part_status[current_part_status['Latest_Scrap_Percent'] > target_scrap_decimal]
-        
-        if parts_to_improve.empty:
-            break
-        
-        cycle_savings = 0.0
-        
-        for part_id in parts_to_improve['Part_ID']:
-            current_scrap_rate = current_part_status[current_part_status['Part_ID'] == part_id]['Latest_Scrap_Percent'].iloc[0]
-            part_metrics = df_avg[df_avg['Part_ID'] == part_id].iloc[0]
-            
-            new_scrap_rate = current_scrap_rate * improvement_factor
-            new_scrap_rate = max(new_scrap_rate, target_scrap_decimal)
-            
-            scrap_weight_before = current_scrap_rate * part_metrics['Avg_Order_Quantity'] * part_metrics['Avg_Piece_Weight']
-            scrap_weight_after = new_scrap_rate * part_metrics['Avg_Order_Quantity'] * part_metrics['Avg_Piece_Weight']
-            
-            weight_saved = scrap_weight_before - scrap_weight_after
-            cycle_savings += weight_saved
-            
-            current_part_status.loc[current_part_status['Part_ID'] == part_id, 'Latest_Scrap_Percent'] = new_scrap_rate
-
-        total_cycles += 1
-        total_cumulative_savings += cycle_savings
-        
-    return total_cycles, total_cumulative_savings
-
-# --- 4. MACHINE LEARNING AND VALIDATION FUNCTIONS ---
-
-@st.cache_data
-def train_random_forest_model(df_ml):
-    """Trains a Random Forest classifier to predict if a work order will scrap."""
-    # Identify binary scrap cause columns as features
-    feature_cols = [col for col in df_ml.columns if 'Rate' in col]
-
-    X = df_ml[feature_cols]
-    y = df_ml['Is_Scrapped']
-    
-    # --- FIX for ValueError: Stratification issue ---
-    # Check if the minority class is large enough for stratification (needs at least 2 samples)
-    class_counts = y.value_counts()
-    min_class_count = class_counts.min()
-
-    # If the minimum class size is less than 2, stratification is impossible.
-    if min_class_count < 2:
-        st.warning("Warning: Scrap target class has fewer than 2 samples. Disabling stratification for train/test split to prevent error.")
-        stratify_param = None
-    else:
-        # Otherwise, proceed with stratification
-        stratify_param = y
-    # --- END FIX ---
-    
-    # Stratified split to maintain balance of 'Is_Scrapped' if possible
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=stratify_param
+# Exceedance baselines at current threshold
+def compute_part_exceedance_baselines(df_train: pd.DataFrame, thr_label: float):
+    """Per-part prevalence of exceeding the threshold, and a scale vs global prevalence."""
+    part_prev = (
+        df_train.assign(exceed=(df_train["scrap%"] > thr_label).astype(int))
+                .groupby("part_id")["exceed"].mean()
+                .clip(lower=1e-6, upper=0.999)
     )
+    global_prev = float(part_prev.mean()) if len(part_prev) else 0.5
+    part_scale = (part_prev / max(global_prev, 1e-6)).fillna(1.0).clip(lower=0.25, upper=4.0)
+    return part_prev, part_scale, global_prev
 
-    # Use balanced class weight to handle imbalance (more non-scrap runs)
-    model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
-    model.fit(X_train, y_train)
-    
-    return model, X_test, y_test, feature_cols
-
-def run_statistical_validation(df_ml, df_avg):
+def build_input_row_for_part(selected_part: int,
+                             quantity: float,
+                             weight: float,
+                             mttf_value: float,
+                             part_freq_value: float,
+                             FEATURES: list,
+                             df_train: pd.DataFrame) -> pd.DataFrame:
     """
-    Performs a Mann-Whitney U Test (non-parametric two-sample test) to compare 
-    the distribution of scrap rates between all runs and the top 10 worst parts.
+    Build a one-row dataframe aligned to FEATURES.
+    For *_rate columns, fill with the part's historical mean (fallback = global mean).
     """
-    # 1. Scrap rates for all runs where scrap occurred
-    all_scrap_rates = df_ml[df_ml['Scrap_Percent_Hist'] > 0]['Scrap_Percent_Hist'] * 100
-    
-    # 2. Scrap rates for the top 10 worst parts (by max historical rate)
-    top_parts = df_avg.sort_values(by='Scrap_Percent_Baseline', ascending=False)['Part_ID'].head(10).tolist()
-    top_scrap_rates = df_ml[df_ml['Part_ID'].isin(top_parts) & (df_ml['Scrap_Percent_Hist'] > 0)]['Scrap_Percent_Hist'] * 100
-    
-    if all_scrap_rates.empty or top_scrap_rates.empty:
-        return "Insufficient non-zero scrap data to run statistical test.", 1.0, 0, 0
+    base = {"order_quantity": quantity,
+            "piece_weight_lbs": weight,
+            "mttf_scrap": mttf_value,
+            "part_freq": part_freq_value}
 
-    # Mann-Whitney U Test: Compares if two independent samples are from the same distribution.
-    # We hypothesize that the top parts have significantly higher scrap rates (Alternative: greater)
-    
-    # Ensure samples are the same size (up to 1000) for a cleaner comparison/faster runtime
-    sample_size = min(len(all_scrap_rates), len(top_scrap_rates), 1000)
-    
-    sample1 = all_scrap_rates.sample(sample_size, random_state=42, replace=True if len(all_scrap_rates) < sample_size else False)
-    sample2 = top_scrap_rates.sample(sample_size, random_state=42, replace=True if len(top_scrap_rates) < sample_size else False)
+    row = pd.DataFrame([base], columns=["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"])
 
-    u_stat, p_value = mannwhitneyu(
-        sample1, 
-        sample2, 
-        alternative='less' # Test if the first sample (all parts) is stochastically smaller than the second (top 10 parts)
-    )
-    
-    return "Mann-Whitney U Test (Non-parametric distribution comparison)", p_value, all_scrap_rates.mean(), top_scrap_rates.mean()
+    rate_cols = [c for c in FEATURES if c.endswith("_rate")]
+    if rate_cols:
+        part_hist = df_train[df_train["part_id"] == selected_part][rate_cols].mean()
+        global_hist = df_train[rate_cols].mean()
+        filled = part_hist.fillna(global_hist).fillna(0.0)
+        for c in rate_cols:
+            row[c] = float(filled.get(c, float(global_hist.get(c, 0.0))))
+    # Reorder to FEATURES exactly
+    row = row.reindex(columns=FEATURES, fill_value=0.0)
+    return row
 
+def local_defect_drivers(calibrated_model,
+                         input_row: pd.DataFrame,
+                         FEATURES: list,
+                         df_train: pd.DataFrame,
+                         strategy: str = "p75",
+                         k: int = TOP_K_PARETO) -> pd.DataFrame:
+    """
+    Compute a local 'predicted Pareto' by measuring the positive delta in raw calibrated probability
+    when bumping each *_rate feature to a higher-risk value (default: 75th percentile).
 
-# --- 5. STREAMLIT APP LAYOUT ---
+    Returns a dataframe with columns: ['defect', 'delta_prob', 'share_%', 'cumulative_%'].
+    """
+    rate_cols = [c for c in FEATURES if c.endswith("_rate")]
+    if not rate_cols:
+        return pd.DataFrame(columns=["defect", "delta_prob", "share_%", "cumulative_%"])
 
-st.title("🏭 Foundry Scrap Risk Dashboard")
-st.markdown(f"**Target Scrap Floor:** **{TARGET_SCRAP_PERCENT:.1f}%** | **Total Parts Analyzed:** {len(df_avg)}")
+    base_p = float(calibrated_model.predict_proba(input_row)[0, 1])
 
-# Define the tabs
-tab_sim, tab_pred, tab_val = st.tabs(["🚀 Simulation & Tactics", "🔮 Causal Prediction", "📊 Statistical Validation"])
+    deltas = []
+    for col in rate_cols:
+        tmp = input_row.copy()
+        if strategy == "p75":
+            hi = float(np.nanpercentile(df_train[col].values, 75))
+            tmp[col] = hi
+        else:
+            # simple +2 percentage points (if features are in [0,1] scale already, this can be tuned)
+            tmp[col] = float(input_row[col].iloc[0]) + 0.02
 
-# ==============================================================================
-# TAB 1: SIMULATION & TACTICS (Existing Content)
-# ==============================================================================
-with tab_sim:
-    st.header("1. Comparative Improvement Forecast")
-    st.markdown("Forecasts the total project timeline and cost avoidance based on different levels of continuous improvement effort.")
+        new_p = float(calibrated_model.predict_proba(tmp)[0, 1])
+        delta = max(0.0, new_p - base_p)  # only positive risk drivers for Pareto
+        deltas.append((col, delta))
 
-    report_data = []
-    max_savings_lbs = 0.0 
-
-    for factor in REDUCTION_SCENARIOS:
-        with st.spinner(f"Running simulation for {factor*100:.0f}% reduction..."):
-            cycles, savings_lbs = run_universal_improvement_simulation(df_avg, factor, TARGET_SCRAP_PERCENT)
-        
-        if factor == REDUCTION_SCENARIOS[0]:
-            max_savings_lbs = savings_lbs
-
-        # Financial Calculation
-        total_material_value = max_savings_lbs * (MATERIAL_COST_PER_LB + LABOR_OVERHEAD_COST_PER_LB)
-        total_failures_avoided_cost = total_historical_scrap_pieces * AVG_NON_MATERIAL_COST_PER_FAILURE * 0.50
-        total_cost_avoided = total_material_value + total_failures_avoided_cost
-
-        report_data.append({
-            'Reduction (%)': factor * 100,
-            'Cycles Required': cycles,
-            'Days Required': cycles * 7,
-            'Time (Years)': cycles * 7 / 365.25,
-            'Total Aluminum Saved (lbs)': max_savings_lbs,
-            'Total Cost Avoided (USD)': total_cost_avoided,
-        })
-
-    df_report = pd.DataFrame(report_data)
-
-    # Display Metrics for the most aggressive (30%) scenario
-    col1, col2, col3 = st.columns(3)
-    aggressive_data = df_report[df_report['Reduction (%)'] == 30.0].iloc[0]
-
-    col1.metric("Max Potential Savings", f"${aggressive_data['Total Cost Avoided (USD)']:.0f}", "Total Project Value")
-    col2.metric("Fastest Timeline (30% Effort)", f"{aggressive_data['Days Required']:.0f} Days", f"Time to Hit {TARGET_SCRAP_PERCENT:.1f}% Floor")
-    col3.metric("Max Weight Saved", f"{aggressive_data['Total Aluminum Saved (lbs)']:.0f} lbs", "Total Project Weight Savings")
-
-    st.dataframe(
-        df_report.style.format({
-            'Reduction (%)': "{:.0f}%",
-            'Days Required': "{:.0f}",
-            'Time (Years)': "{:.2f}",
-            'Total Aluminum Saved (lbs)': "{:,.0f}",
-            'Total Cost Avoided (USD)': "${:,.0f}",
-        }),
-        use_container_width=True
-    )
-
-    st.caption("NOTE: Total savings are consistent across scenarios as they represent the fixed maximum achievable savings to reach the set target.")
-
-    st.header("2. Tactical Manager Actionable Dashboard")
-    st.markdown(f"Prioritization tool: Showing the **Top 30 Parts** based on highest historical scrap rate and estimated annual weight loss.")
-
-    df_dashboard = df_avg.sort_values(by='Scrap_Percent_Baseline', ascending=False).head(30).copy()
-
-    for factor in [0.30, 0.25, 0.20]:
-        col_name_cycles = f'{factor*100:.0f}% Cycles'
-        col_name_days = f'{factor*100:.0f}% Days'
-        
-        df_dashboard[col_name_cycles] = df_dashboard.apply(
-            lambda row: calculate_cycles_to_target(row['Scrap_Percent_Baseline'], factor, TARGET_SCRAP_PERCENT),
-            axis=1
-        )
-        df_dashboard[col_name_days] = df_dashboard[col_name_cycles] * 7
-
-    df_dashboard['Max Hist. Scrap %'] = (df_dashboard['Scrap_Percent_Baseline'] * 100).round(2).astype(str) + '%'
-    df_dashboard['Est. Annual Scrap (lbs)'] = df_dashboard['Est_Annual_Scrap_Weight_lbs'].round(0).astype(int)
-
-    dashboard_cols = [
-        'Part_ID',
-        'Max Hist. Scrap %',
-        'Est. Annual Scrap (lbs)',
-        '30% Cycles', '30% Days',
-        '25% Cycles', '25% Days',
-        '20% Cycles', '20% Days',
-    ]
-
-    df_dashboard = df_dashboard[dashboard_cols]
-
-    st.dataframe(
-        df_dashboard.style.background_gradient(cmap='Reds', subset=['Est. Annual Scrap (lbs)']),
-        use_container_width=True,
-        hide_index=True
-    )
-
-    st.caption("The 'Est. Annual Scrap (lbs)' column is used for resource prioritization. Cycles and Days columns indicate the time needed to bring THIS SPECIFIC part to the set target.")
-
-# ==============================================================================
-# TAB 2: CAUSAL PREDICTION (New Content)
-# ==============================================================================
-with tab_pred:
-    st.header("Predictive Causal Analysis (Random Forest)")
-    st.markdown("A Machine Learning model trained on historical work orders to identify the **most important factors** contributing to a run having *any* scrap.")
-    
-    with st.spinner("Training Random Forest Classifier..."):
-        model, X_test, y_test, feature_cols = train_random_forest_model(df_ml)
-    
-    st.success("Model trained successfully!")
-    
-    # Model Evaluation Metrics
-    accuracy = model.score(X_test, y_test)
-    st.metric(label="Model Prediction Accuracy (on test set)", value=f"{accuracy*100:.2f}%")
-    st.caption("This score reflects the model's ability to correctly predict if a work order will have scrap or not.")
-    
-    st.subheader("Top Causal Factors (Feature Importance)")
-    
-    # Feature Importance extraction
-    importances = model.feature_importances_
-    feature_importance_df = pd.DataFrame({
-        'Cause': feature_cols,
-        'Importance': importances
-    }).sort_values(by='Importance', ascending=False)
-    
-    # Clean up cause names for display
-    feature_importance_df['Cause'] = feature_importance_df['Cause'].str.replace(' Rate', '').str.replace('_', ' ').str.title()
-    
-    st.dataframe(
-        feature_importance_df.head(10).style.bar(subset=['Importance'], color='#cf5c36'),
-        use_container_width=True,
-        hide_index=True
-    )
-    
-    st.caption("High Importance scores indicate these scrap causes are the strongest predictors of whether a work order fails.")
-
-# ==============================================================================
-# TAB 3: STATISTICAL VALIDATION (New Content)
-# ==============================================================================
-with tab_val:
-    st.header("Statistical Validation: High-Risk Group Confirmation")
-    st.markdown("This test confirms whether the maximum scrap rates observed in the **Top 10 Worst Parts** are statistically different from the average scrap rates across **all** parts.")
-
-    test_name, p_value, mean_all, mean_top = run_statistical_validation(df_ml, df_avg)
-    
-    st.subheader(f"{test_name}")
-    
-    col_stat1, col_stat2, col_stat3 = st.columns(3)
-    
-    col_stat1.metric("P-Value", f"{p_value:.4f}")
-    col_stat2.metric("Mean Scrap Rate (All Runs)", f"{mean_all:.2f}%")
-    col_stat3.metric("Mean Scrap Rate (Top 10 Parts)", f"{mean_top:.2f}%")
-
-    if p_value < 0.05:
-        st.success(f"**Conclusion:** With a P-Value of **{p_value:.4f}**, which is less than 0.05, we **reject the null hypothesis**. The scrap rates for the top 10 worst parts are statistically and significantly greater than the average scrap rates for all parts. The prioritization strategy is statistically justified.")
+    dd = pd.DataFrame(deltas, columns=["defect", "delta_prob"])
+    dd = dd.sort_values("delta_prob", ascending=False).head(k)
+    total = float(dd["delta_prob"].sum())
+    if total > 0:
+        dd["share_%"] = dd["delta_prob"] / total * 100.0
+        dd["cumulative_%"] = dd["share_%"].cumsum()
     else:
-        st.warning(f"**Conclusion:** With a P-Value of **{p_value:.4f}**, we **fail to reject the null hypothesis**. There is not enough statistical evidence to say the scrap rates for the top 10 parts are significantly higher than the rest.")
+        dd["share_%"] = 0.0
+        dd["cumulative_%"] = 0.0
+    return dd
+
+def historical_defect_pareto_for_part(selected_part: int,
+                                     df_train: pd.DataFrame,
+                                     k: int = TOP_K_PARETO) -> pd.DataFrame:
+    """Top-K historical defect rates (means) for the part."""
+    rate_cols = [c for c in df_train.columns if c.endswith("_rate")]
+    if not rate_cols:
+        return pd.DataFrame(columns=["defect", "mean_rate", "share_%", "cumulative_%"])
+
+    part_hist = df_train[df_train["part_id"] == selected_part]
+    if part_hist.empty:
+        return pd.DataFrame(columns=["defect", "mean_rate", "share_%", "cumulative_%"])
+
+    means = part_hist[rate_cols].mean().fillna(0.0)
+    means = means.sort_values(ascending=False).head(k)
+    total = float(means.sum())
+    out = pd.DataFrame({"defect": means.index,
+                        "mean_rate": means.values})
+    if total > 0:
+        out["share_%"] = out["mean_rate"] / total * 100.0
+        out["cumulative_%"] = out["share_%"].cumsum()
+    else:
+        out["share_%"] = 0.0
+        out["cumulative_%"] = 0.0
+    return out
+
+# Add risk alert summary box based on corrected_p
+def get_alert_summary(prob):
+    if prob >= 0.90:
+        color = "red"
+        status = "🔴 High Alert for Scrap"
+        message = (
+            "Strong likelihood of scrap. Monitor **tear_up_rate** and **runout_rate**. "
+            "Review recent patterns and defects in historical vs. predicted Pareto."
+        )
+    elif prob >= 0.80:
+        color = "orange"
+        status = "🟠 Serious Concern for Scrap"
+        message = (
+            "Elevated risk of scrap. Investigate predicted defects and ensure quality controls are reinforced."
+        )
+    elif prob >= 0.60:
+        color = "gold"
+        status = "🟡 Elevated Risk"
+        message = (
+            "Moderate chance of scrap. Maintain quality vigilance and inspect critical defect trends."
+        )
+    elif prob >= 0.40:
+        color = "lightgray"
+        status = "⚪ Moderate Risk"
+        message = (
+            "Some uncertainty. Proceed with normal inspection and monitor any abnormal trends."
+        )
+    elif prob >= 0.20:
+        color = "lightgreen"
+        status = "🟢 Low Risk"
+        message = (
+            "Low likelihood of scrap. Scrap probability is well within historical norms."
+        )
+    else:
+        color = "green"
+        status = "🟢 Very Low Risk"
+        message = (
+            "Minimal expected scrap. System and process conditions appear highly favorable."
+        )
+    return color, status, message
+
+# -----------------------------
+# Sidebar
+# -----------------------------
+st.sidebar.header("Data & Model")
+csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
+# Set default to 180 (from 150)
+n_estimators = st.sidebar.slider("RandomForest Trees", 80, 600, DEFAULT_ESTIMATORS, 20)
+
+st.sidebar.header("Label & MTTFscrap")
+# Set default to 6.50 (from 5.0)
+thr_label = st.sidebar.slider("Scrap % Threshold (label & MTTFscrap)", 1.0, 15.0, 6.50, 0.5)
+
+st.sidebar.header("Features & Drift")
+# Set default to True (from False)
+use_rate_cols = st.sidebar.checkbox("Include *_rate process features", value=True)
+# Set default to True (from False)
+enable_prior_shift = st.sidebar.checkbox("Enable prior shift (validation ➜ test)", value=True)
+# Set default to 20 (from 20, confirmed)
+prior_shift_guard = st.sidebar.slider("Prior-shift guard (max Δ prevalence, pp)", 5, 50, 20, step=5)
+
+st.sidebar.header("Quick-Hook Override")
+# Set default to False (from False, confirmed)
+use_manual_hook = st.sidebar.checkbox("Use manual quick-hook", value=False)
+# Set default to 1.00 (from 1.00, confirmed)
+s_manual = st.sidebar.slider("Manual s", 0.60, 1.20, 1.00, 0.01)
+# Set default to 0.50 (from 0.50, confirmed)
+gamma_manual = st.sidebar.slider("Manual γ", 0.50, 1.20, 0.50, 0.01)
+
+st.sidebar.header("Validation Controls")
+# Set default to True (from False)
+run_validation = st.sidebar.checkbox("Run 6–2–1 rolling validation (slower)", value=True)
+
+if not os.path.exists(csv_path):
+    st.error("CSV not found.")
+    st.stop()
+
+# -----------------------------
+# Load
+# -----------------------------
+df = load_and_clean(csv_path)
+
+st.title("🧪 Foundry Scrap Risk Dashboard — Validated Quick-Hook (+MTTFscrap & Exceedance)")
+st.caption("RF + calibrated probs • tuned (s, γ) quick-hook • optional guarded prior-shift • per-part **exceedance** scaling • rolling 6–2–1 validation with Wilcoxon • MTTFscrap & reliability • Historical & Predicted Pareto")
+
+tabs = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
+
+# -----------------------------
+# TAB 1: Predict
+# -----------------------------
+with tabs[0]:
+    st.subheader("Prediction (validation-tuned quick-hook; threshold drives labels & MTTFscrap)")
+
+    df_train, df_calib, df_test = time_split(df)
+
+    # Train-only features at current threshold
+    mtbf_train = compute_mtbf_on_train(df_train, thr_label)
+    default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
+    part_freq_train = df_train["part_id"].value_counts(normalize=True)
+    default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
+
+    df_train_f = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
+    df_calib_f = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
+    df_test_f  = attach_train_features(df_test,  mtbf_train, part_freq_train, default_mtbf, default_freq)
+
+    X_train, y_train, FEATURES = make_xy(df_train_f, thr_label, use_rate_cols)
+    X_calib, y_calib, _        = make_xy(df_calib_f, thr_label, use_rate_cols)
+    X_test,  y_test,  _        = make_xy(df_test_f,  thr_label, use_rate_cols)
+
+    _, calibrated_model, calib_method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators)
+
+    p_calib = calibrated_model.predict_proba(X_calib)[:, 1] if len(X_calib) else np.array([])
+    p_test  = calibrated_model.predict_proba(X_test)[:, 1]  if len(X_test) else np.array([])
+
+    # Guarded prior shift
+    shift_note = "Prior shift disabled."
+    if enable_prior_shift and len(p_calib) and len(p_test):
+        prev_src = float(np.clip(p_calib.mean(), 1e-6, 1-1e-6))
+        prev_tgt = float(np.clip((df_test_f["scrap%"] > thr_label).mean(), 1e-6, 1-1e-6))
+        gap_pp = abs(prev_tgt - prev_src) * 100
+        if gap_pp <= prior_shift_guard:
+            p_test = prior_shift_logit(p_test, prev_src, prev_tgt)
+            shift_note = f"Prior shift applied (Δ={gap_pp:.1f} pp)."
+        else:
+            shift_note = f"Prior shift skipped (Δ={gap_pp:.1f} pp too large)."
+
+    # Exceedance baselines & quick-hook tuning
+    part_prev_train, part_scale, global_prev = compute_part_exceedance_baselines(df_train, thr_label)
+    tune = tune_s_gamma_on_validation(p_calib, y_calib, df_calib_f["part_id"], part_scale) if len(p_calib) else {"s":1.0,"gamma":1.0}
+    s_star, gamma_star = float(tune["s"]), float(tune["gamma"])
+    if use_manual_hook:
+        s_star, gamma_star = float(s_manual), float(gamma_manual)
+
+    # Inputs
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        part_ids = sorted(df["part_id"].unique())
+        selected_part = st.selectbox("Select Part ID", part_ids)
+    with c2:
+        quantity = st.number_input("Order Quantity", 1, 100000, 351)
+    with c3:
+        weight = st.number_input("Piece Weight (lbs)", 0.1, 100.0, 4.0)
+    with c4:
+        cost_per_part = st.number_input("Cost per Part ($)", 0.01, 100.0, 0.01)
+
+    mttf_value = float(mtbf_train.loc[selected_part, "mttf_scrap"]) if selected_part in mtbf_train.index else default_mtbf
+    part_freq_value = float(part_freq_train.get(selected_part, default_freq))
+
+    # Build an input row ALIGNED to FEATURES, including *_rate columns if in use
+    input_row = build_input_row_for_part(
+        selected_part=selected_part,
+        quantity=quantity,
+        weight=weight,
+        mttf_value=mttf_value,
+        part_freq_value=part_freq_value,
+        FEATURES=FEATURES,
+        df_train=df_train_f
+    )
+
+    if st.button("Predict", type="primary", use_container_width=True):
+        # Base & adjusted predictions
+        base_p = float(calibrated_model.predict_proba(input_row)[0, 1])
+
+        adj_factor = float(part_scale.get(selected_part, 1.0)) ** float(gamma_star)
+        corrected_p = np.clip(base_p * float(s_star) * adj_factor, 0, 1)
+
+        expected_scrap_count = int(round(corrected_p * quantity))
+        expected_loss = round(expected_scrap_count * cost_per_part, 2)
+
+        # MTTF + reliability at current threshold
+        part_df = df_train[df_train["part_id"] == selected_part]
+        N = len(part_df)
+        failures = int((part_df["scrap%"] > thr_label).sum())
+        mttf_scrap = (N / failures) if failures > 0 else float("inf")
+        lam = 0.0 if mttf_scrap == float("inf") else 1.0 / mttf_scrap
+        reliability_next_run = np.exp(-lam * 1.0) if lam > 0 else 1.0
+
+        # Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Predicted Scrap Risk (raw)", f"{base_p*100:.2f}%")
+        m2.metric("Adjusted Scrap Risk (s·part^γ)", f"{corrected_p*100:.2f}%")
+        m3.metric("Expected Scrap Count", f"{expected_scrap_count} parts")
+        m4.metric("Expected Loss", f"${expected_loss:.2f}")
+
+        st.markdown(f"**Quick-hook params:** s = {s_star:.2f}, γ = {gamma_star:.2f}  | Calibration: **{calib_method}**")
+        st.caption(shift_note)
         
-    st.caption("The Mann-Whitney U test is used because it compares the distribution shapes of two independent, non-normally distributed samples (scrap rates).")
+        # Generate and display the alert
+        color, status, message = get_alert_summary(corrected_p)
+
+        st.markdown(
+            f"""
+            <div style='
+                background-color:{color};
+                padding:1em;
+                border-radius:10px;
+                color:white;
+                font-weight:bold;
+                margin-top: 1em;
+            '>
+                {status}<br><span style='font-weight:normal'>{message}</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.subheader("Reliability context (at current threshold)")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("MTTFscrap", "∞ runs" if mttf_scrap == float("inf") else f"{mttf_scrap:.2f} runs")
+        r2.metric("Reliability (next run)", f"{reliability_next_run*100:.2f}%")
+        r3.metric("Failures / Runs", f"{failures} / {N}")
+        st.caption("Reliability computed as R(1) = exp(−1/MTTFscrap). Threshold slider sets both labels and MTTF calculation.")
+
+        # Historical exceedance prevalence at current threshold
+        part_prev_card = float(part_prev_train.get(selected_part, np.nan)) if 'part_prev_train' in locals() else np.nan
+        st.markdown(
+            f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
+            f"{(part_prev_card*100 if not np.isnan(part_prev_card) else np.nan):.2f}%  ({N} runs)"
+        )
+        # Note: This block was causing the final errors; it MUST be an un-nested if/elif/else block
+        if corrected_p > part_prev_card:
+            st.warning("⬆️ Prediction above historical exceedance rate for this part.")
+        elif corrected_p < part_prev_card:
+            st.success("⬇️ Prediction below historical exceedance rate for this part.")
+        else:
+            st.info("≈ Equal to historical exceedance rate.")
+
+        # -----------------------------
+        # NEW: Historical vs Predicted Pareto
+        # -----------------------------
+        st.subheader("Pareto of Defects — Historical vs Predicted (this run)")
+
+        rate_cols_in_model = [c for c in FEATURES if c.endswith("_rate")]
+        if not use_rate_cols or not rate_cols_in_model:
+            st.info("To view Predicted Pareto, enable **Include *_rate process features** in the sidebar and re-run.")
+        else:
+            # Historical Pareto for the selected part
+            hist_pareto = historical_defect_pareto_for_part(selected_part, df_train_f, k=TOP_K_PARETO)
+            hist_pareto = hist_pareto.rename(columns={"mean_rate": "hist_mean_rate"})
+
+            # Local (predicted) drivers for the current input
+            pred_pareto = local_defect_drivers(
+                calibrated_model=calibrated_model,
+                input_row=input_row,
+                FEATURES=FEATURES,
+                df_train=df_train_f,
+                strategy="p75",
+                k=TOP_K_PARETO
+            ).rename(columns={"delta_prob": "delta_prob_raw"})
+
+            # Left-right display
+            c_left, c_right = st.columns(2)
+            with c_left:
+                st.markdown("**Historical Pareto (Top defect rates for this part)**")
+                if len(hist_pareto):
+                    st.dataframe(
+                        hist_pareto.assign(
+                            hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
+                        ).assign(**{
+                            "share_%": lambda d: d["share_%"].round(2),
+                            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+                        }),
+                        use_container_width=True
+                    )
+                else:
+                    st.info("No historical defect rates found for this part in the training window.")
+
+            with c_right:
+                st.markdown("**Predicted Pareto (Local drivers of current prediction)**")
+                if len(pred_pareto):
+                    st.dataframe(
+                        pred_pareto.assign(
+                            delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2)
+                        ).assign(**{
+                            "share_%": lambda d: d["share_%"].round(2),
+                            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+                        }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
+                        use_container_width=True
+                    )
+
+                    st.caption("For each defect-rate feature, we set it to the 75th percentile and measure the +∆ in the raw calibrated probability vs base. Larger +∆ means stronger risk driver **for this prediction**.")
+                else:
+                    st.info("Predicted Pareto unavailable (no *_rate features in model or all deltas <= 0).")
+
+        # Diagnostics
+        st.subheader("Model Diagnostics")
+        test_brier = np.nan
+        try:
+            test_brier = brier_score_loss(y_test, p_test) if len(X_test) and len(p_test) else np.nan
+        except Exception:
+            pass
+        st.write(f"Calibration: **{calib_method}** | Test Brier: {test_brier:.4f}")
+        st.caption("Adjusted risk = calibrated prob × s × (part_scale^γ). part_scale is the per-part exceedance prevalence relative to train global prevalence.")
+
+# -----------------------------
+# TAB 2: Validation (6–2–1)
+# -----------------------------
+with tabs[1]:
+    st.subheader("Rolling 6–2–1 Backtest with Wilcoxon Significance")
+    if run_validation:
+        with st.spinner("Running rolling evaluation…"):
+            rows = []
+            start_date, end_date = df["week_ending"].min(), df["week_ending"].max()
+
+            while start_date + relativedelta(months=(6+2+1)) <= end_date:
+                train_end = start_date + relativedelta(months=6)
+                val_end   = train_end + relativedelta(months=2)
+                test_end  = val_end   + relativedelta(months=1)
+
+                train = df[(df.week_ending >= start_date) & (df.week_ending < train_end)].copy()
+                val   = df[(df.week_ending >= train_end) & (df.week_ending < val_end)].copy()
+                test  = df[(df.week_ending >= val_end) & (df.week_ending < test_end)].copy()
+
+                if len(train) < 50 or len(test) < 10:
+                    start_date += relativedelta(months=1); continue
+
+                mtbf_tr = compute_mtbf_on_train(train, thr_label)
+                default_mtbf = float(mtbf_tr["mttf_scrap"].median()) if len(mtbf_tr) else 1.0
+                part_freq_tr = train["part_id"].value_counts(normalize=True)
+                default_freq = float(part_freq_tr.median()) if len(part_freq_tr) else 0.0
+
+                train_f = attach_train_features(train, mtbf_tr, part_freq_tr, default_mtbf, default_freq)
+                val_f   = attach_train_features(val,   mtbf_tr, part_freq_tr, default_mtbf, default_freq)
+                test_f  = attach_train_features(test,  mtbf_tr, part_freq_tr, default_mtbf, default_freq)
+
+                X_tr, y_tr, _ = make_xy(train_f, thr_label, use_rate_cols)
+                X_va, y_va, _ = make_xy(val_f,   thr_label, use_rate_cols)
+                X_te, y_te, _ = make_xy(test_f,  thr_label, use_rate_cols)
+
+                base = RandomForestClassifier(
+                    n_estimators=n_estimators,
+                    min_samples_leaf=MIN_SAMPLES_LEAF,
+                    class_weight="balanced",
+                    random_state=RANDOM_STATE,
+                    n_jobs=-1
+                )
+                # Combine train and validation sets for fitting the CalibratedClassifierCV estimator
+                X_calibfit = pd.concat([X_tr, X_va], axis=0)
+                y_calibfit = pd.concat([y_tr, y_va], axis=0)
+                # Note: Setting cv=3 is a reasonable default if 'prefit' is not used.
+                cal = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=3).fit(X_calibfit, y_calibfit)
+
+                p_val_raw  = cal.predict_proba(X_va)[:, 1]
+                p_test_raw = cal.predict_proba(X_te)[:, 1]
+
+                # Guarded prior shift
+                if enable_prior_shift and len(p_val_raw) and len(p_test_raw):
+                    prev_src = float(np.clip(p_val_raw.mean(), 1e-6, 1-1e-6))
+                    prev_tgt = float(np.clip((test_f["scrap%"] > thr_label).mean(), 1e-6, 1-1e-6))
+                    gap_pp = abs(prev_tgt - prev_src) * 100
+                    if gap_pp <= prior_shift_guard:
+                        p_test_raw = prior_shift_logit(p_test_raw, prev_src, prev_tgt)
+
+                # Exceedance-based scaling + tuning
+                part_prev_win, part_scale_win, _ = compute_part_exceedance_baselines(train, thr_label)
+                tune = tune_s_gamma_on_validation(p_val_raw, y_va, val_f["part_id"], part_scale_win)
+                s_star, gamma_star = tune["s"], tune["gamma"]
+
+                pid_test = test_f["part_id"].to_numpy()
+                ps_test  = part_scale_win.reindex(pid_test).fillna(1.0).to_numpy(dtype=float)
+                p_test_adj = np.clip(p_test_raw * (s_star * (ps_test ** gamma_star)), 0, 1)
+
+                actual_prev = float((test_f["scrap%"] > thr_label).mean())
+
+                rows.append({
+                    "window_start": start_date.date(),
+                    "train_rows": len(train), "test_rows": len(test),
+                    "s_tuned": round(float(s_star),2), "gamma_tuned": round(float(gamma_star),2),
+                    "actual_mean": round(actual_prev*100,2),
+                    "pred_mean_raw": round(float(np.mean(p_test_raw))*100,2),
+                    "pred_mean_adj": round(float(np.mean(p_test_adj))*100,2),
+                    "brier_raw": round(brier_score_loss(y_te, p_test_raw),4),
+                    "accuracy_raw": round(accuracy_score(y_te, p_test_raw>0.5),3)
+                })
+                start_date += relativedelta(months=1)
+
+            results_df = pd.DataFrame(rows)
+            if results_df.empty:
+                st.warning("No valid rolling windows found.")
+            else:
+                st.dataframe(results_df, use_container_width=True)
+
+                # Wilcoxon summaries
+                def wilcoxon_summary(df, col):
+                    actual = df["actual_mean"].to_numpy(float)
+                    pred   = df[col].to_numpy(float)
+                    rel_err = np.where(actual>0, np.abs(pred-actual)/actual,
+                                         np.where(pred==0, 0.0, 1.0))
+                    gain = np.clip(1.0-rel_err, 0.0, 1.0)
+                    rows=[]
+                    if len(gain)>=10:
+                        for th in [0.50, 0.80, 0.90]:
+                            stat, p = wilcoxon(gain-th, alternative="greater")
+                            rows.append([th, gain.mean(), np.median(gain), (gain>=th).mean()*100, stat, p, "✅" if p<0.05 else "❌"])
+                    return pd.DataFrame(rows, columns=["Threshold","Mean Gain","Median Gain","% Windows ≥Threshold","Statistic","p-value","Significant?"])
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**Wilcoxon — Adjusted (s, γ)**")
+                    summ_adj = wilcoxon_summary(results_df, "pred_mean_adj")
+                    if not summ_adj.empty:
+                        st.dataframe(summ_adj, use_container_width=True)
+                    else:
+                        st.info("Need ≥10 windows for Wilcoxon.")
+
+                with c2:
+                    st.markdown("**Wilcoxon — Raw (calibrated)**")
+                    summ_raw = wilcoxon_summary(results_df, "pred_mean_raw")
+                    if not summ_raw.empty:
+                        st.dataframe(summ_raw, use_container_width=True)
+                    else:
+                        st.info("Need ≥10 windows for Wilcoxon.")
+
+                # Save CSVs
+                try:
+                    results_df.to_csv("rolling_window_results.csv", index=False)
+                    if not summ_adj.empty: summ_adj.to_csv("rolling_window_threshold_summary_adj.csv", index=False)
+                    if not summ_raw.empty: summ_raw.to_csv("rolling_window_threshold_summary_raw.csv", index=False)
+                    st.caption("Saved CSVs to working directory.")
+                except Exception:
+                    pass
+    else:
+        st.info("Tick **Run 6–2–1 rolling validation** in the sidebar to compute windows and Wilcoxon tests.")
