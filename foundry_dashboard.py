@@ -166,11 +166,19 @@ if df_avg.empty or df_ml.empty:
 
 # --- 3. SIMULATION & CALCULATION FUNCTIONS (Unchanged logic, uses consistent column names) ---
 
-@st.cache_data(show_spinner="Training Model...")
+@st.cache_data(
+    show_spinner="Training Model...",
+    hash_funcs={
+        pd.DataFrame: lambda df: hash_pandas_object(df, index=True).sum(),
+        CalibratedClassifierCV: lambda model: str(model.get_params()),
+        RandomForestClassifier: lambda model: str(model.get_params())
+    }
+)
 def train_random_forest_model(df_ml):
     """
     Trains a Calibrated Random Forest classifier, ensuring StratifiedKFold 
-    is used for stable calibration.
+    is used for stable calibration, and gracefully handles insufficient 
+    minority class samples by disabling stratification if needed.
     """
     # Identify binary scrap cause columns as features
     feature_cols = [col for col in df_ml.columns if col.endswith('_rate')]
@@ -178,22 +186,37 @@ def train_random_forest_model(df_ml):
     X = df_ml[feature_cols]
     y = df_ml['is_scrapped']
     
-    # --- STRATIFIED CV FIX ---
     class_counts = y.value_counts()
-    min_class_count = class_counts.min()
-
-    # Determine the number of splits possible for the minority class
-    n_splits = min(5, min_class_count) 
-    calib_method = 'isotonic'
+    # Safely get the count of the minority class (is_scrapped=1)
+    min_class_count = class_counts.get(1, 0)
+    
+    # --- CRITICAL FIX: Handle insufficient minority samples for stratification ---
+    use_stratify = True
+    if min_class_count < 2:
+        use_stratify = False
+        st.warning(f"Warning: Only {min_class_count} scrap samples available. Disabling **stratification** for initial train/test split to prevent `ValueError`.")
+    
     
     # Define a default test set split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
-    )
+    if use_stratify:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42, stratify=y
+        )
+    else:
+        # Fallback to non-stratified split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42
+        )
+
+
+    # --- Calibration Logic (still needs n_splits check) ---
+    n_splits = min(5, min_class_count) 
+    calib_method = 'isotonic'
 
     if n_splits < 2:
-        # Fallback: If not enough samples, just use the base model without calibration
-        st.warning(f"Warning: Only {min_class_count} scrap samples available. Cannot perform stratified cross-validation for calibration. Model training will proceed without calibration to avoid a fatal error, but probabilities may be less reliable.")
+        # If the number of splits is less than 2, we can't do CV for calibration.
+        if use_stratify: # Only display this warning if the previous one didn't already cover it
+            st.warning(f"Warning: Only {min_class_count} scrap samples available. Cannot perform stratified cross-validation for calibration. Model training will proceed without calibration to avoid a fatal error, but probabilities may be less reliable.")
         
         model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
         model.fit(X_train, y_train)
@@ -289,7 +312,6 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
     # Explicitly define how to hash complex types to prevent UnhashableParamError.
     hash_funcs={
         pd.DataFrame: lambda df: hash_pandas_object(df, index=True).sum(),
-        # CalibratedClassifierCV wraps the base model, we check for both types
         CalibratedClassifierCV: lambda model: str(model.get_params()),
         RandomForestClassifier: lambda model: str(model.get_params())
     }
@@ -345,8 +367,9 @@ def run_statistical_validation(df_ml, df_avg):
     # Ensure samples are the same size (up to 1000) for a cleaner comparison/faster runtime
     sample_size = min(len(all_scrap_rates), len(top_scrap_rates), 1000)
     
-    sample1 = all_scrap_rates.sample(sample_size, random_state=42, replace=True if len(all_scrap_rates) < sample_size else False)
-    sample2 = top_scrap_rates.sample(sample_size, random_state=42, replace=True if len(top_scrap_rates) < sample_size else False)
+    # Use replace=True if sample size is larger than available data (for smaller datasets)
+    sample1 = all_scrap_rates.sample(sample_size, random_state=42, replace=len(all_scrap_rates) < sample_size)
+    sample2 = top_scrap_rates.sample(sample_size, random_state=42, replace=len(top_scrap_rates) < sample_size)
 
     u_stat, p_value = mannwhitneyu(
         sample1, 
@@ -477,8 +500,14 @@ with tab_pred:
     # Check if the model is CalibratedClassifierCV or just RandomForestClassifier
     # We use model.score on the base model if calibration was skipped
     base_model = model.base_estimator_ if hasattr(model, 'base_estimator_') else model
-    accuracy = base_model.score(X_test, y_test)
-    st.metric(label="Model Prediction Accuracy (on test set)", value=f"{accuracy*100:.2f}%")
+    
+    # Ensure X_test and y_test are not empty before scoring
+    if len(X_test) > 0:
+        accuracy = base_model.score(X_test, y_test)
+        st.metric(label="Model Prediction Accuracy (on test set)", value=f"{accuracy*100:.2f}%")
+    else:
+        st.info("Test set is empty. Accuracy cannot be calculated.")
+
     st.caption("This score reflects the model's ability to correctly predict if a work order will have scrap or not.")
     
     st.subheader("Top Causal Factors (Feature Importance)")
@@ -503,7 +532,7 @@ with tab_pred:
     
     st.caption("High Importance scores indicate these scrap causes are the strongest predictors of whether a work order fails.")
 
-# Diagnostics (moved here to prevent truncation issues)
+# Diagnostics (placed outside the tab to ensure consistent display below the app content)
     st.subheader("Model Diagnostics")
     test_brier = np.nan
     try:
@@ -623,8 +652,8 @@ with tab_part_risk:
         st.markdown(f"The model's input for Part **{selected_part_id}** is based on the average likelihood of these causes being present in its past work orders.")
         
         if part_drivers is not None and not part_drivers.empty:
-             part_drivers['Mean_Likelihood'] = part_drivers['Mean_Likelihood'].apply(lambda x: f"{x*100:.2f}%")
-             part_drivers.rename(columns={'Mean_Likelihood': 'Avg. Likelihood of Presence'}, inplace=True)
+             part_drivers['Avg. Likelihood of Presence'] = part_drivers['Mean_Likelihood'].apply(lambda x: f"{x*100:.2f}%")
+             part_drivers.drop(columns=['Mean_Likelihood'], inplace=True)
 
              st.dataframe(
                 part_drivers.head(10),
@@ -672,7 +701,7 @@ with tab_part_risk:
         )
 
 # Diagnostics (This section was causing the NameError due to truncation, now placed logically)
-st.subheader("Model Diagnostics")
+st.subheader("Model Diagnostics (Below Tabs)")
 test_brier = np.nan
 try:
     if calib_method != 'none' and len(X_test) > 0:
@@ -680,4 +709,4 @@ try:
 except Exception:
     pass
 st.write(f"Calibration: **{calib_method.title()}** | Test Brier: {test_brier:.4f}")
-st.caption("Adjusted risk = calibrated prob × s × (part_scale^γ). part_scale is the per-part exceedance prevalence relative to train global prevalence.")
+st.caption("The Brier score measures the accuracy of predicted probabilities. Lower is better (0.0 is perfect).")
