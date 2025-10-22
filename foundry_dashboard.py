@@ -420,7 +420,8 @@ def run_simulation(df_avg, cost_material_per_lb, cost_labor_per_lb, cost_per_fai
         )
         
         # Calculate reduced scrap weight
-        df_avg[f'Reduced_Scrap_Weight_{factor}'] = df_avg[f'Reduced_Scrap_Rate_{factor}'] * df_avg['Avg_Order_Quantity'] * df_avg['Avg_Piece_Weight'] * min(52, df_avg['Total_Runs'])
+        # FIX: Replaced Python's min() with NumPy's np.minimum() for element-wise comparison with the Pandas Series
+        df_avg[f'Reduced_Scrap_Weight_{factor}'] = df_avg[f'Reduced_Scrap_Rate_{factor}'] * df_avg['Avg_Order_Quantity'] * df_avg['Avg_Piece_Weight'] * np.minimum(52, df_avg['Total_Runs'])
         
         # Calculate reduced cost
         df_avg[f'Reduced_Cost_{factor}'] = (
