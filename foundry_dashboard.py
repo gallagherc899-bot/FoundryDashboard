@@ -25,11 +25,11 @@ st.set_page_config(
 )
 
 RANDOM_STATE = 42
-DEFAULT_ESTIMATORS = 180       # UPDATED: Increased trees from 150 to 180
+DEFAULT_ESTIMATORS = 180         # UPDATED: Increased trees from 150 to 180
 MIN_SAMPLES_LEAF = 2
 
-S_GRID = np.linspace(0.6, 1.2, 13)       # {0.60,...,1.20}
-GAMMA_GRID = np.linspace(0.5, 1.2, 15)   # {0.50,...,1.20}
+S_GRID = np.linspace(0.6, 1.2, 13)      # {0.60,...,1.20}
+GAMMA_GRID = np.linspace(0.5, 1.2, 15)  # {0.50,...,1.20}
 TOP_K_PARETO = 8
 
 # -----------------------------
@@ -232,8 +232,8 @@ def local_defect_drivers(calibrated_model,
     return dd
 
 def historical_defect_pareto_for_part(selected_part: int,
-                                      df_train: pd.DataFrame,
-                                      k: int = TOP_K_PARETO) -> pd.DataFrame:
+                                     df_train: pd.DataFrame,
+                                     k: int = TOP_K_PARETO) -> pd.DataFrame:
     """Top-K historical defect rates (means) for the part."""
     rate_cols = [c for c in df_train.columns if c.endswith("_rate")]
     if not rate_cols:
@@ -255,6 +255,47 @@ def historical_defect_pareto_for_part(selected_part: int,
         out["share_%"] = 0.0
         out["cumulative_%"] = 0.0
     return out
+
+# Add risk alert summary box based on corrected_p
+def get_alert_summary(prob):
+    if prob >= 0.90:
+        color = "red"
+        status = "🔴 High Alert for Scrap"
+        message = (
+            "Strong likelihood of scrap. Monitor **tear_up_rate** and **runout_rate**. "
+            "Review recent patterns and defects in historical vs. predicted Pareto."
+        )
+    elif prob >= 0.80:
+        color = "orange"
+        status = "🟠 Serious Concern for Scrap"
+        message = (
+            "Elevated risk of scrap. Investigate predicted defects and ensure quality controls are reinforced."
+        )
+    elif prob >= 0.60:
+        color = "gold"
+        status = "🟡 Elevated Risk"
+        message = (
+            "Moderate chance of scrap. Maintain quality vigilance and inspect critical defect trends."
+        )
+    elif prob >= 0.40:
+        color = "lightgray"
+        status = "⚪ Moderate Risk"
+        message = (
+            "Some uncertainty. Proceed with normal inspection and monitor any abnormal trends."
+        )
+    elif prob >= 0.20:
+        color = "lightgreen"
+        status = "🟢 Low Risk"
+        message = (
+            "Low likelihood of scrap. Scrap probability is well within historical norms."
+        )
+    else:
+        color = "green"
+        status = "🟢 Very Low Risk"
+        message = (
+            "Minimal expected scrap. System and process conditions appear highly favorable."
+        )
+    return color, status, message
 
 # -----------------------------
 # Sidebar
@@ -401,6 +442,25 @@ with tabs[0]:
 
         st.markdown(f"**Quick-hook params:** s = {s_star:.2f}, γ = {gamma_star:.2f}  | Calibration: **{calib_method}**")
         st.caption(shift_note)
+        
+        # Generate and display the alert
+        color, status, message = get_alert_summary(corrected_p)
+
+        st.markdown(
+            f"""
+            <div style='
+                background-color:{color};
+                padding:1em;
+                border-radius:10px;
+                color:white;
+                font-weight:bold;
+                margin-top: 1em;
+            '>
+                {status}<br><span style='font-weight:normal'>{message}</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
         st.subheader("Reliability context (at current threshold)")
         r1, r2, r3 = st.columns(3)
@@ -415,13 +475,13 @@ with tabs[0]:
             f"**Historical Exceedance Rate @ {thr_label:.1f}% (part):** "
             f"{(part_prev_card*100 if not np.isnan(part_prev_card) else np.nan):.2f}%  ({N} runs)"
         )
-        if not np.isnan(part_prev_card):
-            if corrected_p > part_prev_card:
-                st.warning("⬆️ Prediction above historical exceedance rate for this part.")
-            elif corrected_p < part_prev_card:
-                st.success("⬇️ Prediction below historical exceedance rate for this part.")
-            else:
-                st.info("≈ Equal to historical exceedance rate.")
+        # Note: This block was causing the final errors; it MUST be an un-nested if/elif/else block
+        if corrected_p > part_prev_card:
+            st.warning("⬆️ Prediction above historical exceedance rate for this part.")
+        elif corrected_p < part_prev_card:
+            st.success("⬇️ Prediction below historical exceedance rate for this part.")
+        else:
+            st.info("≈ Equal to historical exceedance rate.")
 
         # -----------------------------
         # NEW: Historical vs Predicted Pareto
@@ -452,15 +512,14 @@ with tabs[0]:
                 st.markdown("**Historical Pareto (Top defect rates for this part)**")
                 if len(hist_pareto):
                     st.dataframe(
-    hist_pareto.assign(
-        hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
-    ).assign(**{
-        "share_%": lambda d: d["share_%"].round(2),
-        "cumulative_%": lambda d: d["cumulative_%"].round(1),
-    }),
-    use_container_width=True
-)
-
+                        hist_pareto.assign(
+                            hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
+                        ).assign(**{
+                            "share_%": lambda d: d["share_%"].round(2),
+                            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+                        }),
+                        use_container_width=True
+                    )
                 else:
                     st.info("No historical defect rates found for this part in the training window.")
 
@@ -468,28 +527,28 @@ with tabs[0]:
                 st.markdown("**Predicted Pareto (Local drivers of current prediction)**")
                 if len(pred_pareto):
                     st.dataframe(
-    pred_pareto.assign(
-        delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2)
-    ).assign(**{
-        "share_%": lambda d: d["share_%"].round(2),
-        "cumulative_%": lambda d: d["cumulative_%"].round(1),
-    }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
-    use_container_width=True
-)
+                        pred_pareto.assign(
+                            delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2)
+                        ).assign(**{
+                            "share_%": lambda d: d["share_%"].round(2),
+                            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+                        }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
+                        use_container_width=True
+                    )
 
                     st.caption("For each defect-rate feature, we set it to the 75th percentile and measure the +∆ in the raw calibrated probability vs base. Larger +∆ means stronger risk driver **for this prediction**.")
                 else:
                     st.info("Predicted Pareto unavailable (no *_rate features in model or all deltas <= 0).")
 
-    # Diagnostics
-    st.subheader("Model Diagnostics")
-    test_brier = np.nan
-    try:
-        test_brier = brier_score_loss(y_test, p_test) if len(X_test) and len(p_test) else np.nan
-    except Exception:
-        pass
-    st.write(f"Calibration: **{calib_method}** | Test Brier: {test_brier:.4f}")
-    st.caption("Adjusted risk = calibrated prob × s × (part_scale^γ). part_scale is the per-part exceedance prevalence relative to train global prevalence.")
+        # Diagnostics
+        st.subheader("Model Diagnostics")
+        test_brier = np.nan
+        try:
+            test_brier = brier_score_loss(y_test, p_test) if len(X_test) and len(p_test) else np.nan
+        except Exception:
+            pass
+        st.write(f"Calibration: **{calib_method}** | Test Brier: {test_brier:.4f}")
+        st.caption("Adjusted risk = calibrated prob × s × (part_scale^γ). part_scale is the per-part exceedance prevalence relative to train global prevalence.")
 
 # -----------------------------
 # TAB 2: Validation (6–2–1)
@@ -533,8 +592,10 @@ with tabs[1]:
                     random_state=RANDOM_STATE,
                     n_jobs=-1
                 )
+                # Combine train and validation sets for fitting the CalibratedClassifierCV estimator
                 X_calibfit = pd.concat([X_tr, X_va], axis=0)
                 y_calibfit = pd.concat([y_tr, y_va], axis=0)
+                # Note: Setting cv=3 is a reasonable default if 'prefit' is not used.
                 cal = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=3).fit(X_calibfit, y_calibfit)
 
                 p_val_raw  = cal.predict_proba(X_va)[:, 1]
@@ -582,7 +643,7 @@ with tabs[1]:
                     actual = df["actual_mean"].to_numpy(float)
                     pred   = df[col].to_numpy(float)
                     rel_err = np.where(actual>0, np.abs(pred-actual)/actual,
-                                       np.where(pred==0, 0.0, 1.0))
+                                         np.where(pred==0, 0.0, 1.0))
                     gain = np.clip(1.0-rel_err, 0.0, 1.0)
                     rows=[]
                     if len(gain)>=10:
