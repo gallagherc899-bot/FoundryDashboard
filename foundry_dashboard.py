@@ -3,12 +3,12 @@
 
 import warnings
 import os
+import re 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import pandas as pd
 import numpy as np
 import streamlit as st
-import re 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
@@ -54,27 +54,40 @@ def load_and_prepare_data(filepath: str = 'anonymized_parts.csv'):
     try:
         df_historical = pd.read_csv(filepath)
         
-        # Apply cleaning to ALL columns
+        # --- 1. Robust Column Standardization ---
+        rename_map = {}
+        # Iterate over raw columns to find the key columns
+        for col in df_historical.columns:
+            col_lower = col.lower()
+            if 'part' in col_lower and 'id' in col_lower: 
+                rename_map[col] = 'part_id'
+            elif 'scrap' in col_lower and 'percent' in col_lower: 
+                rename_map[col] = 'scrap_percent_hist'
+            elif 'order' in col_lower and 'quantity' in col_lower: 
+                rename_map[col] = 'order_quantity'
+            elif 'weight' in col_lower and 'lbs' in col_lower: 
+                rename_map[col] = 'piece_weight_lbs'
+
+        # Apply renames to the crucial columns
+        df_historical.rename(columns=rename_map, inplace=True)
+        
+        # Aggressively clean ALL column names (now the crucial ones are safe)
         df_historical.columns = [clean_col_name(c) for c in df_historical.columns]
         
-        # Standardize crucial column names
-        final_rename_map = {}
-        for col in df_historical.columns:
-            if 'part_id' in col: final_rename_map[col] = 'part_id'
-            elif 'scrap_percent' in col: final_rename_map[col] = 'scrap_percent_hist'
-            elif 'order_quantity' in col: final_rename_map[col] = 'order_quantity'
-            elif 'weight_lbs' in col: final_rename_map[col] = 'piece_weight_lbs'
-            
-        df_historical.rename(columns=final_rename_map, inplace=True)
-        
+        # --- 2. Validation Check ---
+        if 'scrap_percent_hist' not in df_historical.columns:
+            # Fallback error if the core column still can't be found
+            raise KeyError(
+                "'scrap_percent_hist' not found. Please ensure your data has a column indicating historical scrap percentage."
+            )
+
         # Ensure scrap percent is a rate (0 to 1)
-        if 'scrap_percent_hist' in df_historical.columns:
-            df_historical['scrap_percent_hist'] = df_historical['scrap_percent_hist'].clip(upper=100) / 100.0
+        df_historical['scrap_percent_hist'] = df_historical['scrap_percent_hist'].clip(upper=100) / 100.0
         
-        # --- ML Data Preparation ---
+        # --- 3. ML Data Preparation ---
         df_ml = df_historical.copy()
         
-        # 1. Define Target (Low Yield Exceedance: greater than median scrap rate)
+        # Define Target (Low Yield Exceedance: greater than median scrap rate)
         scrap_threshold = df_ml['scrap_percent_hist'].median()
         if scrap_threshold == 0:
             scrap_threshold = df_ml['scrap_percent_hist'].mean()
@@ -85,7 +98,7 @@ def load_and_prepare_data(filepath: str = 'anonymized_parts.csv'):
             st.error("Target variable preparation failed: Need at least two classes (low/high yield).")
             return pd.DataFrame(), pd.DataFrame(), [], 0.0, {}
 
-        # 2. Identify Features
+        # 4. Identify Features
         feature_cols = [col for col in df_ml.columns if col.endswith('_rate')]
         
         # --- Prevalences (for Risk Tuning) ---
@@ -103,7 +116,7 @@ def load_and_prepare_data(filepath: str = 'anonymized_parts.csv'):
             Scrap_Percent_Baseline=('scrap_percent_hist', 'max'),
             Avg_Order_Quantity=('order_quantity', 'mean'),
             Avg_Piece_Weight=('piece_weight_lbs', 'mean'),
-            Total_Runs=('scrap_percent_hist', 'count') 
+            Total_Runs=(TARGET_COLUMN, 'count') 
         ).reset_index()
 
         return df_ml, df_avg, feature_cols, global_prevalence, part_prevalence_scale
@@ -113,13 +126,18 @@ def load_and_prepare_data(filepath: str = 'anonymized_parts.csv'):
         return pd.DataFrame(), pd.DataFrame(), [], 0.0, {}
     except Exception as e:
         st.error(f"A severe error occurred during data processing: {e}")
-        return pd.DataFrame(), pd.DataFrame(), [], 0.0, {}
+        # Re-raising the error is crucial for debugging
+        raise e
 
 
 # Load data and global context
-df_ml, df_avg, feature_cols, global_prevalence, part_prevalence_scale = load_and_prepare_data()
+try:
+    df_ml, df_avg, feature_cols, global_prevalence, part_prevalence_scale = load_and_prepare_data()
 
-if df_ml.empty or not feature_cols:
+    if df_ml.empty or not feature_cols:
+        st.stop()
+except Exception as e:
+    # If a controlled error (like the key error) occurs, stop execution
     st.stop()
 
 
@@ -209,8 +227,12 @@ def calculate_mttf_reliability(part_id, df_avg, raw_prob):
     lambda_pred = raw_prob 
     
     # Historical baseline (for context)
-    lambda_hist = df_avg.loc[df_avg['part_id'] == part_id, 'Scrap_Percent_Baseline'].iloc[0]
-    
+    # We use the max historical scrap percent as the baseline for 'failure' rate
+    if part_id in df_avg['part_id'].values:
+        lambda_hist = df_avg.loc[df_avg['part_id'] == part_id, 'Scrap_Percent_Baseline'].iloc[0]
+    else:
+        lambda_hist = df_avg['Scrap_Percent_Baseline'].mean()
+
     # Calculate MTTF (Mean Runs to Failure) = 1 / Lambda
     mttf_hist = 1.0 / lambda_hist if lambda_hist > 1e-6 else np.inf
     mttf_pred = 1.0 / lambda_pred if lambda_pred > 1e-6 else np.inf
@@ -269,7 +291,11 @@ def calculate_predicted_pareto(model, X_single, feature_cols, p_base):
         
         # Filter for the top 80% contribution
         pred_pareto = pred_pareto[pred_pareto['cumulative_%'] <= 80.0].copy()
-    
+        
+        # Ensure at least the top driver is included, even if it's over 80% alone
+        if pred_pareto.empty and len(pred_pareto) > 0:
+            pred_pareto = pd.DataFrame([pareto_list[0]])
+
     return pred_pareto
 
 
@@ -312,28 +338,28 @@ with tuning_cols[1]:
     st.subheader("Statistical Validation")
     
     # Wilcoxon Signed-Rank Test Implementation
-    ml_residuals = p_test - y_test
-    global_mean = y_test.mean()
-    baseline_residuals = global_mean - y_test
-    
     wilcoxon_result = "N/A"
     wilcoxon_delta = "N/A"
     p_wilcoxon = 1.0
     
-    try:
-        # Test if ML residuals are significantly smaller than baseline residuals
-        stat, p_wilcoxon = wilcoxon(np.abs(ml_residuals), np.abs(baseline_residuals), alternative='less')
-        
-        if p_wilcoxon < 0.05:
-            wilcoxon_result = "Statistically superior to constant baseline."
-            wilcoxon_delta = f"Model is more effective (p={p_wilcoxon:.4f})"
-        else:
-            wilcoxon_result = "No statistical improvement over baseline."
-            wilcoxon_delta = f"No significant improvement (p={p_wilcoxon:.4f})"
+    if len(p_test) == len(y_test):
+        try:
+            ml_residuals = p_test - y_test
+            global_mean = y_test.mean()
+            baseline_residuals = global_mean - y_test
             
-    except ValueError:
-        wilcoxon_result = "Cannot run Wilcoxon test (data constraint)."
-        wilcoxon_delta = "N/A"
+            # Test if ML residuals are significantly smaller than baseline residuals
+            stat, p_wilcoxon = wilcoxon(np.abs(ml_residuals), np.abs(baseline_residuals), alternative='less', zero_method='pratt')
+            
+            if p_wilcoxon < 0.05:
+                wilcoxon_result = "Statistically superior to constant baseline."
+                wilcoxon_delta = f"Model is more effective (p={p_wilcoxon:.4f})"
+            else:
+                wilcoxon_result = "No statistical improvement over baseline."
+                wilcoxon_delta = f"No significant improvement (p={p_wilcoxon:.4f})"
+                
+        except ValueError as e:
+            wilcoxon_result = "Cannot run Wilcoxon test (data constraint)."
 
     st.metric(
         label="ML Model vs. Constant Baseline (Wilcoxon Test)",
@@ -344,7 +370,7 @@ with tuning_cols[1]:
     )
     
     # Model Diagnostics (Brier Score)
-    test_brier = brier_score_loss(y_test, p_test) if len(X_test) else np.nan
+    test_brier = brier_score_loss(y_test, p_test) if len(X_test) and len(p_test) else np.nan
     st.write(f"**Test Brier Score Loss:** {test_brier:.4f} (Lower is better)")
     st.write(f"**Calibration Method:** {calib_method}")
     st.caption("Diagnostics are based on the model's hold-out test set.")
@@ -359,8 +385,12 @@ st.markdown("Input the conditions for the next production run to estimate risk a
 input_cols = st.columns(4)
 unique_part_ids = sorted(df_avg['part_id'].unique().tolist())
 default_part = unique_part_ids[0] if unique_part_ids else 'None'
-default_weight = df_avg.loc[df_avg['part_id'] == default_part, 'Avg_Piece_Weight'].iloc[0].round(2) if not df_avg.empty else 1.0
-default_quantity = int(df_avg.loc[df_avg['part_id'] == default_part, 'Avg_Order_Quantity'].iloc[0]) if not df_avg.empty else 100
+try:
+    default_weight = df_avg.loc[df_avg['part_id'] == default_part, 'Avg_Piece_Weight'].iloc[0].round(2) if not df_avg.empty else 1.0
+    default_quantity = int(df_avg.loc[df_avg['part_id'] == default_part, 'Avg_Order_Quantity'].iloc[0]) if not df_avg.empty else 100
+except Exception:
+    default_weight = 1.0
+    default_quantity = 100
 
 with input_cols[0]:
     selected_part_id = st.selectbox("A. Select Part ID", options=unique_part_ids, index=0, key='part_id_select')
@@ -369,8 +399,8 @@ with input_cols[1]:
 with input_cols[2]:
     input_quantity = st.number_input("C. Number of Pieces in Run", value=default_quantity, min_value=1, key='input_quantity')
 with input_cols[3]:
-    # Placeholder for financial output/cost estimate, using input_cost for context
-    st.metric("Estimated Run Value ($)", f"${input_weight * input_quantity * (MATERIAL_COST_PER_LB + LABOR_OVERHEAD_COST_PER_LB):,.0f}", help="Total material and labor/overhead cost of the run.")
+    estimated_value = input_weight * input_quantity * (MATERIAL_COST_PER_LB + LABOR_OVERHEAD_COST_PER_LB)
+    st.metric("Estimated Run Value ($)", f"${estimated_value:,.0f}", help="Total material and labor/overhead cost of the run.")
 
 
 st.markdown("**D. Observed Defect Rates (Input current process rates)**")
@@ -383,7 +413,7 @@ for i, feature in enumerate(feature_cols):
     with feature_cols_display[col_index]:
         # Determine step based on data magnitude
         max_val = df_ml[feature].max()
-        step_val = max(0.01, max_val / 20)
+        step_val = max(0.005, max_val / 40)
         
         # Use the mean rate for the selected part as the default input
         part_mean_rate = df_ml[df_ml['part_id'] == selected_part_id][feature].mean()
