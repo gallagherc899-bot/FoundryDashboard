@@ -10,7 +10,7 @@ import numpy as np
 import streamlit as st
 import math
 import re 
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss
@@ -128,7 +128,7 @@ def load_and_prepare_data():
             Total_Runs=('work_order_id', 'count') 
         ).reset_index()
 
-        # FIX: Used np.minimum for vectorized operation (from previous fix)
+        # FIX: Used np.minimum for vectorized operation
         df_avg['Est_Annual_Scrap_Weight_lbs'] = df_avg.apply(
             lambda row: row['Scrap_Percent_Baseline'] * row['Avg_Order_Quantity'] * row['Avg_Piece_Weight'] * np.minimum(52, row['Total_Runs']), 
             axis=1
@@ -178,7 +178,16 @@ def load_and_prepare_data():
 
         return df_avg, df_ml, total_historical_scrap_pieces, df_historical, part_prevalence_scale, global_prevalence
 
-# Load and prepare data (Updated to catch new return values)
+    except FileNotFoundError:
+        st.error("Error: 'anonymized_parts.csv' not found. Please ensure the file is correctly named and available.")
+        return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame(), {}, 0.0
+    except Exception as e:
+        st.error(f"A severe error occurred during data processing: {e}")
+        st.info("Please verify the structure of your CSV, especially column headers.")
+        return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame(), {}, 0.0
+
+
+# Load and prepare data (Updated call)
 df_avg, df_ml, total_historical_scrap_pieces, df_historical, part_prevalence_scale, global_prevalence = load_and_prepare_data()
 
 if df_avg.empty or df_ml.empty:
@@ -547,7 +556,7 @@ with col_table:
 st.markdown("---")
 
 
-# --- 5.3. Work Order Risk Prediction (RESTORED SECTION) ---
+# --- 5.3. Work Order Risk Prediction ---
 st.header("3. Work Order Risk Prediction")
 st.markdown("Input the Part ID and any observed defect conditions to get a real-time Low Yield Risk prediction.")
 
