@@ -7,6 +7,7 @@ import streamlit as st
 import math
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.preprocessing import LabelEncoder
 from scipy.stats import mannwhitneyu
 
@@ -47,20 +48,21 @@ MAX_CYCLES = 100
 @st.cache_data
 def load_and_prepare_data():
     """
-    Loads, cleans, and prepares data for both the simulation (df_avg) and 
-    machine learning (df_ml).
+    Loads, cleans, and prepares data for simulation, ML, and historical context.
     """
     try:
         df_historical = pd.read_csv('anonymized_parts.csv')
-        df_historical = df_historical.rename(columns={'Scrap%': 'Scrap_Percent_Hist', 'Part ID': 'Part_ID'})
+        # Clean column names
+        df_historical.columns = df_historical.columns.str.replace(' ', '_').str.replace('%', '_Percent').str.replace('(#)', '').str.replace('(', '').str.replace(')', '')
+        df_historical = df_historical.rename(columns={'Scrap_Percent': 'Scrap_Percent_Hist', 'Part_ID': 'Part_ID'})
         df_historical['Scrap_Percent_Hist'] = df_historical['Scrap_Percent_Hist'] / 100.0
         
         # --- Data for Simulation (df_avg: Averages/Max rates per Part ID) ---
         df_avg = df_historical.groupby('Part_ID').agg(
             Scrap_Percent_Baseline=('Scrap_Percent_Hist', 'max'),
-            Avg_Order_Quantity=('Order Quantity', 'mean'),
-            Avg_Piece_Weight=('Piece Weight (lbs)', 'mean'),
-            Total_Runs=('Work Order #', 'count')
+            Avg_Order_Quantity=('Order_Quantity', 'mean'),
+            Avg_Piece_Weight=('Piece_Weight_lbs', 'mean'),
+            Total_Runs=('Work_Order_', 'count')
         ).reset_index()
 
         df_avg['Est_Annual_Scrap_Weight_lbs'] = df_avg.apply(
@@ -69,7 +71,7 @@ def load_and_prepare_data():
         )
         
         # Calculate total historical scrap pieces for cost avoidance estimation
-        df_historical['Scrap_Pieces'] = df_historical['Pieces Scrapped']
+        df_historical['Scrap_Pieces'] = df_historical['Pieces_Scrapped']
         total_historical_scrap_pieces = df_historical['Scrap_Pieces'].sum()
         
         # --- Data for Machine Learning (df_ml: Work Orders with Binary Scrap Causes) ---
@@ -85,22 +87,22 @@ def load_and_prepare_data():
         for col in rate_cols:
             df_ml[col] = (df_ml[col] > 0).astype(int)
 
-        return df_avg, df_ml, total_historical_scrap_pieces
+        return df_avg, df_ml, total_historical_scrap_pieces, df_historical
 
     except FileNotFoundError:
         st.error("Error: 'anonymized_parts.csv' not found. Please ensure the file is correctly named and available.")
-        return pd.DataFrame(), pd.DataFrame(), 0
+        return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
     except Exception as e:
         st.error(f"An error occurred during data processing: {e}")
-        return pd.DataFrame(), pd.DataFrame(), 0
+        return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
 
 
-df_avg, df_ml, total_historical_scrap_pieces = load_and_prepare_data()
+df_avg, df_ml, total_historical_scrap_pieces, df_historical = load_and_prepare_data()
 
 if df_avg.empty or df_ml.empty:
     st.stop() # Stop the script if data loading failed
 
-# --- 3. SIMULATION & CALCULATION FUNCTIONS ---
+# --- 3. SIMULATION & CALCULATION FUNCTIONS (Unchanged) ---
 
 def calculate_cycles_to_target(initial_scrap_rate, reduction_factor, target_scrap):
     """Calculates the number of runs (cycles) required for a single part to hit the target."""
@@ -161,41 +163,74 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
         
     return total_cycles, total_cumulative_savings
 
-# --- 4. MACHINE LEARNING AND VALIDATION FUNCTIONS ---
+# --- 4. MACHINE LEARNING AND VALIDATION FUNCTIONS (Updated for Calibration) ---
 
 @st.cache_data
 def train_random_forest_model(df_ml):
-    """Trains a Random Forest classifier to predict if a work order will scrap."""
-    # Identify binary scrap cause columns as features
+    """Trains a Calibrated Random Forest classifier to predict if a work order will scrap."""
     feature_cols = [col for col in df_ml.columns if 'Rate' in col]
 
     X = df_ml[feature_cols]
     y = df_ml['Is_Scrapped']
     
     # --- FIX for ValueError: Stratification issue ---
-    # Check if the minority class is large enough for stratification (needs at least 2 samples)
     class_counts = y.value_counts()
     min_class_count = class_counts.min()
 
-    # If the minimum class size is less than 2, stratification is impossible.
     if min_class_count < 2:
         st.warning("Warning: Scrap target class has fewer than 2 samples. Disabling stratification for train/test split to prevent error.")
         stratify_param = None
     else:
-        # Otherwise, proceed with stratification
         stratify_param = y
     # --- END FIX ---
     
-    # Stratified split to maintain balance of 'Is_Scrapped' if possible
+    # Split the data
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.3, random_state=42, stratify=stratify_param
     )
 
-    # Use balanced class weight to handle imbalance (more non-scrap runs)
-    model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
+    # Base Random Forest Model (using balanced weights)
+    base_model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
+
+    # Calibrate the probabilities using Isotonic regression for better risk estimation
+    model = CalibratedClassifierCV(
+        estimator=base_model,
+        method='isotonic', # Generally superior for well-behaved non-linear probability adjustment
+        cv=5
+    )
     model.fit(X_train, y_train)
     
     return model, X_test, y_test, feature_cols
+
+
+def predict_part_risk(model, part_id, df_ml, feature_cols):
+    """
+    Generates a prediction vector based on the part's historical average feature profile 
+    and predicts the scrap probability.
+    """
+    # 1. Get the average feature profile for the selected part
+    part_data = df_ml[df_ml['Part_ID'] == part_id]
+    
+    if part_data.empty:
+        return 0.0, None
+
+    # Calculate the mean of the binary cause features for this specific part.
+    # This represents the historical probability of each cause being present for this part.
+    mean_features = part_data[feature_cols].mean().to_frame().T
+    
+    # 2. Predict the probability of scrap (Is_Scrapped=1)
+    # The model predicts the probability of the run having scrap.
+    prob_prediction = model.predict_proba(mean_features)[0][1]
+    
+    # 3. Calculate feature deviation (Pareto) for local drivers (optional, but good for context)
+    # Since we are using the mean, we can't do a full Pareto, but we can return the mean features
+    # as context for *why* the prediction might be high/low.
+    mean_features_display = mean_features.T
+    mean_features_display.columns = ['Mean_Likelihood']
+    mean_features_display['Cause'] = mean_features_display.index.str.replace(' Rate', '').str.replace('_', ' ').str.title()
+    
+    return prob_prediction, mean_features_display.sort_values(by='Mean_Likelihood', ascending=False)
+
 
 def run_statistical_validation(df_ml, df_avg):
     """
@@ -212,9 +247,6 @@ def run_statistical_validation(df_ml, df_avg):
     if all_scrap_rates.empty or top_scrap_rates.empty:
         return "Insufficient non-zero scrap data to run statistical test.", 1.0, 0, 0
 
-    # Mann-Whitney U Test: Compares if two independent samples are from the same distribution.
-    # We hypothesize that the top parts have significantly higher scrap rates (Alternative: greater)
-    
     # Ensure samples are the same size (up to 1000) for a cleaner comparison/faster runtime
     sample_size = min(len(all_scrap_rates), len(top_scrap_rates), 1000)
     
@@ -235,11 +267,15 @@ def run_statistical_validation(df_ml, df_avg):
 st.title("🏭 Foundry Scrap Risk Dashboard")
 st.markdown(f"**Target Scrap Floor:** **{TARGET_SCRAP_PERCENT:.1f}%** | **Total Parts Analyzed:** {len(df_avg)}")
 
+# Train the model once for all tabs
+with st.spinner("Initializing ML Model for Predictions..."):
+    model, X_test, y_test, feature_cols = train_random_forest_model(df_ml)
+
 # Define the tabs
-tab_sim, tab_pred, tab_val = st.tabs(["🚀 Simulation & Tactics", "🔮 Causal Prediction", "📊 Statistical Validation"])
+tab_sim, tab_pred, tab_val, tab_part_risk = st.tabs(["🚀 Simulation & Tactics", "🔮 Causal Prediction", "📊 Statistical Validation", "🔬 Individual Part Risk Prediction"])
 
 # ==============================================================================
-# TAB 1: SIMULATION & TACTICS (Existing Content)
+# TAB 1: SIMULATION & TACTICS (Unchanged)
 # ==============================================================================
 with tab_sim:
     st.header("1. Comparative Improvement Forecast")
@@ -329,17 +365,13 @@ with tab_sim:
 
     st.caption("The 'Est. Annual Scrap (lbs)' column is used for resource prioritization. Cycles and Days columns indicate the time needed to bring THIS SPECIFIC part to the set target.")
 
+
 # ==============================================================================
-# TAB 2: CAUSAL PREDICTION (New Content)
+# TAB 2: CAUSAL PREDICTION (Unchanged)
 # ==============================================================================
 with tab_pred:
     st.header("Predictive Causal Analysis (Random Forest)")
     st.markdown("A Machine Learning model trained on historical work orders to identify the **most important factors** contributing to a run having *any* scrap.")
-    
-    with st.spinner("Training Random Forest Classifier..."):
-        model, X_test, y_test, feature_cols = train_random_forest_model(df_ml)
-    
-    st.success("Model trained successfully!")
     
     # Model Evaluation Metrics
     accuracy = model.score(X_test, y_test)
@@ -349,7 +381,7 @@ with tab_pred:
     st.subheader("Top Causal Factors (Feature Importance)")
     
     # Feature Importance extraction
-    importances = model.feature_importances_
+    importances = model.base_estimator_.feature_importances_ # Get importance from the base RF model
     feature_importance_df = pd.DataFrame({
         'Cause': feature_cols,
         'Importance': importances
@@ -367,7 +399,7 @@ with tab_pred:
     st.caption("High Importance scores indicate these scrap causes are the strongest predictors of whether a work order fails.")
 
 # ==============================================================================
-# TAB 3: STATISTICAL VALIDATION (New Content)
+# TAB 3: STATISTICAL VALIDATION (Unchanged)
 # ==============================================================================
 with tab_val:
     st.header("Statistical Validation: High-Risk Group Confirmation")
@@ -389,3 +421,126 @@ with tab_val:
         st.warning(f"**Conclusion:** With a P-Value of **{p_value:.4f}**, we **fail to reject the null hypothesis**. There is not enough statistical evidence to say the scrap rates for the top 10 parts are significantly higher than the rest.")
         
     st.caption("The Mann-Whitney U test is used because it compares the distribution shapes of two independent, non-normally distributed samples (scrap rates).")
+
+# ==============================================================================
+# TAB 4: INDIVIDUAL PART RISK PREDICTION (New Content)
+# ==============================================================================
+with tab_part_risk:
+    st.header("🔬 Individual Part Risk Prediction")
+    st.markdown("Predict the probability of a future work order scrapping for a specific part based on its historical risk profile.")
+    
+    # --- Input Form ---
+    part_ids = sorted(df_avg['Part_ID'].unique().tolist())
+    
+    col_form1, col_form2, col_form3 = st.columns(3)
+    
+    selected_part_id = col_form1.selectbox(
+        "Select Part ID", 
+        part_ids, 
+        index=0
+    )
+    
+    # Use average weight and quantity as initial values
+    if selected_part_id:
+        avg_metrics = df_avg[df_avg['Part_ID'] == selected_part_id].iloc[0]
+        default_weight = avg_metrics['Avg_Piece_Weight']
+        default_quantity = avg_metrics['Avg_Order_Quantity']
+    else:
+        default_weight = 0
+        default_quantity = 0
+
+    piece_weight = col_form2.number_input(
+        "Piece Weight (lbs)", 
+        value=default_weight, 
+        min_value=0.1, 
+        format="%.2f"
+    )
+    
+    order_quantity = col_form3.number_input(
+        "Order Quantity", 
+        value=int(default_quantity), 
+        min_value=1, 
+        step=1
+    )
+
+    # --- Prediction Calculation ---
+    prob_scrap, part_drivers = predict_part_risk(model, selected_part_id, df_ml, feature_cols)
+    
+    # Expected Scrap Pieces calculation: This uses the predicted probability (of a run failing)
+    # multiplied by the average historical scrap rate * 0.5 (as a scaling factor)
+    # A simpler approach is to use a fixed scrap rate if the run is predicted to fail (e.g., max historical)
+    
+    max_hist_scrap_rate = df_avg[df_avg['Part_ID'] == selected_part_id]['Scrap_Percent_Baseline'].iloc[0]
+    
+    # We will use the predicted probability as a risk multiplier on the max historical rate
+    # Expected Scrap Pieces = Order Quantity * Max Historical Rate * Prob(Scrap)
+    expected_scrap_pieces = order_quantity * max_hist_scrap_rate * prob_scrap
+    
+    st.markdown("---")
+    
+    # --- Output Metrics ---
+    col_out1, col_out2, col_out3 = st.columns(3)
+    
+    col_out1.metric(
+        "Predicted Risk (Prob. of Scrap Run)", 
+        f"{prob_scrap*100:.2f}%",
+        help="The probability that a new work order for this part will incur ANY scrap, based on its historical defect profile."
+    )
+    
+    col_out2.metric(
+        "Expected Scrap Pieces (Estimate)", 
+        f"{expected_scrap_pieces:.1f} pcs",
+        help=f"Estimate based on Order Quantity * Max Historical Scrap Rate ({max_hist_scrap_rate*100:.2f}%) * Predicted Risk."
+    )
+    
+    col_out3.metric(
+        "Potential Value Loss", 
+        f"${expected_scrap_pieces * piece_weight * (MATERIAL_COST_PER_LB + LABOR_OVERHEAD_COST_PER_LB) :.2f}",
+        help="Estimated cost of lost material and labor for the current order."
+    )
+    
+    st.markdown("---")
+
+    # --- Historical Data & Drivers ---
+    
+    col_hist, col_drivers = st.columns(2)
+
+    with col_drivers:
+        st.subheader("Historical Cause Likelihood")
+        st.markdown(f"The model's input for Part **{selected_part_id}** is based on the average likelihood of these causes being present in its past work orders.")
+        
+        if part_drivers is not None:
+             part_drivers['Mean_Likelihood'] = part_drivers['Mean_Likelihood'].apply(lambda x: f"{x*100:.2f}%")
+             part_drivers.rename(columns={'Mean_Likelihood': 'Avg. Likelihood of Presence'}, inplace=True)
+
+             st.dataframe(
+                part_drivers.head(10),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No detailed defect data available for this part.")
+
+
+    with col_hist:
+        st.subheader(f"Historical Work Orders for {selected_part_id}")
+        
+        hist_df = df_historical[df_historical['Part_ID'] == selected_part_id].copy()
+        
+        hist_df['Scrap_%'] = (hist_df['Scrap_Percent_Hist'] * 100).round(2)
+        
+        # Display relevant columns
+        display_cols = [
+            'Work_Order_', 
+            'Order_Quantity', 
+            'Pieces_Scrapped', 
+            'Scrap_%', 
+            'Piece_Weight_lbs', 
+            'Week_Ending'
+        ]
+        
+        st.dataframe(
+            hist_df[display_cols].sort_values(by='Week_Ending', ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
