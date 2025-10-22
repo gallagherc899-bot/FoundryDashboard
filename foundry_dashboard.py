@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import math
+import re 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
@@ -47,25 +48,35 @@ MAX_CYCLES = 100
 
 def clean_col_name(col_raw):
     """
-    Cleans column names to a reliable snake_case format.
-    Ensures 'Work Order #' becomes 'work_order_id'.
+    Cleans column names to a reliable snake_case format with explicit handling 
+    for known problematic columns like 'Work Order #'.
     """
     col = str(col_raw).strip().lower()
+    
+    # 1. Explicitly handle the 'Work Order #' column for max robustness
+    # This prevents any scenario where a trailing '#' or space causes an issue.
+    if 'work order' in col:
+        return 'work_order_id'
+    
+    # 2. Explicitly handle 'Part ID'
+    if 'part id' in col:
+        return 'part_id'
+        
+    # 3. Generic cleaning for all other columns
     col = col.replace(' ', '_')
     col = col.replace('#', '_id')
     col = col.replace('%', '_percent')
     
-    # Remove any other common symbols
-    for char in ['(', ')', '.', '/', '\\']:
-        col = col.replace(char, '')
-        
+    # Remove any other common symbols (using regex for efficiency)
+    col = re.sub(r'[\(\)\.\/]+', '', col)
+    
     # Ensure no double underscores remain
     while '__' in col:
         col = col.replace('__', '_')
         
     return col.strip('_')
 
-@st.cache_data
+# Removed @st.cache_data to force re-run and eliminate persistent cache issues.
 def load_and_prepare_data():
     """
     Loads, cleans, and prepares data for simulation, ML, and historical context.
@@ -74,10 +85,13 @@ def load_and_prepare_data():
     try:
         df_historical = pd.read_csv('anonymized_parts.csv')
         
-        # --- Robust Column Name Cleaning (converts to snake_case) ---
-        df_historical.columns = [clean_col_name(c) for c in df_historical.columns]
+        # --- Robust Column Name Cleaning ---
+        raw_cols = list(df_historical.columns)
+        df_historical.columns = [clean_col_name(c) for c in raw_cols]
+        cleaned_cols = list(df_historical.columns) # Store cleaned names for diagnostics
 
         # --- Standardize Key Column Name for Scrap History ---
+        # The column that was "Scrap%" is now "scrap_percent". We rename it to "scrap_percent_hist"
         df_historical = df_historical.rename(columns={'scrap_percent': 'scrap_percent_hist'}, errors='ignore')
         
         # Convert historical scrap percentage to decimal
@@ -123,14 +137,26 @@ def load_and_prepare_data():
     except Exception as e:
         # Catch and display the specific error
         st.error(f"An error occurred during data processing: {e}")
-        # Add a diagnostic check to help identify the problem
+        
+        # --- DIAGNOSTIC CODE ---
+        # This code runs only on failure and helps us identify the true name of the column
         try:
-             # This requires the CSV to be loaded successfully before the error
             df_temp = pd.read_csv('anonymized_parts.csv')
+            
+            # Print the column names BEFORE cleaning to diagnose
+            st.code(f"RAW Column names:\n{list(df_temp.columns)}")
+            
+            # Apply the cleaning logic to show the guaranteed result
             cleaned_cols = [clean_col_name(c) for c in df_temp.columns]
-            st.code(f"Available column names after cleaning (Look for 'work_order_id'):\n{cleaned_cols}")
-        except Exception:
-            pass
+
+            st.code(f"RESULTING CLEANED Column names (Look for 'work_order_id'):\n{cleaned_cols}")
+            
+            # If the error is STILL happening, check the actual columns
+            if 'work_order_id' not in cleaned_cols:
+                 st.code("CRITICAL: 'work_order_id' not found in cleaned list. Please confirm the raw header 'Work Order #' is correct.")
+
+        except Exception as diag_e:
+            st.error(f"Could not load file for diagnostic column check: {diag_e}")
             
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
 
@@ -204,6 +230,7 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
 
 # --- 4. MACHINE LEARNING AND VALIDATION FUNCTIONS ---
 
+# Re-added cache decorator after the initial run to speed up subsequent runs
 @st.cache_data
 def train_random_forest_model(df_ml):
     """Trains a Calibrated Random Forest classifier to predict if a work order will scrap."""
@@ -264,8 +291,9 @@ def predict_part_risk(model, part_id, df_ml, feature_cols):
     mean_features_display = mean_features.T
     mean_features_display.columns = ['Mean_Likelihood']
     # Clean up cause names for display (from snake_case back to Title Case)
-    mean_features_display['Cause'] = mean_features_display.index.str.replace('_rate', '').str.replace('_', ' ').str.title()
-    
+    feature_map = {col: col.replace('_rate', '').replace('_', ' ').title() for col in feature_cols}
+    mean_features_display['Cause'] = mean_features_display.index.map(feature_map)
+
     return prob_prediction, mean_features_display.sort_values(by='Mean_Likelihood', ascending=False)
 
 
@@ -428,7 +456,8 @@ with tab_pred:
     }).sort_values(by='Importance', ascending=False)
     
     # Clean up cause names for display (from snake_case back to Title Case)
-    feature_importance_df['Cause'] = feature_importance_df['Cause'].str.replace('_rate', '').str.replace('_', ' ').str.title()
+    feature_map = {col: col.replace('_rate', '').replace('_', ' ').title() for col in feature_cols}
+    feature_importance_df['Cause'] = feature_importance_df['Cause'].map(feature_map)
     
     st.dataframe(
         feature_importance_df.head(10).style.bar(subset=['Importance'], color='#cf5c36'),
