@@ -46,22 +46,20 @@ MAX_CYCLES = 100
 
 # --- 2. DATA LOADING AND PREPARATION ---
 
-def clean_col_name_generic(col_raw):
+def clean_col_name(col_raw):
     """
-    Generic cleaner for non-critical columns after the initial brute-force
-    identification has occurred.
+    Hyper-aggressive cleaning function: converts to snake_case, removes symbols, 
+    and handles common separators like # and %.
     """
     col = str(col_raw).strip().lower()
+    # 1. Normalize common separators and symbols
+    col = col.replace(' ', '_').replace('#', '_id').replace('%', '_percent')
     
-    # Generic cleaning
-    col = col.replace(' ', '_')
-    col = col.replace('#', '_id')
-    col = col.replace('%', '_percent')
+    # 2. Aggressively remove all non-word characters (except underscore)
+    # This strips hidden characters that might be lingering
+    col = re.sub(r'[^\w_]', '', col)
     
-    # Remove any other common symbols (using regex for efficiency)
-    col = re.sub(r'[\(\)\.\/]+', '', col)
-    
-    # Ensure no double underscores remain
+    # 3. Ensure no double underscores remain
     while '__' in col:
         col = col.replace('__', '_')
         
@@ -70,54 +68,39 @@ def clean_col_name_generic(col_raw):
 # @st.cache_data is REMOVED to force a fresh run and prevent cache issues.
 def load_and_prepare_data():
     """
-    Loads, cleans, and prepares data for simulation, ML, and historical context.
-    Uses a brute-force method to ensure critical columns are identified.
+    Loads, cleans, and prepares data, forcing known column names to be standardized.
     """
     try:
         df_historical = pd.read_csv('anonymized_parts.csv')
-        raw_cols = list(df_historical.columns) # Save raw column names for diagnostics
-
-        # 1. --- BRUTE-FORCE CRITICAL COLUMN IDENTIFICATION ---
-        rename_map = {}
-        for raw_col in raw_cols:
-            col_lower = str(raw_col).lower().strip()
-            
-            # CRITICAL COLUMN 1: Work Order ID
-            if 'work order' in col_lower:
-                rename_map[raw_col] = 'work_order_id'
-            # CRITICAL COLUMN 2: Part ID
-            elif 'part id' in col_lower:
-                rename_map[raw_col] = 'part_id'
-            # CRITICAL COLUMN 3: Scrap Percentage
-            elif 'scrap%' in col_lower or 'scrap percent' in col_lower:
-                # We rename it once here, and then again later to add the '_hist' suffix
-                rename_map[raw_col] = 'scrap_percent' 
-            # CRITICAL COLUMN 4: Order Quantity
-            elif 'order quantity' in col_lower:
-                rename_map[raw_col] = 'order_quantity'
-            # CRITICAL COLUMN 5: Pieces Scrapped
-            elif 'pieces scrapped' in col_lower:
-                rename_map[raw_col] = 'pieces_scrapped'
-            # CRITICAL COLUMN 6: Piece Weight
-            elif 'piece weight' in col_lower:
-                rename_map[raw_col] = 'piece_weight_lbs'
-
-        df_historical.rename(columns=rename_map, inplace=True)
         
-        # 2. --- APPLY GENERIC CLEANING TO REMAINING COLUMNS ---
-        # The goal here is to only apply the generic cleaner to columns NOT already renamed.
-        final_cols = []
+        # 1. Apply Hyper-aggressive, universal cleaning to ALL columns
+        df_historical.columns = [clean_col_name(c) for c in df_historical.columns]
+        
+        # 2. Explicit mapping of cleaned (but potentially still varied) names to final target names
+        final_rename_map = {}
         for col in df_historical.columns:
-            if col in rename_map.values():
-                final_cols.append(col) # Keep the already renamed critical column
-            else:
-                final_cols.append(clean_col_name_generic(col)) # Clean the rest
-                
-        df_historical.columns = final_cols
+            # We look for partial matches to handle variants like 'work_order' or 'work_order_id'
+            if 'work_order' in col:
+                final_rename_map[col] = 'work_order_id'
+            elif 'part_id' in col:
+                final_rename_map[col] = 'part_id'
+            elif 'scrap_percent' in col:
+                final_rename_map[col] = 'scrap_percent'
+            elif 'order_quantity' in col:
+                final_rename_map[col] = 'order_quantity'
+            elif 'pieces_scrapped' in col:
+                final_rename_map[col] = 'pieces_scrapped'
+            elif 'piece_weight_lbs' in col:
+                final_rename_map[col] = 'piece_weight_lbs'
+            
+        df_historical.rename(columns=final_rename_map, inplace=True)
+
+        # 3. CRITICAL CHECKPOINT: Ensure the target column exists now
+        if 'work_order_id' not in df_historical.columns:
+             # This will trigger the exception block below, which includes diagnostics
+             raise KeyError(f"Critical column 'work_order_id' could not be identified after cleaning. The column may be named something completely unexpected. Current columns: {list(df_historical.columns)}")
         
-        # 3. --- POST-CLEANING PROCESSING ---
-        
-        # Standardize Scrap Percentage column name
+        # 4. Standardize Scrap Percentage column name
         df_historical = df_historical.rename(columns={'scrap_percent': 'scrap_percent_hist'}, errors='ignore')
         
         # Convert historical scrap percentage to decimal
@@ -167,28 +150,24 @@ def load_and_prepare_data():
         # --- DIAGNOSTIC CODE (RUNS ONLY ON FAILURE) ---
         try:
             df_temp = pd.read_csv('anonymized_parts.csv')
-            
-            # Print the column names BEFORE cleaning to diagnose
             st.code(f"RAW Column names (Look for 'Work Order #'):\n{list(df_temp.columns)}")
             
-            # Manually apply the cleaning logic to show the guaranteed result
-            # Use the brute-force identification logic here for the diagnostic output
-            temp_rename_map = {}
-            for raw_col in list(df_temp.columns):
-                col_lower = str(raw_col).lower().strip()
-                if 'work order' in col_lower:
-                    temp_rename_map[raw_col] = 'work_order_id'
-                elif 'part id' in col_lower:
-                    temp_rename_map[raw_col] = 'part_id'
-                    
-            df_temp.rename(columns=temp_rename_map, inplace=True)
-
-            cleaned_cols = list(df_temp.columns)
+            # Apply cleaning and renaming to show the result
+            cleaned_cols = [clean_col_name(c) for c in list(df_temp.columns)]
             
-            st.code(f"RESULTING CLEANED Column names (The required 'work_order_id' MUST be here):\n{cleaned_cols}")
+            final_cols = []
+            for col in cleaned_cols:
+                 if 'work_order' in col:
+                     final_cols.append('work_order_id')
+                 elif 'part_id' in col:
+                     final_cols.append('part_id')
+                 else:
+                     final_cols.append(col)
+                     
+            st.code(f"FINAL CLEANED Column names (The required 'work_order_id' MUST be here):\n{final_cols}")
             
-            if 'work_order_id' not in cleaned_cols:
-                 st.error("CRITICAL DIAGNOSIS: The required 'work_order_id' column was not found in the cleaned list. The raw header name is not matching any expected pattern.")
+            if 'work_order_id' not in final_cols:
+                 st.error("CRITICAL DIAGNOSIS: The required 'work_order_id' column was not found in the final cleaned list. The raw header name is not matching any expected pattern.")
 
         except Exception as diag_e:
             st.error(f"Could not load file for diagnostic column check: {diag_e}")
@@ -202,6 +181,46 @@ if df_avg.empty or df_ml.empty:
     st.stop() # Stop the script if data loading failed
 
 # --- 3. SIMULATION & CALCULATION FUNCTIONS (Unchanged logic, uses consistent column names) ---
+
+# Re-added cache decorator for performance after the initial uncached run
+@st.cache_data
+def train_random_forest_model(df_ml):
+    """Trains a Calibrated Random Forest classifier to predict if a work order will scrap."""
+    # Identify binary scrap cause columns as features (using the snake_case names)
+    feature_cols = [col for col in df_ml.columns if col.endswith('_rate')]
+
+    X = df_ml[feature_cols]
+    y = df_ml['is_scrapped'] # Use snake_case
+    
+    # --- FIX for ValueError: Stratification issue ---
+    class_counts = y.value_counts()
+    min_class_count = class_counts.min()
+
+    if min_class_count < 2:
+        st.warning("Warning: Scrap target class has fewer than 2 samples. Disabling stratification for train/test split to prevent error.")
+        stratify_param = None
+    else:
+        stratify_param = y
+    # --- END FIX ---
+    
+    # Split the data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.3, random_state=42, stratify=stratify_param
+    )
+
+    # Base Random Forest Model (using balanced weights)
+    base_model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
+
+    # Calibrate the probabilities using Isotonic regression for better risk estimation
+    model = CalibratedClassifierCV(
+        estimator=base_model,
+        method='isotonic', 
+        cv=5
+    )
+    model.fit(X_train, y_train)
+    
+    return model, X_test, y_test, feature_cols
+
 
 def calculate_cycles_to_target(initial_scrap_rate, reduction_factor, target_scrap):
     """Calculates the number of runs (cycles) required for a single part to hit the target."""
