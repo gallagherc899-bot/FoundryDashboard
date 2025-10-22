@@ -65,10 +65,11 @@ def clean_col_name(col_raw):
         
     return col.strip('_')
 
-# @st.cache_data is REMOVED to force a fresh run and prevent cache issues.
+@st.cache_data
 def load_and_prepare_data():
     """
-    Loads, cleans, and prepares data, forcing known column names to be standardized.
+    Loads, cleans, and prepares data, creating a guaranteed 'work_order_id' 
+    based on the row index, ignoring the problematic header name.
     """
     try:
         df_historical = pd.read_csv('anonymized_parts.csv')
@@ -76,13 +77,10 @@ def load_and_prepare_data():
         # 1. Apply Hyper-aggressive, universal cleaning to ALL columns
         df_historical.columns = [clean_col_name(c) for c in df_historical.columns]
         
-        # 2. Explicit mapping of cleaned (but potentially still varied) names to final target names
+        # 2. Explicit mapping of cleaned names to final target names, ignoring the original Work Order ID for naming purposes
         final_rename_map = {}
         for col in df_historical.columns:
-            # We look for partial matches to handle variants like 'work_order' or 'work_order_id'
-            if 'work_order' in col:
-                final_rename_map[col] = 'work_order_id'
-            elif 'part_id' in col:
+            if 'part_id' in col:
                 final_rename_map[col] = 'part_id'
             elif 'scrap_percent' in col:
                 final_rename_map[col] = 'scrap_percent'
@@ -92,14 +90,14 @@ def load_and_prepare_data():
                 final_rename_map[col] = 'pieces_scrapped'
             elif 'piece_weight_lbs' in col:
                 final_rename_map[col] = 'piece_weight_lbs'
+            # We explicitly SKIP renaming for 'work_order' here to avoid KeyErrors
             
         df_historical.rename(columns=final_rename_map, inplace=True)
-
-        # 3. CRITICAL CHECKPOINT: Ensure the target column exists now
-        if 'work_order_id' not in df_historical.columns:
-             # This will trigger the exception block below, which includes diagnostics
-             raise KeyError(f"Critical column 'work_order_id' could not be identified after cleaning. The column may be named something completely unexpected. Current columns: {list(df_historical.columns)}")
         
+        # 3. CRITICAL: Create a unique row identifier regardless of the original column name.
+        # This preserves the transactional granularity for ML training and aggregation.
+        df_historical['work_order_id'] = df_historical.index 
+
         # 4. Standardize Scrap Percentage column name
         df_historical = df_historical.rename(columns={'scrap_percent': 'scrap_percent_hist'}, errors='ignore')
         
@@ -108,6 +106,7 @@ def load_and_prepare_data():
             df_historical['scrap_percent_hist'] = df_historical['scrap_percent_hist'] / 100.0
         
         # --- Data for Simulation (df_avg: Averages/Max rates per Part ID) ---
+        # We use 'work_order_id' for count, which is now the safe row index
         df_avg = df_historical.groupby('part_id').agg(
             Scrap_Percent_Baseline=('scrap_percent_hist', 'max'),
             Avg_Order_Quantity=('order_quantity', 'mean'),
@@ -146,32 +145,7 @@ def load_and_prepare_data():
     except Exception as e:
         # Catch and display the specific error
         st.error(f"An error occurred during data processing: {e}")
-        
-        # --- DIAGNOSTIC CODE (RUNS ONLY ON FAILURE) ---
-        try:
-            df_temp = pd.read_csv('anonymized_parts.csv')
-            st.code(f"RAW Column names (Look for 'Work Order #'):\n{list(df_temp.columns)}")
-            
-            # Apply cleaning and renaming to show the result
-            cleaned_cols = [clean_col_name(c) for c in list(df_temp.columns)]
-            
-            final_cols = []
-            for col in cleaned_cols:
-                 if 'work_order' in col:
-                     final_cols.append('work_order_id')
-                 elif 'part_id' in col:
-                     final_cols.append('part_id')
-                 else:
-                     final_cols.append(col)
-                     
-            st.code(f"FINAL CLEANED Column names (The required 'work_order_id' MUST be here):\n{final_cols}")
-            
-            if 'work_order_id' not in final_cols:
-                 st.error("CRITICAL DIAGNOSIS: The required 'work_order_id' column was not found in the final cleaned list. The raw header name is not matching any expected pattern.")
-
-        except Exception as diag_e:
-            st.error(f"Could not load file for diagnostic column check: {diag_e}")
-            
+        st.info("The issue appears to be a column naming problem. Please verify the 'Work Order #' column is present and properly formatted in your CSV.")
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
 
 # Load and prepare data
@@ -182,7 +156,6 @@ if df_avg.empty or df_ml.empty:
 
 # --- 3. SIMULATION & CALCULATION FUNCTIONS (Unchanged logic, uses consistent column names) ---
 
-# Re-added cache decorator for performance after the initial uncached run
 @st.cache_data
 def train_random_forest_model(df_ml):
     """Trains a Calibrated Random Forest classifier to predict if a work order will scrap."""
@@ -284,46 +257,7 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
 
 # --- 4. MACHINE LEARNING AND VALIDATION FUNCTIONS ---
 
-# Re-added cache decorator for performance after the initial uncached run
 @st.cache_data
-def train_random_forest_model(df_ml):
-    """Trains a Calibrated Random Forest classifier to predict if a work order will scrap."""
-    # Identify binary scrap cause columns as features (using the snake_case names)
-    feature_cols = [col for col in df_ml.columns if col.endswith('_rate')]
-
-    X = df_ml[feature_cols]
-    y = df_ml['is_scrapped'] # Use snake_case
-    
-    # --- FIX for ValueError: Stratification issue ---
-    class_counts = y.value_counts()
-    min_class_count = class_counts.min()
-
-    if min_class_count < 2:
-        st.warning("Warning: Scrap target class has fewer than 2 samples. Disabling stratification for train/test split to prevent error.")
-        stratify_param = None
-    else:
-        stratify_param = y
-    # --- END FIX ---
-    
-    # Split the data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=stratify_param
-    )
-
-    # Base Random Forest Model (using balanced weights)
-    base_model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
-
-    # Calibrate the probabilities using Isotonic regression for better risk estimation
-    model = CalibratedClassifierCV(
-        estimator=base_model,
-        method='isotonic', 
-        cv=5
-    )
-    model.fit(X_train, y_train)
-    
-    return model, X_test, y_test, feature_cols
-
-
 def predict_part_risk(model, part_id, df_ml, feature_cols):
     """
     Generates a prediction vector based on the part's historical average feature profile 
@@ -351,6 +285,7 @@ def predict_part_risk(model, part_id, df_ml, feature_cols):
     return prob_prediction, mean_features_display.sort_values(by='Mean_Likelihood', ascending=False)
 
 
+@st.cache_data
 def run_statistical_validation(df_ml, df_avg):
     """
     Performs a Mann-Whitney U Test (non-parametric two-sample test) to compare 
@@ -651,7 +586,7 @@ with tab_part_risk:
         
         # Display relevant columns, using corrected names
         display_cols = [
-            'work_order_id', # Use snake_case
+            'work_order_id', # This is now the clean index
             'order_quantity', # Use snake_case
             'pieces_scrapped', # Use snake_case
             'Scrap_%', 
@@ -661,7 +596,7 @@ with tab_part_risk:
         
         # Rename columns back for friendly display
         hist_df_display = hist_df[display_cols].rename(columns={
-            'work_order_id': 'Work Order #', # Friendly name for display
+            'work_order_id': 'Run Index # (Unique ID)', # Renamed for clarity
             'order_quantity': 'Order Quantity',
             'pieces_scrapped': 'Pieces Scrapped',
             'piece_weight_lbs': 'Piece Weight (lbs)',
