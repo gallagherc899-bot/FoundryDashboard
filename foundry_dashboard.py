@@ -1,5 +1,5 @@
 # streamlit_app.py
-# Run with: streamlit run streamlit_app.py
+# Run with: streamlit run foundry_dashboard.py
 
 import warnings
 # Suppress the NumPy/Pandas warnings that often occur during data manipulation
@@ -23,7 +23,8 @@ TARGET_COLUMN = "is_scrapped"
 RANDOM_STATE = 42
 DEFAULT_ESTIMATORS = 180
 MIN_SAMPLES_LEAF = 2
-# (Note: Other constants from the full application have been preserved below)
+# Hardcoded max cycles for simulation stability
+MAX_CYCLES = 100
 
 # Use the existing Streamlit page configuration structure
 st.set_page_config(
@@ -54,8 +55,7 @@ TARGET_SCRAP_PERCENT = st.sidebar.slider(
 REDUCTION_SCENARIOS = [
     0.30, 0.25, 0.20, 0.15, 0.10, 0.05
 ]
-# Hardcoded max cycles for simulation stability
-MAX_CYCLES = 100
+
 
 # --- 2. DATA LOADING AND PREPARATION ---
 
@@ -293,14 +293,237 @@ def train_random_forest_model(df_ml: pd.DataFrame):
     # Predict probabilities
     p_test = model.predict_proba(X_test)[:, 1] # Probability of class 1
 
-    # Rename the output for clarity on what the model is predicting
     st.caption("NOTE: The model now predicts the probability of a run being **Low Yield** (High Scrap, above the median) versus High Yield (Low Scrap, at or below the median).")
 
 
     return model, X_test, y_test, feature_cols, calib_method, p_test
 
 
+# Train the model once the function is defined
+model, X_test, y_test, feature_cols, calib_method, p_test = train_random_forest_model(df_ml)
+
+if model is None:
+    st.stop() # Stop the script if model training failed
+
 # --- 4. SIMULATION & CALCULATION FUNCTIONS ---
 
 def calculate_cycles_to_target(initial_scrap_rate, reduction_factor, target_scrap):
-# ... (rest of the file remains unchanged from here) ...
+    """
+    Calculates the number of cycles (e.g., weeks) required to reach the target 
+    scrap rate, given an annual reduction factor applied to the excess.
+    """
+    target_rate = target_scrap / 100.0
+    initial_rate = initial_scrap_rate # This should already be a decimal rate (e.g., 0.03 for 3%)
+
+    if initial_rate <= target_rate:
+        return 0 
+    
+    current_rate = initial_rate
+    cycles = 0
+    
+    # Simulate iterative reduction
+    while current_rate > target_rate and cycles < MAX_CYCLES: 
+        # Reduction is applied to the excess scrap (current_rate - target_rate)
+        reduction_amount = (current_rate - target_rate) * reduction_factor
+        current_rate -= reduction_amount
+        cycles += 1
+    
+    # If the loop hits MAX_CYCLES, it means it failed to converge quickly
+    return cycles if cycles < MAX_CYCLES else MAX_CYCLES 
+
+def calculate_feature_importances(model, feature_cols, X_test, y_test):
+    """
+    Calculates feature importance from the Random Forest model and adds 
+    statistical significance (Mann-Whitney U-test).
+    """
+    # Use built-in feature importances from the base Random Forest estimator
+    rf_model = model.estimator
+    importances = pd.Series(
+        rf_model.feature_importances_, 
+        index=feature_cols
+    ).sort_values(ascending=False)
+    
+    # Calculate U-test p-values (Mann-Whitney U-test for feature significance)
+    p_values = {}
+    X_df = X_test.copy()
+    X_df['target'] = y_test
+    
+    class_0 = X_df[X_df['target'] == 0]
+    class_1 = X_df[X_df['target'] == 1]
+    
+    for feature in feature_cols:
+        # Check if both groups have enough data points for the test
+        if len(class_0) > 1 and len(class_1) > 1:
+            try:
+                # Compare the feature distributions in the two classes (0 and 1)
+                stat, p = mannwhitneyu(class_0[feature].values, class_1[feature].values, alternative='two-sided')
+                p_values[feature] = p
+            except ValueError:
+                p_values[feature] = 1.0 # Failed test
+        else:
+            p_values[feature] = 1.0
+
+    importance_df = pd.DataFrame({
+        'Feature': importances.index,
+        'Importance (Gini)': importances.values,
+        'P-Value (Mann-Whitney U)': [p_values.get(f, 1.0) for f in importances.index]
+    })
+    
+    # Add significance star
+    def get_star(p):
+        if p < 0.001: return '***'
+        if p < 0.01: return '**'
+        if p < 0.05: return '*'
+        return ''
+    
+    importance_df['Significance'] = importance_df['P-Value (Mann-Whitney U)'].apply(get_star)
+
+    return importance_df
+
+def run_simulation(df_avg, cost_material_per_lb, cost_labor_per_lb, cost_per_failure, target_scrap, reduction_scenarios):
+    """
+    Runs the cost avoidance simulation across different reduction scenarios.
+    """
+    cost_per_lb = cost_material_per_lb + cost_labor_per_lb
+    
+    # Calculate baseline costs (based on the annual estimated scrap weight)
+    df_avg['Baseline_Cost'] = (
+        df_avg['Est_Annual_Scrap_Weight_lbs'] * cost_per_lb 
+        + df_avg['Total_Runs'] * cost_per_failure
+    )
+    total_baseline_cost = df_avg['Baseline_Cost'].sum()
+    
+    results = []
+    
+    for factor in reduction_scenarios:
+        # Calculate new scrap rate after applying the factor to the excess over target
+        df_avg[f'Reduced_Scrap_Rate_{factor}'] = df_avg.apply(
+            lambda row: max(
+                target_scrap/100.0, 
+                row['Scrap_Percent_Baseline'] - (row['Scrap_Percent_Baseline'] - target_scrap/100.0) * factor
+            ), 
+            axis=1
+        )
+        
+        # Calculate reduced scrap weight
+        df_avg[f'Reduced_Scrap_Weight_{factor}'] = df_avg[f'Reduced_Scrap_Rate_{factor}'] * df_avg['Avg_Order_Quantity'] * df_avg['Avg_Piece_Weight'] * min(52, df_avg['Total_Runs'])
+        
+        # Calculate reduced cost
+        df_avg[f'Reduced_Cost_{factor}'] = (
+            df_avg[f'Reduced_Scrap_Weight_{factor}'] * cost_per_lb
+            + df_avg['Total_Runs'] * cost_per_failure
+        )
+        
+        total_reduced_cost = df_avg[f'Reduced_Cost_{factor}'].sum()
+        cost_avoidance = total_baseline_cost - total_reduced_cost
+        
+        # Calculate cycles
+        avg_baseline_scrap = df_avg['Scrap_Percent_Baseline'].mean()
+        cycles = calculate_cycles_to_target(avg_baseline_scrap, factor, target_scrap)
+        
+        results.append({
+            'Reduction_Effort': f"{int(factor * 100)}% Reduction on Excess",
+            'Total_Cost_Avoidance': cost_avoidance,
+            'Cycles_to_Target (Weeks)': cycles
+        })
+        
+    df_results = pd.DataFrame(results)
+    
+    return df_results, total_baseline_cost
+
+# --- 5. DASHBOARD LAYOUT ---
+
+st.title("Foundry Production Risk Dashboard")
+st.markdown("---")
+
+# --- 5.1. Feature Importance & Model Performance ---
+st.header("1. Causal Feature Analysis & Model Performance")
+
+importance_df = calculate_feature_importances(model, feature_cols, X_test, y_test)
+
+col_imp, col_diag = st.columns([0.6, 0.4])
+
+with col_imp:
+    st.subheader("Model Feature Importance (Top Drivers of Low Yield)")
+    st.dataframe(
+        importance_df.head(10).assign(**{
+            'Importance (Gini)': lambda d: (d['Importance (Gini)'] * 100).round(2),
+            'P-Value (Mann-Whitney U)': lambda d: d['P-Value (Mann-Whitney U)'].apply(lambda x: f"{x:.4f}")
+        }).rename(columns={'Importance (Gini)': 'Importance (%)'}),
+        use_container_width=True
+    )
+    st.caption("*Significance: *** < 0.001, ** < 0.01, * < 0.05. Importance is based on the Gini impurity reduction in the Random Forest model.")
+
+with col_diag:
+    st.subheader("Model Diagnostics")
+    test_brier = np.nan
+    try:
+        test_brier = brier_score_loss(y_test, p_test) if len(X_test) and len(p_test) else np.nan
+    except Exception:
+        pass
+    st.metric(
+        label="Test Brier Score Loss",
+        value=f"{test_brier:.4f}" if not np.isnan(test_brier) else "N/A",
+        help="Lower is better. Measures the calibration and accuracy of probability predictions."
+    )
+    st.write(f"Calibration Method: **{calib_method}**")
+    
+st.markdown("---")
+
+# --- 5.2. Cost Avoidance Simulation ---
+st.header("2. Cost Avoidance Simulation")
+
+simulation_results, total_baseline_cost = run_simulation(
+    df_avg, 
+    MATERIAL_COST_PER_LB, 
+    LABOR_OVERHEAD_COST_PER_LB, 
+    AVG_NON_MATERIAL_COST_PER_FAILURE, 
+    TARGET_SCRAP_PERCENT, 
+    REDUCTION_SCENARIOS
+)
+
+col_metric, col_table = st.columns([0.4, 0.6])
+
+with col_metric:
+    st.subheader("Baseline Metrics")
+    st.metric(
+        label="Total Historical Scrap Pieces Analyzed", 
+        value=f"{total_historical_scrap_pieces:,.0f}"
+    )
+    st.metric(
+        label="Estimated Annual Baseline Cost of Scrap/Failures",
+        value=f"${total_baseline_cost:,.2f}",
+        delta_color="off"
+    )
+    st.caption(f"Target Scrap Rate: {TARGET_SCRAP_PERCENT:.1f}%")
+
+with col_table:
+    st.subheader("Cost Avoidance Scenarios")
+    
+    # Format the table for display
+    formatted_results = simulation_results.assign(**{
+        'Total_Cost_Avoidance': lambda d: d['Total_Cost_Avoidance'].map('${:,.2f}'.format),
+    }).rename(columns={
+        'Total_Cost_Avoidance': 'Estimated Annual Cost Avoidance',
+        'Cycles_to_Target (Weeks)': f'Cycles to Reach {TARGET_SCRAP_PERCENT:.1f}% Target'
+    })
+    
+    st.dataframe(formatted_results, use_container_width=True)
+
+st.markdown("---")
+
+# --- 5.3. Part-Level Data Overview ---
+st.header("3. Part-Level Data Overview")
+
+# Calculate current averages for display (in percentage)
+df_display = df_avg.assign(**{
+    'Scrap_Percent_Baseline': lambda d: (d['Scrap_Percent_Baseline'] * 100).round(2),
+}).rename(columns={'Scrap_Percent_Baseline': 'Max Scrap % (Baseline)'})
+
+st.dataframe(
+    df_display[['part_id', 'Total_Runs', 'Avg_Order_Quantity', 'Avg_Piece_Weight', 'Max Scrap % (Baseline)']],
+    use_container_width=True
+)
+st.caption("Baseline scrap represents the maximum historical scrap percentage observed for that Part ID.")
+
+# End of File Generation
