@@ -7,7 +7,7 @@ import numpy as np
 import streamlit as st
 import math
 import re 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold # <--- ADDED StratifiedKFold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from scipy.stats import mannwhitneyu
@@ -172,34 +172,51 @@ def train_random_forest_model(df_ml):
     X = df_ml[feature_cols]
     y = df_ml['is_scrapped'] # Use snake_case
     
-    # --- FIX for ValueError: Stratification issue ---
+    # --- STRATIFIED CV FIX ---
+    # Check if we have enough samples for the minority class to split into 5 folds
     class_counts = y.value_counts()
     min_class_count = class_counts.min()
 
-    if min_class_count < 2:
-        st.warning("Warning: Scrap target class has fewer than 2 samples. Disabling stratification for train/test split to prevent error.")
-        stratify_param = None
-    else:
-        stratify_param = y
-    # --- END FIX ---
+    # Determine the number of splits possible for the minority class
+    n_splits = min(5, min_class_count) 
+
+    if n_splits < 2:
+        st.warning(f"Warning: Only {min_class_count} scrap samples available. Cannot perform stratified cross-validation for calibration. Model training will proceed without calibration to avoid a fatal error, but probabilities may be less reliable.")
+        
+        # If not enough samples, just use the base model without calibration
+        model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
+        # Split the data without stratification (since it will fail with few samples)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42
+        )
+        model.fit(X_train, y_train)
+        return model, X_test, y_test, feature_cols
     
-    # Split the data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=stratify_param
-    )
+    # Define StratifiedKFold cross-validation object 
+    # This ensures that each fold contains a proportional number of both scrap (1) and non-scrap (0) instances.
+    cv_strategy = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     # Base Random Forest Model (using balanced weights)
     base_model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
 
     # Calibrate the probabilities using Isotonic regression for better risk estimation
+    # Pass the StratifiedKFold object to 'cv'
     model = CalibratedClassifierCV(
         estimator=base_model,
         method='isotonic', 
-        cv=5
+        cv=cv_strategy # <--- PASSING THE STRATIFIED CV OBJECT HERE
     )
+    
+    # Split the data normally (with stratification) for the final test set
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.3, random_state=42, stratify=y
+    )
+    
     model.fit(X_train, y_train)
     
     return model, X_test, y_test, feature_cols
+
+# --- END STRATIFIED CV FIX ---
 
 
 def calculate_cycles_to_target(initial_scrap_rate, reduction_factor, target_scrap):
@@ -280,7 +297,13 @@ def predict_part_risk(model, part_id, df_ml, feature_cols):
     mean_features = part_data[feature_cols].mean().to_frame().T
     
     # 2. Predict the probability of scrap (Is_Scrapped=1)
-    prob_prediction = model.predict_proba(mean_features)[0][1]
+    # The check is necessary because if calibration failed, 'model' might not have predict_proba
+    if hasattr(model, 'predict_proba'):
+        prob_prediction = model.predict_proba(mean_features)[0][1]
+    else:
+        # If calibration failed and we used the base model, predict the probability
+        prob_prediction = model.predict_proba(mean_features)[0][1]
+        
     
     # 3. Format mean features for display
     mean_features_display = mean_features.T
@@ -439,14 +462,20 @@ with tab_pred:
     st.markdown("A Machine Learning model trained on historical work orders to identify the **most important factors** contributing to a run having *any* scrap.")
     
     # Model Evaluation Metrics (using the calibrated model's score)
+    # Check if the model is CalibratedClassifierCV or just RandomForestClassifier
     accuracy = model.score(X_test, y_test)
     st.metric(label="Model Prediction Accuracy (on test set)", value=f"{accuracy*100:.2f}%")
     st.caption("This score reflects the model's ability to correctly predict if a work order will have scrap or not.")
     
     st.subheader("Top Causal Factors (Feature Importance)")
     
-    # Feature Importance extraction from the base estimator
-    importances = model.base_estimator_.feature_importances_ 
+    # Feature Importance extraction from the base estimator (if CalibratedClassifierCV was used)
+    # Otherwise, extract from the model itself
+    if hasattr(model, 'base_estimator_'):
+        importances = model.base_estimator_.feature_importances_ 
+    else:
+        importances = model.feature_importances_
+        
     feature_importance_df = pd.DataFrame({
         'Cause': feature_cols,
         'Importance': importances
