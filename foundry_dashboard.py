@@ -67,31 +67,34 @@ def clean_col_name(col_raw):
 @st.cache_data
 def load_and_prepare_data():
     """
-    Loads, cleans, and prepares data. It explicitly drops the original Work Order ID column 
-    (regardless of its name after cleaning) and replaces it with the row index 
+    Loads, cleans, and prepares data. It now explicitly drops the original Work Order ID column 
+    (assumed to be index 0) and replaces it with the row index 
     to guarantee a valid unique identifier for ML and aggregation.
     """
     try:
         df_historical = pd.read_csv('anonymized_parts.csv')
         
-        # 1. Apply Hyper-aggressive, universal cleaning to ALL columns
+        # 1. CRITICAL FIX: Ignore and drop the original Work Order ID column by its position (Index 0).
+        # This completely bypasses the problematic header text.
+        
+        # Create a guaranteed unique run ID based on the index before dropping the original column.
+        df_historical['work_order_id'] = df_historical.index 
+        
+        # Drop the original first column, regardless of its header content.
+        # This resolves the issue of code expecting a cleaned version of this column.
+        df_historical.drop(df_historical.columns[0], axis=1, inplace=True)
+
+
+        # 2. Apply Hyper-aggressive, universal cleaning to ALL remaining columns
         df_historical.columns = [clean_col_name(c) for c in df_historical.columns]
         
-        # 2. CRITICAL: Identify and REMOVE the original work order ID column.
-        # It should have been cleaned to 'work_order_id' or similar.
-        work_order_cols_to_drop = [col for col in df_historical.columns if 'work_order' in col or 'w_o' in col or 'order_id' in col]
-        
-        if work_order_cols_to_drop:
-            df_historical.drop(columns=work_order_cols_to_drop, inplace=True)
-            
-        # 3. CRITICAL: Create a unique row identifier based on the index.
-        # This preserves transactional granularity (one row = one work order run).
-        df_historical['work_order_id'] = df_historical.index 
-
-        # 4. Standardize the rest of the columns
+        # 3. Standardize the rest of the columns
         final_rename_map = {}
         for col in df_historical.columns:
-            if 'part_id' in col:
+            # We must be careful not to rename 'work_order_id' which we just created
+            if col == 'work_order_id':
+                continue
+            elif 'part_id' in col:
                 final_rename_map[col] = 'part_id'
             elif 'scrap_percent' in col:
                 final_rename_map[col] = 'scrap_percent_hist'
@@ -148,7 +151,7 @@ def load_and_prepare_data():
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
     except Exception as e:
         # Catch and display the specific error
-        st.error(f"A serious error occurred during data processing: {e}")
+        st.error(f"A severe error occurred during data processing: {e}")
         st.info("The cleaning logic encountered an issue. Please verify the structure of your CSV, especially column headers.")
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
 
