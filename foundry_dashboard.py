@@ -1,4 +1,5 @@
 import warnings
+# Suppress the NumPy/Pandas warnings that often occur during data manipulation
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import pandas as pd
@@ -8,7 +9,6 @@ import math
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.preprocessing import LabelEncoder
 from scipy.stats import mannwhitneyu
 
 # Use the existing Streamlit page configuration structure
@@ -49,20 +49,39 @@ MAX_CYCLES = 100
 def load_and_prepare_data():
     """
     Loads, cleans, and prepares data for simulation, ML, and historical context.
+    The primary fix here is a robust column cleaning pipeline.
     """
     try:
         df_historical = pd.read_csv('anonymized_parts.csv')
-        # Clean column names
-        df_historical.columns = df_historical.columns.str.replace(' ', '_').str.replace('%', '_Percent').str.replace('(#)', '').str.replace('(', '').str.replace(')', '')
-        df_historical = df_historical.rename(columns={'Scrap_Percent': 'Scrap_Percent_Hist', 'Part_ID': 'Part_ID'})
-        df_historical['Scrap_Percent_Hist'] = df_historical['Scrap_Percent_Hist'] / 100.0
+        
+        # --- Robust Column Name Cleaning (converts to snake_case) ---
+        # 1. Lowercase, replace spaces with underscores
+        df_historical.columns = df_historical.columns.str.lower().str.replace(' ', '_')
+        # 2. Clean up special characters and rename key columns
+        df_historical.columns = df_historical.columns.str.replace('#', '_id').str.replace('%', '_percent').str.replace('(', '').str.replace(')', '').str.replace('.', '').str.strip('_')
+        
+        # Normalize double underscores created by cleaning
+        df_historical.columns = [col.replace('__', '_') for col in df_historical.columns]
+
+        # --- Standardize Key Column Names for Code Use ---
+        # This renames the snake_case names into consistent mixed-case names used throughout the code
+        df_historical = df_historical.rename(columns={
+            'scrap_percent': 'Scrap_Percent_Hist',
+            'part_id': 'Part_ID',
+            'work_order_id': 'Work_Order_ID',
+            'order_quantity': 'Order_Quantity',
+            'pieces_scrapped': 'Pieces_Scrapped',
+            'piece_weight_lbs': 'Piece_Weight_lbs'
+        }, errors='ignore')
         
         # --- Data for Simulation (df_avg: Averages/Max rates per Part ID) ---
+        df_historical['Scrap_Percent_Hist'] = df_historical['Scrap_Percent_Hist'] / 100.0
+        
         df_avg = df_historical.groupby('Part_ID').agg(
             Scrap_Percent_Baseline=('Scrap_Percent_Hist', 'max'),
             Avg_Order_Quantity=('Order_Quantity', 'mean'),
             Avg_Piece_Weight=('Piece_Weight_lbs', 'mean'),
-            Total_Runs=('Work_Order_', 'count')
+            Total_Runs=('Work_Order_ID', 'count') # Using the corrected name
         ).reset_index()
 
         df_avg['Est_Annual_Scrap_Weight_lbs'] = df_avg.apply(
@@ -71,7 +90,7 @@ def load_and_prepare_data():
         )
         
         # Calculate total historical scrap pieces for cost avoidance estimation
-        df_historical['Scrap_Pieces'] = df_historical['Pieces_Scrapped']
+        df_historical['Scrap_Pieces'] = df_historical['Pieces_Scrapped'] # Using the corrected name
         total_historical_scrap_pieces = df_historical['Scrap_Pieces'].sum()
         
         # --- Data for Machine Learning (df_ml: Work Orders with Binary Scrap Causes) ---
@@ -81,7 +100,8 @@ def load_and_prepare_data():
         df_ml['Is_Scrapped'] = (df_ml['Scrap_Percent_Hist'] > 0).astype(int)
         
         # Features for ML: Scrap Cause columns (Rate columns)
-        rate_cols = [col for col in df_ml.columns if 'Rate' in col]
+        # Note: The original rate columns were already snake_case/cleaned in the first step
+        rate_cols = [col for col in df_ml.columns if 'rate' in col.lower() and col not in ['scrap_percent_hist', 'is_scrapped']]
         
         # Convert rate columns into binary features (1 if cause was present, 0 otherwise)
         for col in rate_cols:
@@ -93,10 +113,11 @@ def load_and_prepare_data():
         st.error("Error: 'anonymized_parts.csv' not found. Please ensure the file is correctly named and available.")
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
     except Exception as e:
+        # Catch and display the specific error
         st.error(f"An error occurred during data processing: {e}")
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
 
-
+# Load and prepare data
 df_avg, df_ml, total_historical_scrap_pieces, df_historical = load_and_prepare_data()
 
 if df_avg.empty or df_ml.empty:
@@ -163,12 +184,13 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
         
     return total_cycles, total_cumulative_savings
 
-# --- 4. MACHINE LEARNING AND VALIDATION FUNCTIONS (Updated for Calibration) ---
+# --- 4. MACHINE LEARNING AND VALIDATION FUNCTIONS ---
 
 @st.cache_data
 def train_random_forest_model(df_ml):
     """Trains a Calibrated Random Forest classifier to predict if a work order will scrap."""
-    feature_cols = [col for col in df_ml.columns if 'Rate' in col]
+    # Identify binary scrap cause columns as features (using the snake_case names)
+    feature_cols = [col for col in df_ml.columns if 'rate' in col.lower() and col not in ['scrap_percent_hist', 'is_scrapped']]
 
     X = df_ml[feature_cols]
     y = df_ml['Is_Scrapped']
@@ -193,9 +215,10 @@ def train_random_forest_model(df_ml):
     base_model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
 
     # Calibrate the probabilities using Isotonic regression for better risk estimation
+    # cv=5 is used for internal cross-validation for calibration
     model = CalibratedClassifierCV(
         estimator=base_model,
-        method='isotonic', # Generally superior for well-behaved non-linear probability adjustment
+        method='isotonic', 
         cv=5
     )
     model.fit(X_train, y_train)
@@ -219,15 +242,13 @@ def predict_part_risk(model, part_id, df_ml, feature_cols):
     mean_features = part_data[feature_cols].mean().to_frame().T
     
     # 2. Predict the probability of scrap (Is_Scrapped=1)
-    # The model predicts the probability of the run having scrap.
     prob_prediction = model.predict_proba(mean_features)[0][1]
     
-    # 3. Calculate feature deviation (Pareto) for local drivers (optional, but good for context)
-    # Since we are using the mean, we can't do a full Pareto, but we can return the mean features
-    # as context for *why* the prediction might be high/low.
+    # 3. Format mean features for display
     mean_features_display = mean_features.T
     mean_features_display.columns = ['Mean_Likelihood']
-    mean_features_display['Cause'] = mean_features_display.index.str.replace(' Rate', '').str.replace('_', ' ').str.title()
+    # Clean up cause names for display (from snake_case back to Title Case)
+    mean_features_display['Cause'] = mean_features_display.index.str.replace('_rate', '').str.replace('_', ' ').str.title()
     
     return prob_prediction, mean_features_display.sort_values(by='Mean_Likelihood', ascending=False)
 
@@ -269,13 +290,14 @@ st.markdown(f"**Target Scrap Floor:** **{TARGET_SCRAP_PERCENT:.1f}%** | **Total 
 
 # Train the model once for all tabs
 with st.spinner("Initializing ML Model for Predictions..."):
+    # The feature columns here will be the snake_case rate columns
     model, X_test, y_test, feature_cols = train_random_forest_model(df_ml)
 
 # Define the tabs
 tab_sim, tab_pred, tab_val, tab_part_risk = st.tabs(["🚀 Simulation & Tactics", "🔮 Causal Prediction", "📊 Statistical Validation", "🔬 Individual Part Risk Prediction"])
 
 # ==============================================================================
-# TAB 1: SIMULATION & TACTICS (Unchanged)
+# TAB 1: SIMULATION & TACTICS
 # ==============================================================================
 with tab_sim:
     st.header("1. Comparative Improvement Forecast")
@@ -367,28 +389,28 @@ with tab_sim:
 
 
 # ==============================================================================
-# TAB 2: CAUSAL PREDICTION (Unchanged)
+# TAB 2: CAUSAL PREDICTION
 # ==============================================================================
 with tab_pred:
     st.header("Predictive Causal Analysis (Random Forest)")
     st.markdown("A Machine Learning model trained on historical work orders to identify the **most important factors** contributing to a run having *any* scrap.")
     
-    # Model Evaluation Metrics
+    # Model Evaluation Metrics (using the calibrated model's score)
     accuracy = model.score(X_test, y_test)
     st.metric(label="Model Prediction Accuracy (on test set)", value=f"{accuracy*100:.2f}%")
     st.caption("This score reflects the model's ability to correctly predict if a work order will have scrap or not.")
     
     st.subheader("Top Causal Factors (Feature Importance)")
     
-    # Feature Importance extraction
-    importances = model.base_estimator_.feature_importances_ # Get importance from the base RF model
+    # Feature Importance extraction from the base estimator
+    importances = model.base_estimator_.feature_importances_ 
     feature_importance_df = pd.DataFrame({
         'Cause': feature_cols,
         'Importance': importances
     }).sort_values(by='Importance', ascending=False)
     
-    # Clean up cause names for display
-    feature_importance_df['Cause'] = feature_importance_df['Cause'].str.replace(' Rate', '').str.replace('_', ' ').str.title()
+    # Clean up cause names for display (from snake_case back to Title Case)
+    feature_importance_df['Cause'] = feature_importance_df['Cause'].str.replace('_rate', '').str.replace('_', ' ').str.title()
     
     st.dataframe(
         feature_importance_df.head(10).style.bar(subset=['Importance'], color='#cf5c36'),
@@ -399,7 +421,7 @@ with tab_pred:
     st.caption("High Importance scores indicate these scrap causes are the strongest predictors of whether a work order fails.")
 
 # ==============================================================================
-# TAB 3: STATISTICAL VALIDATION (Unchanged)
+# TAB 3: STATISTICAL VALIDATION
 # ==============================================================================
 with tab_val:
     st.header("Statistical Validation: High-Risk Group Confirmation")
@@ -423,7 +445,7 @@ with tab_val:
     st.caption("The Mann-Whitney U test is used because it compares the distribution shapes of two independent, non-normally distributed samples (scrap rates).")
 
 # ==============================================================================
-# TAB 4: INDIVIDUAL PART RISK PREDICTION (New Content)
+# TAB 4: INDIVIDUAL PART RISK PREDICTION
 # ==============================================================================
 with tab_part_risk:
     st.header("🔬 Individual Part Risk Prediction")
@@ -466,13 +488,8 @@ with tab_part_risk:
     # --- Prediction Calculation ---
     prob_scrap, part_drivers = predict_part_risk(model, selected_part_id, df_ml, feature_cols)
     
-    # Expected Scrap Pieces calculation: This uses the predicted probability (of a run failing)
-    # multiplied by the average historical scrap rate * 0.5 (as a scaling factor)
-    # A simpler approach is to use a fixed scrap rate if the run is predicted to fail (e.g., max historical)
-    
     max_hist_scrap_rate = df_avg[df_avg['Part_ID'] == selected_part_id]['Scrap_Percent_Baseline'].iloc[0]
     
-    # We will use the predicted probability as a risk multiplier on the max historical rate
     # Expected Scrap Pieces = Order Quantity * Max Historical Rate * Prob(Scrap)
     expected_scrap_pieces = order_quantity * max_hist_scrap_rate * prob_scrap
     
@@ -529,9 +546,9 @@ with tab_part_risk:
         
         hist_df['Scrap_%'] = (hist_df['Scrap_Percent_Hist'] * 100).round(2)
         
-        # Display relevant columns
+        # Display relevant columns, using corrected names
         display_cols = [
-            'Work_Order_', 
+            'Work_Order_ID', 
             'Order_Quantity', 
             'Pieces_Scrapped', 
             'Scrap_%', 
