@@ -172,9 +172,23 @@ def train_random_forest_model(df_ml):
     X = df_ml[feature_cols]
     y = df_ml['Is_Scrapped']
     
-    # Stratified split to maintain balance of 'Is_Scrapped'
+    # --- FIX for ValueError: Stratification issue ---
+    # Check if the minority class is large enough for stratification (needs at least 2 samples)
+    class_counts = y.value_counts()
+    min_class_count = class_counts.min()
+
+    # If the minimum class size is less than 2, stratification is impossible.
+    if min_class_count < 2:
+        st.warning("Warning: Scrap target class has fewer than 2 samples. Disabling stratification for train/test split to prevent error.")
+        stratify_param = None
+    else:
+        # Otherwise, proceed with stratification
+        stratify_param = y
+    # --- END FIX ---
+    
+    # Stratified split to maintain balance of 'Is_Scrapped' if possible
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
+        X, y, test_size=0.3, random_state=42, stratify=stratify_param
     )
 
     # Use balanced class weight to handle imbalance (more non-scrap runs)
@@ -200,12 +214,16 @@ def run_statistical_validation(df_ml, df_avg):
 
     # Mann-Whitney U Test: Compares if two independent samples are from the same distribution.
     # We hypothesize that the top parts have significantly higher scrap rates (Alternative: greater)
-    # Sampling up to 1000 from the larger group if necessary to speed up calculation, though Mann-Whitney doesn't require equal sizes.
+    
+    # Ensure samples are the same size (up to 1000) for a cleaner comparison/faster runtime
     sample_size = min(len(all_scrap_rates), len(top_scrap_rates), 1000)
     
+    sample1 = all_scrap_rates.sample(sample_size, random_state=42, replace=True if len(all_scrap_rates) < sample_size else False)
+    sample2 = top_scrap_rates.sample(sample_size, random_state=42, replace=True if len(top_scrap_rates) < sample_size else False)
+
     u_stat, p_value = mannwhitneyu(
-        all_scrap_rates.sample(sample_size, random_state=42), 
-        top_scrap_rates.sample(sample_size, random_state=42) if len(top_scrap_rates) >= sample_size else top_scrap_rates, 
+        sample1, 
+        sample2, 
         alternative='less' # Test if the first sample (all parts) is stochastically smaller than the second (top 10 parts)
     )
     
