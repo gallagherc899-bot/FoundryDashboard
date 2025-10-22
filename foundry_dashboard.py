@@ -11,6 +11,7 @@ import streamlit as st
 import math
 import re 
 import os 
+# Mock imports needed for the dashboard structure
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
@@ -37,7 +38,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 0. HELPER FUNCTIONS (Including the fix for 'scrap_percent_hist') ---
+# --- 0. HELPER FUNCTIONS ---
 
 @st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
@@ -56,7 +57,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         .str.replace("[^a-z0-9_]+", "", regex=True)
     )
 
-    # --- FIX for KeyError: 'scrap_percent_hist' ---
+    # --- Handling Missing 'scrap_percent_hist' Column ---
     required_cols_for_calc = ['total_scrap_units', 'total_units']
     has_raw_data = all(col in df.columns for col in required_cols_for_calc)
     
@@ -64,22 +65,20 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         if has_raw_data:
             # Calculate the overall historical scrap rate as a stand-in
             df['scrap_percent_hist'] = df['total_scrap_units'] / df['total_units']
-            # Cap at 1.0 just in case
             df['scrap_percent_hist'] = df['scrap_percent_hist'].clip(upper=1.0) 
             st.info(
                 "The column **'scrap_percent_hist'** was missing. It has been calculated "
-                "from `total_scrap_units / total_units` to prevent a crash."
+                "from `total_scrap_units / total_units`."
             )
         else:
             # Fallback to a non-zero, non-crashing placeholder (e.g., 5%)
             df['scrap_percent_hist'] = 0.05 
             st.warning(
                 "The essential column **'scrap_percent_hist'** was not found and could not "
-                "be calculated from raw units. A placeholder value (5%) has been used. "
-                "Model predictions will be unreliable until this column is correctly loaded."
+                "be calculated from raw units. A placeholder value (5%) has been used."
             )
 
-    # Basic data types (assuming 'part_id' is object and target is int)
+    # Basic data types
     if 'part_id' in df.columns:
         df['part_id'] = df['part_id'].astype('object')
     
@@ -88,11 +87,10 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         # Define 'is_scrapped' as any run with > 0 scrapped units
         df['is_scrapped'] = (df['total_scrap_units'] > 0).astype(int)
     
-    # Remove rows where 'is_scrapped' is NaN, which prevents model training
+    # Final check on target column
     if TARGET_COLUMN in df.columns:
         df = df.dropna(subset=[TARGET_COLUMN])
     else:
-        # Fallback if target column logic failed
         st.error(f"Could not create the target column '{TARGET_COLUMN}'. Check unit columns.")
         return pd.DataFrame()
 
@@ -104,6 +102,7 @@ def get_part_averages(df):
     
     rate_cols = [col for col in df.columns if col.endswith('_rate') and 'current' not in col]
     
+    # Base aggregation functions
     agg_funcs = {
         'total_units': 'sum',
         TARGET_COLUMN: ['sum', 'count'],
@@ -117,10 +116,9 @@ def get_part_averages(df):
             agg_funcs[col] = 'mean'
 
     # Filter columns to only those present in the DataFrame before aggregation
-    valid_agg_funcs = {k: v for k, v in agg_funcs.items() if k in df.columns or (isinstance(v, tuple) and v[0] in df.columns)}
+    valid_agg_funcs = {k: v for k, v in agg_funcs.items() if k in df.columns or (isinstance(v, list) and v[0] in df.columns)}
 
     if not valid_agg_funcs:
-        # Fallback if the necessary columns for aggregation are missing
         if 'part_id' in df.columns:
             return pd.DataFrame({'part_id': df['part_id'].unique()})
         else:
@@ -157,9 +155,7 @@ scrap_cost_usd = st.sidebar.number_input(
 st.sidebar.markdown("### Data Settings")
 csv_file_path = st.sidebar.text_input(
     "Data File Path (CSV)",
-    # --- THIS IS THE CRITICAL FIX ---
-    "anonymized_parts.csv" 
-    # --- END CRITICAL FIX ---
+    "anonymized_parts.csv" # CORRECTED FILE PATH
 )
 
 # Load data - check if the file exists
@@ -186,19 +182,14 @@ if not feature_cols:
     st.error("No valid feature columns found for model training. Ensure columns like 'temp_rate' are present.")
     st.stop()
     
-# --- Placeholder for Model Training (Actual training logic is complex and omitted here for brevity) ---
+# --- Mock Model Training for UI Flow ---
 @st.cache_resource(show_spinner="Training and calibrating risk model...")
 def mock_train_model(_df, _feature_cols):
     """
     Mock training function to allow the rest of the dashboard to run. 
-    In a real app, this would contain the actual RF/CalibratedClassifierCV logic.
     """
-    st.subheader("Model Training in Progress...")
-    # This is where your actual model training would go.
-    
-    # Mock return values
     class MockModel:
-        def predict_proba(self, X): return np.array([[0.6, 0.4]])
+        def predict_proba(self, X): return np.array([[0.6, 0.4]] * len(X))
         def fit(self, X, y): pass
         
     mock_model = MockModel()
@@ -210,7 +201,7 @@ def mock_train_model(_df, _feature_cols):
     
     return mock_model, X_test, y_test, p_test, "isotonic"
 
-# For now, use the mock function to test the UI flow
+# Run the mock training
 model, X_test, y_test, p_test, calib_method = mock_train_model(df, feature_cols)
 
 
@@ -339,7 +330,8 @@ if not pred_pareto.empty:
     total_delta = pred_pareto['delta_prob_raw'].sum()
     pred_pareto['share_%'] = (pred_pareto['delta_prob_raw'] / total_delta) * 100
     pred_pareto['cumulative_%'] = pred_pareto['share_%'].cumsum()
-    pred_pareto = pred_pareto[pred_pareto['cumulative_%'] <= 80.0].copy()
+    # Filter to the top 80% (this is the core Pareto logic)
+    pred_pareto = pred_pareto[pred_pareto['cumulative_%'] <= 80.0].copy() 
 
 
 st.markdown("---")
@@ -351,8 +343,9 @@ if not pred_pareto.empty:
         pred_pareto.assign(
             delta_prob_raw=lambda d: (d["delta_prob_raw"] * 100).round(2)
         ).assign(**{
-            "share_%\": lambda d: d["share_%"].round(1),
-            "cumulative_%\": lambda d: d["cumulative_%"].round(1),
+            # FIX APPLIED HERE: removed the extra double-quote that caused the SyntaxError
+            "share_%": lambda d: d["share_%"].round(1),
+            "cumulative_%": lambda d: d["cumulative_%"].round(1),
         }).rename(columns={"delta_prob_raw": "Δ Prob (pp)"}),
         use_container_width=True
     )
