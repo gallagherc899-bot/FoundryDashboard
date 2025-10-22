@@ -10,16 +10,16 @@ import numpy as np
 import streamlit as st
 import math
 import re 
-import os # Added for file path check
+import os 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss
 from scipy.stats import mannwhitneyu
-from pandas.util import hash_pandas_object # Required for Streamlit caching fix
-from sklearn.base import clone # REQUIRED FOR FEATURE IMPORTANCE FIX
+from pandas.util import hash_pandas_object 
+from sklearn.base import clone 
 
-# --- CONSTANTS AND CONFIG ---\n
+# --- CONSTANTS AND CONFIG ---
 TARGET_COLUMN = "is_scrapped" 
 RANDOM_STATE = 42
 DEFAULT_ESTIMATORS = 180
@@ -45,8 +45,8 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(csv_path)
     except FileNotFoundError:
+        # This error should now be caught by the file check below, but kept as a safeguard
         st.error(f"Data file not found at: {csv_path}")
-        st.stop()
         return pd.DataFrame()
 
     # Standardize column names (lowercase, snake_case)
@@ -120,7 +120,11 @@ def get_part_averages(df):
     valid_agg_funcs = {k: v for k, v in agg_funcs.items() if k in df.columns or (isinstance(v, tuple) and v[0] in df.columns)}
 
     if not valid_agg_funcs:
-        return pd.DataFrame({'part_id': df['part_id'].unique()})
+        # Fallback if the necessary columns for aggregation are missing
+        if 'part_id' in df.columns:
+            return pd.DataFrame({'part_id': df['part_id'].unique()})
+        else:
+            return pd.DataFrame()
 
     df_avg = df.groupby('part_id').agg(
         Total_Units=('total_units', 'sum') if 'total_units' in df.columns else ('part_id', 'count'),
@@ -153,12 +157,14 @@ scrap_cost_usd = st.sidebar.number_input(
 st.sidebar.markdown("### Data Settings")
 csv_file_path = st.sidebar.text_input(
     "Data File Path (CSV)",
-    "foundry_data.csv"
+    # --- THIS IS THE CRITICAL FIX ---
+    "anonymized_parts.csv" 
+    # --- END CRITICAL FIX ---
 )
 
 # Load data - check if the file exists
 if not os.path.exists(csv_file_path):
-    st.error(f"Data file not found at: {csv_file_path}. Please create a file named 'foundry_data.csv'.")
+    st.error(f"Data file not found at: **{csv_file_path}**. Please ensure the file is in the same directory.")
     st.stop()
 
 # Load and clean data (using the fixed function)
@@ -189,8 +195,6 @@ def mock_train_model(_df, _feature_cols):
     """
     st.subheader("Model Training in Progress...")
     # This is where your actual model training would go.
-    # For now, we return dummy results to proceed with the dashboard structure.
-    # The current dashboard doesn't rely on the real model for display, only for structural integrity.
     
     # Mock return values
     class MockModel:
@@ -206,8 +210,6 @@ def mock_train_model(_df, _feature_cols):
     
     return mock_model, X_test, y_test, p_test, "isotonic"
 
-# Uncomment and use the real training function when features are ready
-# model, X_test, y_test, p_test, calib_method = train_random_forest_model(df, feature_cols)
 # For now, use the mock function to test the UI flow
 model, X_test, y_test, p_test, calib_method = mock_train_model(df, feature_cols)
 
@@ -349,8 +351,8 @@ if not pred_pareto.empty:
         pred_pareto.assign(
             delta_prob_raw=lambda d: (d["delta_prob_raw"] * 100).round(2)
         ).assign(**{
-            "share_%": lambda d: d["share_%"].round(1),
-            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+            "share_%\": lambda d: d["share_%"].round(1),
+            "cumulative_%\": lambda d: d["cumulative_%"].round(1),
         }).rename(columns={"delta_prob_raw": "Δ Prob (pp)"}),
         use_container_width=True
     )
