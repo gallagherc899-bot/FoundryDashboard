@@ -239,6 +239,32 @@ if model is None:
 
 # --- 4. RELIABILITY AND PARETO FUNCTIONS ---
 
+def predict_low_yield(model, X_single, part_id, part_prevalence_scale, s_param, gamma_param, global_prevalence):
+    """
+    Generates prediction and applies the tuning formula:
+    Adjusted Risk = Raw Prob * s * (Part Scale ^ gamma)
+    """
+    # 1. Raw Probability from Calibrated Model
+    raw_prob = model.predict_proba(X_single)[0, 1]
+
+    # 2. Part-Specific Prevalence Scale (P_scale)
+    # The part scale is the Part's Historical Exceedance Prevalence / Global Exceedance Prevalence
+    part_scale_raw = part_prevalence_scale.get(part_id, 1.0)
+    
+    # Apply gamma tuning
+    p_scale = part_scale_raw ** gamma_param
+    
+    # 3. Apply Global (s) and Part-Specific (gamma-tuned) scaling
+    adjusted_risk = raw_prob * s_param * p_scale
+    
+    # Ensure risk is capped at 100%
+    adjusted_risk = np.clip(adjusted_risk, 0.0, 1.0)
+    
+    # Calculate risk versus the global average for the delta metric
+    risk_vs_baseline = adjusted_risk - global_prevalence
+
+    return raw_prob, adjusted_risk, p_scale, risk_vs_baseline
+
 def calculate_mttf_reliability(part_id, df_avg, raw_prob):
     """
     Calculates MTTF (Mean Runs To Failure) and Reliability of the Next Run.
@@ -353,10 +379,8 @@ st.title("Foundry Production Risk and Reliability Dashboard")
 st.markdown("---")
 
 # ... [Section 1: Causal Feature Analysis & Model Performance (Omitted)] ... 
-# (Assume this section remains similar to before, showing global importance)
 
 # ... [Section 2: Cost Avoidance Simulation (Omitted)] ...
-# (Assume this section remains similar to before, showing cost avoidance)
 
 # --- 3. Work Order Risk & Reliability Prediction (UPDATED) ---
 st.header("3. Work Order Risk & Reliability Prediction")
@@ -398,7 +422,7 @@ X_single = pd.DataFrame([input_data])[feature_cols]
 s_param = s_param_default 
 gamma_param = gamma_param_default
 
-# Make the prediction
+# Make the prediction (THIS LINE CAUSES THE NAMEERROR, NOW FIXED)
 raw_prob, adjusted_risk, p_scale, risk_vs_baseline = predict_low_yield(
     model, X_single, selected_part_id, part_prevalence_scale, s_param, gamma_param, global_prevalence
 )
@@ -498,9 +522,6 @@ with tuning_cols[1]:
     st.subheader("Statistical Validation")
     
     # 1. Wilcoxon Signed-Rank Test Implementation
-    # This test compares the model's predicted probabilities (p_test) 
-    # to the observed outcomes (y_test) to check for symmetry around the errors.
-    # We compare the absolute residuals of the model vs. a simple constant-predictor (mean) model.
     
     # Calculate Residuals for the ML Model
     ml_residuals = p_test - y_test
@@ -512,6 +533,7 @@ with tuning_cols[1]:
     try:
         # H0: The difference between the two residual distributions is symmetric about zero (i.e., they are equally effective)
         # H1: The difference is NOT symmetric about zero (one model is significantly better/worse)
+        # Using 'less' because we hypothesize ML model residuals are smaller than baseline residuals
         stat, p_wilcoxon = wilcoxon(np.abs(ml_residuals), np.abs(baseline_residuals), alternative='less')
         
         if p_wilcoxon < 0.05:
@@ -548,4 +570,3 @@ with tuning_cols[1]:
 st.markdown("---")
 st.header("5. Part-Level Data Overview")
 # ... [Part-Level Data Overview (Omitted)] ...
-# (Assume this remains the same as before)
