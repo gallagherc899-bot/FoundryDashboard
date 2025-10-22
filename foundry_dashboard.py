@@ -45,6 +45,26 @@ MAX_CYCLES = 100
 
 # --- 2. DATA LOADING AND PREPARATION ---
 
+def clean_col_name(col_raw):
+    """
+    Cleans column names to a reliable snake_case format.
+    Ensures 'Work Order #' becomes 'work_order_id'.
+    """
+    col = str(col_raw).strip().lower()
+    col = col.replace(' ', '_')
+    col = col.replace('#', '_id')
+    col = col.replace('%', '_percent')
+    
+    # Remove any other common symbols
+    for char in ['(', ')', '.', '/', '\\']:
+        col = col.replace(char, '')
+        
+    # Ensure no double underscores remain
+    while '__' in col:
+        col = col.replace('__', '_')
+        
+    return col.strip('_')
+
 @st.cache_data
 def load_and_prepare_data():
     """
@@ -55,18 +75,9 @@ def load_and_prepare_data():
         df_historical = pd.read_csv('anonymized_parts.csv')
         
         # --- Robust Column Name Cleaning (converts to snake_case) ---
-        df_historical.columns = (
-            df_historical.columns.str.lower()
-            .str.replace(' ', '_', regex=True)
-            .str.replace('#', '_id', regex=True)
-            .str.replace('%', '_percent', regex=True)
-            .str.replace(r'[\(\)\.\/]+', '', regex=True) # Remove parentheses and dots
-            .str.replace('__', '_', regex=True)
-            .str.strip('_')
-        )
+        df_historical.columns = [clean_col_name(c) for c in df_historical.columns]
 
         # --- Standardize Key Column Name for Scrap History ---
-        # The column that was "Scrap%" is now "scrap_percent". We rename it to "scrap_percent_hist"
         df_historical = df_historical.rename(columns={'scrap_percent': 'scrap_percent_hist'}, errors='ignore')
         
         # Convert historical scrap percentage to decimal
@@ -112,6 +123,15 @@ def load_and_prepare_data():
     except Exception as e:
         # Catch and display the specific error
         st.error(f"An error occurred during data processing: {e}")
+        # Add a diagnostic check to help identify the problem
+        try:
+             # This requires the CSV to be loaded successfully before the error
+            df_temp = pd.read_csv('anonymized_parts.csv')
+            cleaned_cols = [clean_col_name(c) for c in df_temp.columns]
+            st.code(f"Available column names after cleaning (Look for 'work_order_id'):\n{cleaned_cols}")
+        except Exception:
+            pass
+            
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
 
 # Load and prepare data
@@ -147,7 +167,7 @@ def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_
     target_scrap_decimal = target_scrap_percent / 100.0
     improvement_factor = 1.0 - reduction_factor
     
-    # Use 'part_id' column from df_avg (which was groupby'd by 'part_id')
+    # Use 'part_id' column from df_avg
     current_part_status = df_avg[['part_id', 'Scrap_Percent_Baseline']].copy()
     current_part_status.rename(columns={'Scrap_Percent_Baseline': 'Latest_Scrap_Percent'}, inplace=True)
     
@@ -558,7 +578,7 @@ with tab_part_risk:
         
         # Rename columns back for friendly display
         hist_df_display = hist_df[display_cols].rename(columns={
-            'work_order_id': 'Work Order ID',
+            'work_order_id': 'Work Order #', # Friendly name for display
             'order_quantity': 'Order Quantity',
             'pieces_scrapped': 'Pieces Scrapped',
             'piece_weight_lbs': 'Piece Weight (lbs)',
