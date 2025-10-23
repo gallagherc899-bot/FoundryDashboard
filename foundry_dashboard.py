@@ -1,6 +1,3 @@
-# streamlit_app.py
-# Run with: streamlit run foundry_dashboard.py
-
 import warnings
 # Suppress the NumPy/Pandas warnings that often occur during data manipulation
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -10,22 +7,10 @@ import numpy as np
 import streamlit as st
 import math
 import re 
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import brier_score_loss
 from scipy.stats import mannwhitneyu
-from pandas.util import hash_pandas_object # Required for Streamlit caching fix
-from sklearn.base import clone # REQUIRED FOR FEATURE IMPORTANCE FIX
-
-# --- CONSTANTS AND CONFIG ---
-# Used for the single-sample filtering fix
-TARGET_COLUMN = "is_scrapped" 
-RANDOM_STATE = 42
-DEFAULT_ESTIMATORS = 180
-MIN_SAMPLES_LEAF = 2
-# Hardcoded max cycles for simulation stability
-MAX_CYCLES = 100
 
 # Use the existing Streamlit page configuration structure
 st.set_page_config(
@@ -56,7 +41,8 @@ TARGET_SCRAP_PERCENT = st.sidebar.slider(
 REDUCTION_SCENARIOS = [
     0.30, 0.25, 0.20, 0.15, 0.10, 0.05
 ]
-
+# Hardcoded max cycles for simulation stability
+MAX_CYCLES = 100
 
 # --- 2. DATA LOADING AND PREPARATION ---
 
@@ -70,6 +56,7 @@ def clean_col_name(col_raw):
     col = col.replace(' ', '_').replace('#', '_id').replace('%', '_percent')
     
     # 2. Aggressively remove all non-word characters (except underscore)
+    # This strips hidden characters that might be lingering
     col = re.sub(r'[^\w_]', '', col)
     
     # 3. Ensure no double underscores remain
@@ -81,47 +68,38 @@ def clean_col_name(col_raw):
 @st.cache_data
 def load_and_prepare_data():
     """
-    Loads, cleans, and prepares data. It now explicitly drops the original Work Order ID column 
-    (assumed to be index 0) and replaces it with the row index 
-    to guarantee a valid unique identifier for ML and aggregation.
-    
-    CRITICAL FIX: Since all runs have scrap, the binary target is now based on 
-    being above the median scrap percentage, creating two classes (high/low yield).
+    Loads, cleans, and prepares data, creating a guaranteed 'work_order_id' 
+    based on the row index, ignoring the problematic header name.
     """
     try:
-        # NOTE: Assumes 'anonymized_parts.csv' is in the same directory.
         df_historical = pd.read_csv('anonymized_parts.csv')
         
-        # 1. CRITICAL FIX: Ignore and drop the original Work Order ID column by its position (Index 0).
-        
-        # Create a guaranteed unique run ID based on the index before dropping the original column.
-        df_historical['work_order_id'] = df_historical.index 
-        
-        # Drop the original first column, regardless of its header content.
-        df_historical.drop(df_historical.columns[0], axis=1, inplace=True)
-
-
-        # 2. Apply Hyper-aggressive, universal cleaning to ALL remaining columns
+        # 1. Apply Hyper-aggressive, universal cleaning to ALL columns
         df_historical.columns = [clean_col_name(c) for c in df_historical.columns]
         
-        # 3. Standardize the rest of the columns
+        # 2. Explicit mapping of cleaned names to final target names, ignoring the original Work Order ID for naming purposes
         final_rename_map = {}
         for col in df_historical.columns:
-            # We must be careful not to rename 'work_order_id' which we just created
-            if col == 'work_order_id':
-                continue
-            elif 'part_id' in col:
+            if 'part_id' in col:
                 final_rename_map[col] = 'part_id'
             elif 'scrap_percent' in col:
-                final_rename_map[col] = 'scrap_percent_hist'
+                final_rename_map[col] = 'scrap_percent'
             elif 'order_quantity' in col:
                 final_rename_map[col] = 'order_quantity'
             elif 'pieces_scrapped' in col:
                 final_rename_map[col] = 'pieces_scrapped'
             elif 'piece_weight_lbs' in col:
                 final_rename_map[col] = 'piece_weight_lbs'
+            # We explicitly SKIP renaming for 'work_order' here to avoid KeyErrors
             
         df_historical.rename(columns=final_rename_map, inplace=True)
+        
+        # 3. CRITICAL: Create a unique row identifier regardless of the original column name.
+        # This preserves the transactional granularity for ML training and aggregation.
+        df_historical['work_order_id'] = df_historical.index 
+
+        # 4. Standardize Scrap Percentage column name
+        df_historical = df_historical.rename(columns={'scrap_percent': 'scrap_percent_hist'}, errors='ignore')
         
         # Convert historical scrap percentage to decimal
         if 'scrap_percent_hist' in df_historical.columns:
@@ -148,27 +126,9 @@ def load_and_prepare_data():
         # --- Data for Machine Learning (df_ml: Work Orders with Binary Scrap Causes) ---
         df_ml = df_historical.copy()
         
-        # Determine the threshold for 'Low Yield' based on the median
-        scrap_median = df_ml['scrap_percent_hist'].median()
+        # Target variable for ML: 1 if scrap occurred, 0 otherwise
+        df_ml['is_scrapped'] = (df_ml['scrap_percent_hist'] > 0).astype(int)
         
-        # Target variable for ML: 1 if LOW YIELD (HIGH scrap, above median), 0 if HIGH YIELD (LOW scrap, at or below median)
-        df_ml[TARGET_COLUMN] = (df_ml['scrap_percent_hist'] > scrap_median).astype(int)
-        
-        # Check if the median split resulted in two classes. If not (e.g., all values are identical), fall back to mean.
-        if df_ml[TARGET_COLUMN].nunique() < 2:
-            scrap_mean = df_ml['scrap_percent_hist'].mean()
-            df_ml[TARGET_COLUMN] = (df_ml['scrap_percent_hist'] > scrap_mean).astype(int)
-            st.sidebar.warning(f"Using mean ({scrap_mean:.4f}) to split scrap groups. Target 1 = LOW YIELD runs.")
-        else:
-            st.sidebar.info(f"Using median ({scrap_median:.4f}) to split runs into Low Yield (1) and High Yield (0) groups.")
-            
-        # Ensure we always have two classes before proceeding
-        if df_ml[TARGET_COLUMN].nunique() < 2:
-            # If even the mean split fails, something is fundamentally wrong with the data variance.
-            st.error("Cannot create a binary target: all scrap percentages are identical. Model training is impossible.")
-            return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
-
-
         # Features for ML: Scrap Cause columns (Rate columns)
         # Find all columns ending in '_rate'
         rate_cols = [col for col in df_ml.columns if col.endswith('_rate')]
@@ -183,8 +143,9 @@ def load_and_prepare_data():
         st.error("Error: 'anonymized_parts.csv' not found. Please ensure the file is correctly named and available.")
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
     except Exception as e:
-        st.error(f"A severe error occurred during data processing: {e}")
-        st.info("Please verify the structure of your CSV, especially column headers.")
+        # Catch and display the specific error
+        st.error(f"An error occurred during data processing: {e}")
+        st.info("The issue appears to be a column naming problem. Please verify the 'Work Order #' column is present and properly formatted in your CSV.")
         return pd.DataFrame(), pd.DataFrame(), 0, pd.DataFrame()
 
 # Load and prepare data
@@ -193,353 +154,457 @@ df_avg, df_ml, total_historical_scrap_pieces, df_historical = load_and_prepare_d
 if df_avg.empty or df_ml.empty:
     st.stop() # Stop the script if data loading failed
 
-# --- 3. MACHINE LEARNING MODEL (with single-sample class filtering fix and DEBUG) ---
+# --- 3. SIMULATION & CALCULATION FUNCTIONS (Unchanged logic, uses consistent column names) ---
 
-@st.cache_data(
-    show_spinner="Training Model...",
-    hash_funcs={
-        pd.DataFrame: lambda df: hash_pandas_object(df, index=True).sum(),
-        CalibratedClassifierCV: lambda model: str(model.get_params()),
-        RandomForestClassifier: lambda model: str(model.get_params())
-    }
-)
-def train_random_forest_model(df_ml: pd.DataFrame):
-    """
-    Trains and calibrates a Random Forest Classifier.
-    Returns: model, X_train, X_test, y_train, y_test, feature_cols, calib_method, p_test
-    """
-    if df_ml.empty:
-        st.error("The ML DataFrame is empty. Cannot train model.")
-        # Return a tuple with None or empty dataframes for error handling
-        return None, pd.DataFrame(), pd.DataFrame(), pd.Series(), pd.Series(), [], "None", pd.Series()
+@st.cache_data
+def train_random_forest_model(df_ml):
+    """Trains a Calibrated Random Forest classifier to predict if a work order will scrap."""
+    # Identify binary scrap cause columns as features (using the snake_case names)
+    feature_cols = [col for col in df_ml.columns if col.endswith('_rate')]
 
-
-    # =========================================================================
-    # DEBUG START: Show initial class counts
-    # =========================================================================
-    initial_counts = df_ml[TARGET_COLUMN].value_counts()
-    st.sidebar.info(
-        f"Initial Target Class Counts:\n{initial_counts.to_string()}", 
-        icon="🔍"
-    )
-    # =========================================================================
+    X = df_ml[feature_cols]
+    y = df_ml['is_scrapped'] # Use snake_case
     
-    # 1. Count the occurrences of each class in the target column
-    class_counts = df_ml[TARGET_COLUMN].value_counts()
-    
-    # 2. Identify classes with only one sample (these cause the ValueError)
-    single_sample_classes = class_counts[class_counts == 1].index.tolist()
-    
-    df_ml_original_len = len(df_ml)
-    
-    if single_sample_classes:
-        # 3. Filter the DataFrame to exclude rows with single-sample classes
-        df_filtered = df_ml[~df_ml[TARGET_COLUMN].isin(single_sample_classes)].copy()
-        
-        st.warning(
-            f"Filtered out {df_ml_original_len - len(df_filtered)} row(s) because the target variable "
-            f"'{TARGET_COLUMN}' had a class with only one sample (class label(s): {single_sample_classes}). "
-            "This prevents the `ValueError` during stratified splitting."
-        )
-        df_ml = df_filtered
-        
-    # =========================================================================
-    # DEBUG END: Show final class counts before the critical check
-    # =========================================================================
-    final_counts = df_ml[TARGET_COLUMN].value_counts()
-    st.sidebar.info(
-        f"Final Target Class Counts (after filter):\n{final_counts.to_string()}", 
-        icon="✅"
-    )
-    # =========================================================================
+    # --- FIX for ValueError: Stratification issue ---
+    class_counts = y.value_counts()
+    min_class_count = class_counts.min()
 
-    if df_ml.empty or df_ml[TARGET_COLUMN].nunique() < 2:
-        st.error(
-            "Final Error: After filtering, the data contains only one class or is empty. "
-            "Model training cannot proceed without at least two classes (0 and 1)."
-        )
-        return None, pd.DataFrame(), pd.DataFrame(), pd.Series(), pd.Series(), [], "None", pd.Series()
-
-    # Identify feature columns (ending with '_rate' from data loading)
-    feature_cols = [col for col in df_ml.columns if col.endswith('_rate')] 
+    if min_class_count < 2:
+        st.warning("Warning: Scrap target class has fewer than 2 samples. Disabling stratification for train/test split to prevent error.")
+        stratify_param = None
+    else:
+        stratify_param = y
+    # --- END FIX ---
     
-    # Define features (X) and target (y)
-    X = df_ml[feature_cols].fillna(0) 
-    y = df_ml[TARGET_COLUMN].astype(int)
-
-    # Train-test split (now safe from single-sample classes, assuming final checks pass)
+    # Split the data
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=RANDOM_STATE, stratify=y
-    )
-    
-    # Model configuration
-    base_model = RandomForestClassifier(
-        n_estimators=DEFAULT_ESTIMATORS,
-        min_samples_leaf=MIN_SAMPLES_LEAF,
-        random_state=RANDOM_STATE,
-        class_weight='balanced'
+        X, y, test_size=0.3, random_state=42, stratify=stratify_param
     )
 
-    # Calibration selection
-    calib_method = "isotonic" 
+    # Base Random Forest Model (using balanced weights)
+    base_model = RandomForestClassifier(n_estimators=150, random_state=42, class_weight='balanced')
 
-    # Train and calibrate
+    # Calibrate the probabilities using Isotonic regression for better risk estimation
     model = CalibratedClassifierCV(
         estimator=base_model,
-        method=calib_method,
+        method='isotonic', 
         cv=5
     )
     model.fit(X_train, y_train)
+    
+    return model, X_test, y_test, feature_cols
 
-    # Predict probabilities
-    p_test = model.predict_proba(X_test)[:, 1] # Probability of class 1
-
-    st.caption("NOTE: The model now predicts the probability of a run being **Low Yield** (High Scrap, above the median) versus High Yield (Low Scrap, at or below the median).")
-
-    # Return training data as well to fix the feature importance calculation
-    return model, X_train, X_test, y_train, y_test, feature_cols, calib_method, p_test
-
-
-# Train the model and retrieve all necessary data splits
-model, X_train, X_test, y_train, y_test, feature_cols, calib_method, p_test = train_random_forest_model(df_ml)
-
-if model is None:
-    st.stop() # Stop the script if model training failed
-
-# --- 4. SIMULATION & CALCULATION FUNCTIONS ---
 
 def calculate_cycles_to_target(initial_scrap_rate, reduction_factor, target_scrap):
-    """
-    Calculates the number of cycles (e.g., weeks) required to reach the target 
-    scrap rate, given an annual reduction factor applied to the excess.
-    """
-    target_rate = target_scrap / 100.0
-    initial_rate = initial_scrap_rate # This should already be a decimal rate (e.g., 0.03 for 3%)
-
-    if initial_rate <= target_rate:
-        return 0 
+    """Calculates the number of runs (cycles) required for a single part to hit the target."""
+    target_scrap_decimal = target_scrap / 100.0
+    if initial_scrap_rate <= target_scrap_decimal:
+        return 0
     
-    current_rate = initial_rate
+    improvement_factor = 1.0 - reduction_factor
+    current_rate = initial_scrap_rate
     cycles = 0
     
-    # Simulate iterative reduction
-    while current_rate > target_rate and cycles < MAX_CYCLES: 
-        # Reduction is applied to the excess scrap (current_rate - target_rate)
-        reduction_amount = (current_rate - target_rate) * reduction_factor
-        current_rate -= reduction_amount
+    buffer = 1e-9 
+    
+    while current_rate > target_scrap_decimal + buffer and cycles < MAX_CYCLES: 
+        current_rate *= improvement_factor
+        current_rate = max(current_rate, target_scrap_decimal)
         cycles += 1
-    
-    # If the loop hits MAX_CYCLES, it means it failed to converge quickly
-    return cycles if cycles < MAX_CYCLES else MAX_CYCLES 
+        
+    return cycles
 
-def calculate_feature_importances(model, feature_cols, X_train, X_test, y_test):
+
+def run_universal_improvement_simulation(df_avg, reduction_factor, target_scrap_percent):
+    """Runs the full simulation to get total cycles and savings."""
+    target_scrap_decimal = target_scrap_percent / 100.0
+    improvement_factor = 1.0 - reduction_factor
+    
+    # Use 'part_id' column from df_avg
+    current_part_status = df_avg[['part_id', 'Scrap_Percent_Baseline']].copy()
+    current_part_status.rename(columns={'Scrap_Percent_Baseline': 'Latest_Scrap_Percent'}, inplace=True)
+    
+    total_cycles = 0
+    total_cumulative_savings = 0.0
+    
+    while total_cycles < MAX_CYCLES:
+        parts_to_improve = current_part_status[current_part_status['Latest_Scrap_Percent'] > target_scrap_decimal]
+        
+        if parts_to_improve.empty:
+            break
+        
+        cycle_savings = 0.0
+        
+        for part_id in parts_to_improve['part_id']:
+            current_scrap_rate = current_part_status[current_part_status['part_id'] == part_id]['Latest_Scrap_Percent'].iloc[0]
+            part_metrics = df_avg[df_avg['part_id'] == part_id].iloc[0]
+            
+            new_scrap_rate = current_scrap_rate * improvement_factor
+            new_scrap_rate = max(new_scrap_rate, target_scrap_decimal)
+            
+            scrap_weight_before = current_scrap_rate * part_metrics['Avg_Order_Quantity'] * part_metrics['Avg_Piece_Weight']
+            scrap_weight_after = new_scrap_rate * part_metrics['Avg_Order_Quantity'] * part_metrics['Avg_Piece_Weight']
+            
+            weight_saved = scrap_weight_before - scrap_weight_after
+            cycle_savings += weight_saved
+            
+            current_part_status.loc[current_part_status['part_id'] == part_id, 'Latest_Scrap_Percent'] = new_scrap_rate
+
+        total_cycles += 1
+        total_cumulative_savings += cycle_savings
+        
+    return total_cycles, total_cumulative_savings
+
+# --- 4. MACHINE LEARNING AND VALIDATION FUNCTIONS ---
+
+@st.cache_data
+def predict_part_risk(model, part_id, df_ml, feature_cols):
     """
-    Calculates feature importance by re-fitting the base Random Forest estimator 
-    on the training data (X_train, y_train) to safely extract importances.
+    Generates a prediction vector based on the part's historical average feature profile 
+    and predicts the scrap probability.
     """
-    # FIX: model.estimator is the UN-FITTED base model. We must clone and fit it 
-    # to the training data to get feature_importances_.
-    try:
-        base_rf = clone(model.estimator)
-        base_rf.fit(X_train, y_train) # Fit on the data used for the main model's CV folds
-
-        importances = pd.Series(
-            base_rf.feature_importances_, 
-            index=feature_cols
-        ).sort_values(ascending=False)
-    except Exception as e:
-        st.error(f"Error during feature importance calculation: {e}. Check X_train/y_train contents.")
-        # Return empty data if failure occurs
-        return pd.DataFrame({
-            'Feature': feature_cols, 
-            'Importance (Gini)': 0, 
-            'P-Value (Mann-Whitney U)': 1.0, 
-            'Significance': ''
-        })
-
-    # Calculate U-test p-values (Mann-Whitney U-test for feature significance)
-    p_values = {}
-    X_df = X_test.copy()
-    X_df['target'] = y_test
+    # 1. Get the average feature profile for the selected part
+    part_data = df_ml[df_ml['part_id'] == part_id] # Use snake_case
     
-    class_0 = X_df[X_df['target'] == 0]
-    class_1 = X_df[X_df['target'] == 1]
-    
-    for feature in feature_cols:
-        # Check if both groups have enough data points for the test
-        if len(class_0) > 1 and len(class_1) > 1:
-            try:
-                # Compare the feature distributions in the two classes (0 and 1)
-                stat, p = mannwhitneyu(class_0[feature].values, class_1[feature].values, alternative='two-sided')
-                p_values[feature] = p
-            except ValueError:
-                p_values[feature] = 1.0 # Failed test
-        else:
-            p_values[feature] = 1.0
+    if part_data.empty:
+        return 0.0, None
 
-    importance_df = pd.DataFrame({
-        'Feature': importances.index,
-        'Importance (Gini)': importances.values,
-        'P-Value (Mann-Whitney U)': [p_values.get(f, 1.0) for f in importances.index]
-    })
+    # Calculate the mean of the binary cause features for this specific part.
+    mean_features = part_data[feature_cols].mean().to_frame().T
     
-    # Add significance star
-    def get_star(p):
-        if p < 0.001: return '***'
-        if p < 0.01: return '**'
-        if p < 0.05: return '*'
-        return ''
+    # 2. Predict the probability of scrap (Is_Scrapped=1)
+    prob_prediction = model.predict_proba(mean_features)[0][1]
     
-    importance_df['Significance'] = importance_df['P-Value (Mann-Whitney U)'].apply(get_star)
+    # 3. Format mean features for display
+    mean_features_display = mean_features.T
+    mean_features_display.columns = ['Mean_Likelihood']
+    # Clean up cause names for display (from snake_case back to Title Case)
+    feature_map = {col: col.replace('_rate', '').replace('_', ' ').title() for col in feature_cols}
+    mean_features_display['Cause'] = mean_features_display.index.map(feature_map)
 
-    return importance_df
+    return prob_prediction, mean_features_display.sort_values(by='Mean_Likelihood', ascending=False)
 
-def run_simulation(df_avg, cost_material_per_lb, cost_labor_per_lb, cost_per_failure, target_scrap, reduction_scenarios):
+
+@st.cache_data
+def run_statistical_validation(df_ml, df_avg):
     """
-    Runs the cost avoidance simulation across different reduction scenarios.
+    Performs a Mann-Whitney U Test (non-parametric two-sample test) to compare 
+    the distribution of scrap rates between all runs and the top 10 worst parts.
     """
-    cost_per_lb = cost_material_per_lb + cost_labor_per_lb
+    # 1. Scrap rates for all runs where scrap occurred
+    all_scrap_rates = df_ml[df_ml['scrap_percent_hist'] > 0]['scrap_percent_hist'] * 100 # Use snake_case
     
-    # Calculate baseline costs (based on the annual estimated scrap weight)
-    df_avg['Baseline_Cost'] = (
-        df_avg['Est_Annual_Scrap_Weight_lbs'] * cost_per_lb 
-        + df_avg['Total_Runs'] * cost_per_failure
+    # 2. Scrap rates for the top 10 worst parts (by max historical rate)
+    top_parts = df_avg.sort_values(by='Scrap_Percent_Baseline', ascending=False)['part_id'].head(10).tolist() # Use snake_case
+    top_scrap_rates = df_ml[df_ml['part_id'].isin(top_parts) & (df_ml['scrap_percent_hist'] > 0)]['scrap_percent_hist'] * 100 # Use snake_case
+    
+    if all_scrap_rates.empty or top_scrap_rates.empty:
+        return "Insufficient non-zero scrap data to run statistical test.", 1.0, 0, 0
+
+    # Ensure samples are the same size (up to 1000) for a cleaner comparison/faster runtime
+    sample_size = min(len(all_scrap_rates), len(top_scrap_rates), 1000)
+    
+    sample1 = all_scrap_rates.sample(sample_size, random_state=42, replace=True if len(all_scrap_rates) < sample_size else False)
+    sample2 = top_scrap_rates.sample(sample_size, random_state=42, replace=True if len(top_scrap_rates) < sample_size else False)
+
+    u_stat, p_value = mannwhitneyu(
+        sample1, 
+        sample2, 
+        alternative='less' # Test if the first sample (all parts) is stochastically smaller than the second (top 10 parts)
     )
-    total_baseline_cost = df_avg['Baseline_Cost'].sum()
     
-    results = []
-    
-    for factor in reduction_scenarios:
-        # Calculate new scrap rate after applying the factor to the excess over target
-        df_avg[f'Reduced_Scrap_Rate_{factor}'] = df_avg.apply(
-            lambda row: max(
-                target_scrap/100.0, 
-                row['Scrap_Percent_Baseline'] - (row['Scrap_Percent_Baseline'] - target_scrap/100.0) * factor
-            ), 
-            axis=1
-        )
+    return "Mann-Whitney U Test (Non-parametric distribution comparison)", p_value, all_scrap_rates.mean(), top_scrap_rates.mean()
+
+
+# --- 5. STREAMLIT APP LAYOUT ---
+
+st.title("🏭 Foundry Scrap Risk Dashboard")
+# Use snake_case for access
+st.markdown(f"**Target Scrap Floor:** **{TARGET_SCRAP_PERCENT:.1f}%** | **Total Parts Analyzed:** {len(df_avg)}")
+
+# Train the model once for all tabs
+with st.spinner("Initializing ML Model for Predictions..."):
+    model, X_test, y_test, feature_cols = train_random_forest_model(df_ml)
+
+# Define the tabs
+tab_sim, tab_pred, tab_val, tab_part_risk = st.tabs(["🚀 Simulation & Tactics", "🔮 Causal Prediction", "📊 Statistical Validation", "🔬 Individual Part Risk Prediction"])
+
+# ==============================================================================
+# TAB 1: SIMULATION & TACTICS
+# ==============================================================================
+with tab_sim:
+    st.header("1. Comparative Improvement Forecast")
+    st.markdown("Forecasts the total project timeline and cost avoidance based on different levels of continuous improvement effort.")
+
+    report_data = []
+    max_savings_lbs = 0.0 
+
+    for factor in REDUCTION_SCENARIOS:
+        with st.spinner(f"Running simulation for {factor*100:.0f}% reduction..."):
+            cycles, savings_lbs = run_universal_improvement_simulation(df_avg, factor, TARGET_SCRAP_PERCENT)
         
-        # Calculate reduced scrap weight
-        # FIX: Replaced Python's min() with NumPy's np.minimum() for element-wise comparison with the Pandas Series
-        df_avg[f'Reduced_Scrap_Weight_{factor}'] = df_avg[f'Reduced_Scrap_Rate_{factor}'] * df_avg['Avg_Order_Quantity'] * df_avg['Avg_Piece_Weight'] * np.minimum(52, df_avg['Total_Runs'])
-        
-        # Calculate reduced cost
-        df_avg[f'Reduced_Cost_{factor}'] = (
-            df_avg[f'Reduced_Scrap_Weight_{factor}'] * cost_per_lb
-            + df_avg['Total_Runs'] * cost_per_failure
-        )
-        
-        total_reduced_cost = df_avg[f'Reduced_Cost_{factor}'].sum()
-        cost_avoidance = total_baseline_cost - total_reduced_cost
-        
-        # Calculate cycles
-        avg_baseline_scrap = df_avg['Scrap_Percent_Baseline'].mean()
-        cycles = calculate_cycles_to_target(avg_baseline_scrap, factor, target_scrap)
-        
-        results.append({
-            'Reduction_Effort': f"{int(factor * 100)}% Reduction on Excess",
-            'Total_Cost_Avoidance': cost_avoidance,
-            'Cycles_to_Target (Weeks)': cycles
+        if factor == REDUCTION_SCENARIOS[0]:
+            max_savings_lbs = savings_lbs
+
+        # Financial Calculation
+        total_material_value = max_savings_lbs * (MATERIAL_COST_PER_LB + LABOR_OVERHEAD_COST_PER_LB)
+        total_failures_avoided_cost = total_historical_scrap_pieces * AVG_NON_MATERIAL_COST_PER_FAILURE * 0.50
+        total_cost_avoided = total_material_value + total_failures_avoided_cost
+
+        report_data.append({
+            'Reduction (%)': factor * 100,
+            'Cycles Required': cycles,
+            'Days Required': cycles * 7,
+            'Time (Years)': cycles * 7 / 365.25,
+            'Total Aluminum Saved (lbs)': max_savings_lbs,
+            'Total Cost Avoided (USD)': total_cost_avoided,
         })
-        
-    df_results = pd.DataFrame(results)
-    
-    return df_results, total_baseline_cost
 
-# --- 5. DASHBOARD LAYOUT ---
+    df_report = pd.DataFrame(report_data)
 
-st.title("Foundry Production Risk Dashboard")
-st.markdown("---")
+    # Display Metrics for the most aggressive (30%) scenario
+    col1, col2, col3 = st.columns(3)
+    aggressive_data = df_report[df_report['Reduction (%)'] == 30.0].iloc[0]
 
-# --- 5.1. Feature Importance & Model Performance ---
-st.header("1. Causal Feature Analysis & Model Performance")
+    col1.metric("Max Potential Savings", f"${aggressive_data['Total Cost Avoided (USD)']:.0f}", "Total Project Value")
+    col2.metric("Fastest Timeline (30% Effort)", f"{aggressive_data['Days Required']:.0f} Days", f"Time to Hit {TARGET_SCRAP_PERCENT:.1f}% Floor")
+    col3.metric("Max Weight Saved", f"{aggressive_data['Total Aluminum Saved (lbs)']:.0f} lbs", "Total Project Weight Savings")
 
-# Updated call to include X_train and y_train
-importance_df = calculate_feature_importances(model, feature_cols, X_train, X_test, y_test)
-
-col_imp, col_diag = st.columns([0.6, 0.4])
-
-with col_imp:
-    st.subheader("Model Feature Importance (Top Drivers of Low Yield)")
     st.dataframe(
-        importance_df.head(10).assign(**{
-            'Importance (Gini)': lambda d: (d['Importance (Gini)'] * 100).round(2),
-            'P-Value (Mann-Whitney U)': lambda d: d['P-Value (Mann-Whitney U)'].apply(lambda x: f"{x:.4f}")
-        }).rename(columns={'Importance (Gini)': 'Importance (%)'}),
+        df_report.style.format({
+            'Reduction (%)': "{:.0f}%",
+            'Days Required': "{:.0f}",
+            'Time (Years)': "{:.2f}",
+            'Total Aluminum Saved (lbs)': "{:,.0f}",
+            'Total Cost Avoided (USD)': "${:,.0f}",
+        }),
         use_container_width=True
     )
-    st.caption("*Significance: *** < 0.001, ** < 0.01, * < 0.05. Importance is based on the Gini impurity reduction in the Random Forest model.")
 
-with col_diag:
-    st.subheader("Model Diagnostics")
-    test_brier = np.nan
-    try:
-        test_brier = brier_score_loss(y_test, p_test) if len(X_test) and len(p_test) else np.nan
-    except Exception:
-        pass
-    st.metric(
-        label="Test Brier Score Loss",
-        value=f"{test_brier:.4f}" if not np.isnan(test_brier) else "N/A",
-        help="Lower is better. Measures the calibration and accuracy of probability predictions."
+    st.caption("NOTE: Total savings are consistent across scenarios as they represent the fixed maximum achievable savings to reach the set target.")
+
+    st.header("2. Tactical Manager Actionable Dashboard")
+    st.markdown(f"Prioritization tool: Showing the **Top 30 Parts** based on highest historical scrap rate and estimated annual weight loss.")
+
+    # Use snake_case for access
+    df_dashboard = df_avg.sort_values(by='Scrap_Percent_Baseline', ascending=False).head(30).copy()
+
+    for factor in [0.30, 0.25, 0.20]:
+        col_name_cycles = f'{factor*100:.0f}% Cycles'
+        col_name_days = f'{factor*100:.0f}% Days'
+        
+        df_dashboard[col_name_cycles] = df_dashboard.apply(
+            lambda row: calculate_cycles_to_target(row['Scrap_Percent_Baseline'], factor, TARGET_SCRAP_PERCENT),
+            axis=1
+        )
+        df_dashboard[col_name_days] = df_dashboard[col_name_cycles] * 7
+
+    df_dashboard['Max Hist. Scrap %'] = (df_dashboard['Scrap_Percent_Baseline'] * 100).round(2).astype(str) + '%'
+    df_dashboard['Est. Annual Scrap (lbs)'] = df_dashboard['Est_Annual_Scrap_Weight_lbs'].round(0).astype(int)
+
+    dashboard_cols = [
+        'part_id', # Use snake_case
+        'Max Hist. Scrap %',
+        'Est. Annual Scrap (lbs)',
+        '30% Cycles', '30% Days',
+        '25% Cycles', '25% Days',
+        '20% Cycles', '20% Days',
+    ]
+
+    df_dashboard = df_dashboard[dashboard_cols]
+    df_dashboard.rename(columns={'part_id': 'Part ID'}, inplace=True) # Rename back for display
+
+    st.dataframe(
+        df_dashboard.style.background_gradient(cmap='Reds', subset=['Est. Annual Scrap (lbs)']),
+        use_container_width=True,
+        hide_index=True
     )
-    st.write(f"Calibration Method: **{calib_method}**")
+
+    st.caption("The 'Est. Annual Scrap (lbs)' column is used for resource prioritization. Cycles and Days columns indicate the time needed to bring THIS SPECIFIC part to the set target.")
+
+
+# ==============================================================================
+# TAB 2: CAUSAL PREDICTION
+# ==============================================================================
+with tab_pred:
+    st.header("Predictive Causal Analysis (Random Forest)")
+    st.markdown("A Machine Learning model trained on historical work orders to identify the **most important factors** contributing to a run having *any* scrap.")
     
-st.markdown("---")
-
-# --- 5.2. Cost Avoidance Simulation ---
-st.header("2. Cost Avoidance Simulation")
-
-simulation_results, total_baseline_cost = run_simulation(
-    df_avg, 
-    MATERIAL_COST_PER_LB, 
-    LABOR_OVERHEAD_COST_PER_LB, 
-    AVG_NON_MATERIAL_COST_PER_FAILURE, 
-    TARGET_SCRAP_PERCENT, 
-    REDUCTION_SCENARIOS
-)
-
-col_metric, col_table = st.columns([0.4, 0.6])
-
-with col_metric:
-    st.subheader("Baseline Metrics")
-    st.metric(
-        label="Total Historical Scrap Pieces Analyzed", 
-        value=f"{total_historical_scrap_pieces:,.0f}"
+    # Model Evaluation Metrics (using the calibrated model's score)
+    accuracy = model.score(X_test, y_test)
+    st.metric(label="Model Prediction Accuracy (on test set)", value=f"{accuracy*100:.2f}%")
+    st.caption("This score reflects the model's ability to correctly predict if a work order will have scrap or not.")
+    
+    st.subheader("Top Causal Factors (Feature Importance)")
+    
+    # Feature Importance extraction from the base estimator
+    importances = model.base_estimator_.feature_importances_ 
+    feature_importance_df = pd.DataFrame({
+        'Cause': feature_cols,
+        'Importance': importances
+    }).sort_values(by='Importance', ascending=False)
+    
+    # Clean up cause names for display (from snake_case back to Title Case)
+    feature_map = {col: col.replace('_rate', '').replace('_', ' ').title() for col in feature_cols}
+    feature_importance_df['Cause'] = feature_importance_df['Cause'].map(feature_map)
+    
+    st.dataframe(
+        feature_importance_df.head(10).style.bar(subset=['Importance'], color='#cf5c36'),
+        use_container_width=True,
+        hide_index=True
     )
-    st.metric(
-        label="Estimated Annual Baseline Cost of Scrap/Failures",
-        value=f"${total_baseline_cost:,.2f}",
-        delta_color="off"
+    
+    st.caption("High Importance scores indicate these scrap causes are the strongest predictors of whether a work order fails.")
+
+# ==============================================================================
+# TAB 3: STATISTICAL VALIDATION
+# ==============================================================================
+with tab_val:
+    st.header("Statistical Validation: High-Risk Group Confirmation")
+    st.markdown("This test confirms whether the maximum scrap rates observed in the **Top 10 Worst Parts** are statistically different from the average scrap rates across **all** parts.")
+
+    test_name, p_value, mean_all, mean_top = run_statistical_validation(df_ml, df_avg)
+    
+    st.subheader(f"{test_name}")
+    
+    col_stat1, col_stat2, col_stat3 = st.columns(3)
+    
+    col_stat1.metric("P-Value", f"{p_value:.4f}")
+    col_stat2.metric("Mean Scrap Rate (All Runs)", f"{mean_all:.2f}%")
+    col_stat3.metric("Mean Scrap Rate (Top 10 Parts)", f"{mean_top:.2f}%")
+
+    if p_value < 0.05:
+        st.success(f"**Conclusion:** With a P-Value of **{p_value:.4f}**, which is less than 0.05, we **reject the null hypothesis**. The scrap rates for the top 10 worst parts are statistically and significantly greater than the average scrap rates for all parts. The prioritization strategy is statistically justified.")
+    else:
+        st.warning(f"**Conclusion:** With a P-Value of **{p_value:.4f}**, we **fail to reject the null hypothesis**. There is not enough statistical evidence to say the scrap rates for the top 10 parts are significantly higher than the rest.")
+        
+    st.caption("The Mann-Whitney U test is used because it compares the distribution shapes of two independent, non-normally distributed samples (scrap rates).")
+
+# ==============================================================================
+# TAB 4: INDIVIDUAL PART RISK PREDICTION
+# ==============================================================================
+with tab_part_risk:
+    st.header("🔬 Individual Part Risk Prediction")
+    st.markdown("Predict the probability of a future work order scrapping for a specific part based on its historical risk profile.")
+    
+    # --- Input Form ---
+    part_ids = sorted(df_avg['part_id'].unique().tolist()) # Use snake_case
+    
+    col_form1, col_form2, col_form3 = st.columns(3)
+    
+    selected_part_id = col_form1.selectbox(
+        "Select Part ID", 
+        part_ids, 
+        index=0
     )
-    st.caption(f"Target Scrap Rate: {TARGET_SCRAP_PERCENT:.1f}%")
-
-with col_table:
-    st.subheader("Cost Avoidance Scenarios")
     
-    # Format the table for display
-    formatted_results = simulation_results.assign(**{
-        'Total_Cost_Avoidance': lambda d: d['Total_Cost_Avoidance'].map('${:,.2f}'.format),
-    }).rename(columns={
-        'Total_Cost_Avoidance': 'Estimated Annual Cost Avoidance',
-        'Cycles_to_Target (Weeks)': f'Cycles to Reach {TARGET_SCRAP_PERCENT:.1f}% Target'
-    })
+    # Use average weight and quantity as initial values
+    if selected_part_id:
+        # Use snake_case
+        avg_metrics = df_avg[df_avg['part_id'] == selected_part_id].iloc[0] 
+        default_weight = avg_metrics['Avg_Piece_Weight']
+        default_quantity = avg_metrics['Avg_Order_Quantity']
+    else:
+        default_weight = 0
+        default_quantity = 0
+
+    piece_weight = col_form2.number_input(
+        "Piece Weight (lbs)", 
+        value=default_weight, 
+        min_value=0.1, 
+        format="%.2f"
+    )
     
-    st.dataframe(formatted_results, use_container_width=True)
+    order_quantity = col_form3.number_input(
+        "Order Quantity", 
+        value=int(default_quantity), 
+        min_value=1, 
+        step=1
+    )
 
-st.markdown("---")
+    # --- Prediction Calculation ---
+    prob_scrap, part_drivers = predict_part_risk(model, selected_part_id, df_ml, feature_cols)
+    
+    # Use snake_case
+    max_hist_scrap_rate = df_avg[df_avg['part_id'] == selected_part_id]['Scrap_Percent_Baseline'].iloc[0]
+    
+    # Expected Scrap Pieces = Order Quantity * Max Historical Rate * Prob(Scrap)
+    expected_scrap_pieces = order_quantity * max_hist_scrap_rate * prob_scrap
+    
+    st.markdown("---")
+    
+    # --- Output Metrics ---
+    col_out1, col_out2, col_out3 = st.columns(3)
+    
+    col_out1.metric(
+        "Predicted Risk (Prob. of Scrap Run)", 
+        f"{prob_scrap*100:.2f}%",
+        help="The probability that a new work order for this part will incur ANY scrap, based on its historical defect profile."
+    )
+    
+    col_out2.metric(
+        "Expected Scrap Pieces (Estimate)", 
+        f"{expected_scrap_pieces:.1f} pcs",
+        help=f"Estimate based on Order Quantity * Max Historical Scrap Rate ({max_hist_scrap_rate*100:.2f}%) * Predicted Risk."
+    )
+    
+    col_out3.metric(
+        "Potential Value Loss", 
+        f"${expected_scrap_pieces * piece_weight * (MATERIAL_COST_PER_LB + LABOR_OVERHEAD_COST_PER_LB) :.2f}",
+        help="Estimated cost of lost material and labor for the current order."
+    )
+    
+    st.markdown("---")
 
-# --- 5.3. Part-Level Data Overview ---
-st.header("3. Part-Level Data Overview")
+    # --- Historical Data & Drivers ---
+    
+    col_hist, col_drivers = st.columns(2)
 
-# Calculate current averages for display (in percentage)
-df_display = df_avg.assign(**{
-    'Scrap_Percent_Baseline': lambda d: (d['Scrap_Percent_Baseline'] * 100).round(2),
-}).rename(columns={'Scrap_Percent_Baseline': 'Max Scrap % (Baseline)'})
+    with col_drivers:
+        st.subheader("Historical Cause Likelihood")
+        st.markdown(f"The model's input for Part **{selected_part_id}** is based on the average likelihood of these causes being present in its past work orders.")
+        
+        if part_drivers is not None:
+             part_drivers['Mean_Likelihood'] = part_drivers['Mean_Likelihood'].apply(lambda x: f"{x*100:.2f}%")
+             part_drivers.rename(columns={'Mean_Likelihood': 'Avg. Likelihood of Presence'}, inplace=True)
 
-st.dataframe(
-    df_display[['part_id', 'Total_Runs', 'Avg_Order_Quantity', 'Avg_Piece_Weight', 'Max Scrap % (Baseline)']],
-    use_container_width=True
-)
-st.caption("Baseline scrap represents the maximum historical scrap percentage observed for that Part ID.")
+             st.dataframe(
+                part_drivers.head(10),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No detailed defect data available for this part.")
 
-# End of File Generation
+
+    with col_hist:
+        st.subheader(f"Historical Work Orders for {selected_part_id}")
+        
+        hist_df = df_historical[df_historical['part_id'] == selected_part_id].copy() # Use snake_case
+        
+        hist_df['Scrap_%'] = (hist_df['scrap_percent_hist'] * 100).round(2) # Use snake_case
+        
+        # Display relevant columns, using corrected names
+        display_cols = [
+            'work_order_id', # This is now the clean index
+            'order_quantity', # Use snake_case
+            'pieces_scrapped', # Use snake_case
+            'Scrap_%', 
+            'piece_weight_lbs', # Use snake_case
+            'week_ending' # Use snake_case
+        ]
+        
+        # Rename columns back for friendly display
+        hist_df_display = hist_df[display_cols].rename(columns={
+            'work_order_id': 'Run Index # (Unique ID)', # Renamed for clarity
+            'order_quantity': 'Order Quantity',
+            'pieces_scrapped': 'Pieces Scrapped',
+            'piece_weight_lbs': 'Piece Weight (lbs)',
+            'week_ending': 'Week Ending'
+        })
+        
+        st.dataframe(
+            hist_df_display.sort_values(by='Week Ending', ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
