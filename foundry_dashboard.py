@@ -122,23 +122,12 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
     ).fit(X_train, y_train)
 
     has_both = (y_calib.sum() > 0) and (y_calib.sum() < len(y_calib))
-    
-    if not has_both:
-        # **CRITICAL FIX:** Guardrail against single-class calibration data. 
-        # Returns the uncalibrated RF model to prevent InvalidParameterError.
-        st.warning(f"Calibration data is single-class (only {y_calib.sum()} positive events). Using uncalibrated predictions.")
-        return rf, rf, "uncalibrated (data too scarce/unbalanced)"
-        
-    method = "isotonic" if len(y_calib) > 500 else "sigmoid"
+    method = "isotonic" if has_both and len(y_calib) > 500 else "sigmoid"
     try:
-        # Attempt calibration with selected method
         cal = CalibratedClassifierCV(estimator=rf, method=method, cv="prefit").fit(X_calib, y_calib)
     except Exception:
-        # Fallback to sigmoid if the first attempt (e.g., isotonic) fails for other reasons.
-        # This is safe because the 'has_both' check passed above.
         cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv="prefit").fit(X_calib, y_calib)
         method = "sigmoid"
-        
     return rf, cal, method
 
 def tune_s_gamma_on_validation(p_val_raw, y_val, part_ids_val, part_scale,
@@ -442,7 +431,6 @@ with tabs[1]:
                 )
                 X_calibfit = pd.concat([X_tr, X_va], axis=0)
                 y_calibfit = pd.concat([y_tr, y_va], axis=0)
-                # Note: Calibration for validation is done differently (cv=3) and is safe.
                 cal = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=3).fit(X_calibfit, y_calibfit)
 
                 p_val_raw  = cal.predict_proba(X_va)[:, 1]
@@ -557,8 +545,8 @@ with tabs[0]:
     n_est = st.session_state.validation_results.get("n_estimators", DEFAULT_ESTIMATORS)
     _, calibrated_model, calib_method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
-    p_calib = calibrated_model.predict_proba(X_calib)[:, 1] if len(X_calib) and hasattr(calibrated_model, 'predict_proba') else np.array([])
-    p_test  = calibrated_model.predict_proba(X_test)[:, 1]  if len(X_test) and hasattr(calibrated_model, 'predict_proba') else np.array([])
+    p_calib = calibrated_model.predict_proba(X_calib)[:, 1] if len(X_calib) else np.array([])
+    p_test  = calibrated_model.predict_proba(X_test)[:, 1]  if len(X_test) else np.array([])
 
     # Guarded prior shift - NO LONGER USED ON PREDICT TAB, but calculation remains for validation
     shift_note = "Prior shift is disabled on the Predict tab to avoid manual error. See Validation tab."
@@ -594,11 +582,6 @@ with tabs[0]:
 
     if st.button("Predict", type="primary", use_container_width=True):
         # Base & adjusted predictions
-        # Check if the model has predict_proba, which it might not if it was forced to be "uncalibrated" (i.e. rf)
-        if not hasattr(calibrated_model, 'predict_proba'):
-             st.error(f"Cannot generate prediction. The model is **{calib_method}** and does not support probability prediction.")
-             st.stop()
-             
         base_p = float(calibrated_model.predict_proba(input_row)[0, 1])
 
         adj_factor = float(part_scale.get(selected_part, 1.0)) ** float(gamma_star)
