@@ -250,11 +250,37 @@ else:
                     .head(10)
                     .reset_index()
                 )
-                pareto["Δprob (pp)"] = pareto["pred_prob"].diff().fillna(0)
-                pareto["share_%"] = pareto["pred_prob"] / pareto["pred_prob"].sum() * 100
+                # 📊 Historical Pareto (Top 10 Parts by Actual Defects)
+                st.markdown("#### 📊 Historical Pareto (Top 10 Parts by Actual Defects)")
+                df_train["historical_defects"] = df_train["order_quantity"] * df_train["scrap%"] / 100
+                hist = (
+                    df_train.groupby("part_id")["historical_defects"]
+                    .sum()
+                    .sort_values(ascending=False)
+                    .head(10)
+                    .reset_index()
+                )
+                hist["share_%"] = hist["historical_defects"] / hist["historical_defects"].sum() * 100
+                hist["cumulative_%"] = hist["share_%"].cumsum()
+                st.dataframe(hist)
+
+                # 🔮 Predicted Pareto (Top 10 Parts by Expected Defects)
+                st.markdown("#### 🔮 Predicted Pareto (Top 10 Parts by Expected Defects)")
+                Xt, yt, _ = make_xy(df_test, thr_label, use_rate_cols)
+                df_test["pred_prob"] = cal_model.predict_proba(Xt)[:, 1]
+                df_test["expected_defects"] = df_test["order_quantity"] * df_test["pred_prob"]
+
+                pareto = (
+                df_test.groupby("part_id")["expected_defects"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(10)
+                .reset_index()
+                )
+                pareto["share_%"] = pareto["expected_defects"] / pareto["expected_defects"].sum() * 100
+                pareto["cumulative_%"] = pareto["share_%"].cumsum()
                 st.dataframe(pareto)
-            except Exception as e:
-                st.error(f"Prediction failed: {e}")
+
 
     with tab2:
         st.subheader("📏 Rolling 6–2–1 Validation")
