@@ -158,7 +158,10 @@ tab1, tab2 = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
 
 with tab1:
     st.subheader("🔮 Predict Scrap Risk and Reliability")
-    col1, col2, col3 = st.columns(3)
+
+    col0, col1, col2, col3 = st.columns(4)
+    with col0:
+        part_id = st.text_input("Part ID", value="Unknown")
     with col1:
         order_qty = st.number_input("Order Quantity", min_value=1, value=100)
     with col2:
@@ -169,19 +172,21 @@ with tab1:
     mttf_val = default_mtbf
     part_freq_val = default_freq
     input_df = pd.DataFrame(
-        [[order_qty, piece_weight, mttf_val, part_freq_val]],
-        columns=["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"],
+        [[part_id, order_qty, piece_weight, mttf_val, part_freq_val]],
+        columns=["part_id", "order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"],
     )
 
     if st.button("Predict"):
         try:
-            prob = cal_model.predict_proba(input_df)[0, 1]
+            prob = cal_model.predict_proba(input_df.drop(columns=["part_id"]))[0, 1]
             s = manual_s if manual_qh else 1.0
             g = manual_g if manual_qh else 0.5
             adjusted_prob = min(max(prob * s * (1 + g / 10), 0), 1)
             exp_scrap = order_qty * adjusted_prob
             exp_loss = exp_scrap * cost_per_part
             reliability = 1 - adjusted_prob
+
+            st.markdown(f"### 🧩 Prediction Results for Part **{part_id}**")
             st.metric("Predicted Scrap Risk (raw)", f"{prob*100:.2f}%")
             st.metric("Adjusted Scrap Risk", f"{adjusted_prob*100:.2f}%")
             st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
@@ -215,6 +220,7 @@ with tab1:
             st.dataframe(pareto)
         except Exception as e:
             st.error(f"Prediction failed: {e}")
+
 
 with tab2:
     st.subheader("📏 Rolling 6–2–1 Validation")
