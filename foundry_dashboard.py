@@ -271,11 +271,11 @@ else:
                 df_test["expected_defects"] = df_test["order_quantity"] * df_test["pred_prob"]
 
                 pareto = (
-                df_test.groupby("part_id")["expected_defects"]
-                .sum()
-                .sort_values(ascending=False)
-                .head(10)
-                .reset_index()
+                    df_test.groupby("part_id")["expected_defects"]
+                    .sum()
+                    .sort_values(ascending=False)
+                    .head(10)
+                    .reset_index()
                 )
                 pareto["share_%"] = pareto["expected_defects"] / pareto["expected_defects"].sum() * 100
                 pareto["cumulative_%"] = pareto["share_%"].cumsum()
