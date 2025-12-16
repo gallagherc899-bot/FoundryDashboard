@@ -281,6 +281,9 @@ else:
                 pareto["cumulative_%"] = pareto["share_%"].cumsum()
                 st.dataframe(pareto)
 
+            except Exception as e:
+                st.error(f"Prediction failed: {e}")
+
 
     with tab2:
         st.subheader("📏 Rolling 6–2–1 Validation")
