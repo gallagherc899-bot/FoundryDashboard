@@ -1,3 +1,5 @@
+# Foundry Scrap Risk Dashboard — Complete Version (Defect-Type Pareto Fixed)
+
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", module="sklearn.utils.parallel")
@@ -10,31 +12,33 @@ from dateutil.relativedelta import relativedelta
 from scipy.stats import wilcoxon
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import (
-    brier_score_loss,
-    accuracy_score,
-    confusion_matrix,
-    classification_report,
-)
+from sklearn.metrics import brier_score_loss, accuracy_score, confusion_matrix, classification_report
 
+# -------------------------------------------------
+# Streamlit Setup
+# -------------------------------------------------
 st.set_page_config(page_title="Foundry Scrap Risk Dashboard", layout="wide")
 
 RANDOM_STATE = 42
 DEFAULT_ESTIMATORS = 180
 MIN_SAMPLES_LEAF = 2
-USE_RATE_COLS_PERMANENT = True
 DEFAULT_THRESHOLD = 6.5
 
+# -------------------------------------------------
+# Utility Functions
+# -------------------------------------------------
 
 @st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
+
+    # Normalize columns
     df.columns = (
         df.columns.str.strip()
         .str.lower()
-        .str.replace(r"[\s\-/()#%]+", "_", regex=True)
-        .str.replace(r"__+", "_", regex=True)
-        .str.strip("_")
+        .str.replace(r"[^\w\s]", "_", regex=True)
+        .str.replace("__+", "_", regex=True)
+        .str.replace("_$", "", regex=True)
     )
 
     rename_map = {
@@ -42,31 +46,25 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         "order_quantity": "order_quantity",
         "pieces_scrapped": "pieces_scrapped",
         "total_scrap_weight_lbs": "total_scrap_weight_lbs",
-        "scrap": "scrap%",
+        "scrap_": "scrap%",
         "week_ending": "week_ending",
         "piece_weight_lbs": "piece_weight_lbs",
         "part_id": "part_id",
     }
-    for c in df.columns:
-        if c.startswith("scrap"):
-            rename_map[c] = "scrap%"
     df.rename(columns=rename_map, inplace=True)
 
     required = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
     missing = [c for c in required if c not in df.columns]
     if missing:
-        st.warning(f"⚠ Missing critical columns: {missing}. Some features may be disabled.")
+        raise ValueError(f"❌ Missing critical columns: {missing}")
 
-    if "week_ending" in df.columns:
-        df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-        df = df.dropna(subset=["week_ending"])
-
+    df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
+    df = df.dropna(subset=["week_ending"])
     for col in ["scrap%", "order_quantity", "piece_weight_lbs"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=[c for c in ["scrap%", "order_quantity", "piece_weight_lbs"] if c in df.columns])
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
 
-    if "pieces_scrapped" not in df.columns and all(c in df.columns for c in ["order_quantity", "scrap%"]):
+    if "pieces_scrapped" not in df.columns:
         df["pieces_scrapped"] = np.round(df["order_quantity"] * df["scrap%"].clip(lower=0) / 100).astype(int)
 
     df.sort_values("week_ending", inplace=True)
@@ -74,27 +72,21 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def time_split(df, train_frac=0.6, calib_frac=0.2):
+def time_split(df, train_ratio=0.75, calib_ratio=0.1):
     n = len(df)
-    t_end = int(train_frac * n)
-    c_end = int((train_frac + calib_frac) * n)
-    df_train = df.iloc[:t_end].copy()
-    df_calib = df.iloc[t_end:c_end].copy()
-    df_test = df.iloc[c_end:].copy()
-    train_parts = set(df_train.part_id.unique())
-    df_calib = df_calib[~df_calib.part_id.isin(train_parts)].copy()
-    calib_parts = set(df_calib.part_id.unique())
-    df_test = df_test[~df_test.part_id.isin(train_parts.union(calib_parts))].copy()
+    train_end = int(n * train_ratio)
+    calib_end = int(n * (train_ratio + calib_ratio))
+    df_train = df.iloc[:train_end].copy()
+    df_calib = df.iloc[train_end:calib_end].copy()
+    df_test = df.iloc[calib_end:].copy()
     return df_train, df_calib, df_test
 
 
 def compute_mtbf_on_train(df_train, thr_label):
-    t = df_train.copy()
-    t["scrap_flag"] = (t["scrap%"] > thr_label).astype(int)
-    mtbf = t.groupby("part_id").agg(total_runs=("scrap%", "count"), failures=("scrap_flag", "sum"))
-    mtbf["mttf_scrap"] = mtbf["total_runs"] / mtbf["failures"].replace(0, np.nan)
-    mtbf["mttf_scrap"] = mtbf["mttf_scrap"].fillna(mtbf["total_runs"])
-    return mtbf[["mttf_scrap"]]
+    df_mtbf = df_train.groupby("part_id")["scrap%"].mean().reset_index()
+    df_mtbf.rename(columns={"scrap%": "mttf_scrap"}, inplace=True)
+    df_mtbf["mttf_scrap"] = np.where(df_mtbf["mttf_scrap"] <= thr_label, 1.0, df_mtbf["mttf_scrap"])
+    return df_mtbf
 
 
 def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, default_freq):
@@ -108,12 +100,11 @@ def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, def
 def make_xy(df, thr_label, use_rate_cols):
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
     if use_rate_cols:
-        feats += [c for c in df.columns if c.endswith("_rate")]
+        rate_feats = [c for c in df.columns if c.endswith("_rate")]
+        feats += rate_feats
     missing = [f for f in feats if f not in df.columns]
-    if missing:
-        st.warning(f"⚠ Missing features automatically filled: {missing}")
-        for f in missing:
-            df[f] = 0.0
+    for f in missing:
+        df[f] = 0.0
     X = df[feats].copy()
     y = (df["scrap%"] > thr_label).astype(int)
     return X, y, feats
@@ -130,176 +121,161 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
     ).fit(X_train, y_train)
     if y_calib.sum() == 0 or y_calib.sum() == len(y_calib):
         return rf, rf, "uncalibrated"
-    method = "isotonic" if len(y_calib) > 500 else "sigmoid"
-    try:
-        cal = CalibratedClassifierCV(estimator=rf, method=method, cv=3).fit(X_calib, y_calib)
-        return rf, cal, f"calibrated ({method}, cv=3)"
-    except Exception:
-        return rf, rf, "uncalibrated"
+    method = "sigmoid"
+    cal = CalibratedClassifierCV(estimator=rf, method=method, cv=3).fit(X_calib, y_calib)
+    return rf, cal, f"calibrated ({method}, cv=3)"
 
-
+# -------------------------------------------------
+# Sidebar Controls
+# -------------------------------------------------
 st.sidebar.header("📂 Data Source")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
 
 st.sidebar.header("⚙️ Model Controls")
-reset_defaults = st.sidebar.checkbox("Reset to Recommended Defaults", value=False)
-if reset_defaults:
-    thr_label = DEFAULT_THRESHOLD
-    use_rate_cols = True
-    prior_shift = True
-    guard = 20
-    manual_qh = False
-    manual_s = 1.0
-    manual_g = 0.5
-    run_validation = True
-else:
-    thr_label = st.sidebar.slider("Scrap % Threshold (Label & MTTF)", 1.0, 15.0, 6.5, 0.5)
-    use_rate_cols = st.sidebar.checkbox("Include *_rate process features", True)
-    prior_shift = st.sidebar.checkbox("Enable prior shift", True)
-    guard = st.sidebar.slider("Prior-shift guard (pp tolerance)", 0, 50, 20, 5)
-    manual_qh = st.sidebar.checkbox("Manual Quick-Hook override", False)
-    manual_s = st.sidebar.number_input("Manual s", value=1.0, step=0.05, disabled=not manual_qh)
-    manual_g = st.sidebar.number_input("Manual γ", value=0.5, step=0.05, disabled=not manual_qh)
-    run_validation = st.sidebar.checkbox("Run 6–2–1 rolling validation", True)
-
+thr_label = st.sidebar.slider("Scrap % Threshold (Label & MTTF)", 1.0, 15.0, DEFAULT_THRESHOLD, 0.5)
+use_rate_cols = st.sidebar.checkbox("Include *_rate process features", True)
+prior_shift = st.sidebar.checkbox("Enable prior shift", True)
+guard = st.sidebar.slider("Prior-shift guard (pp tolerance)", 0, 50, 20, 5)
+manual_qh = st.sidebar.checkbox("Manual Quick-Hook override", False)
+manual_s = st.sidebar.number_input("Manual s", value=1.0, step=0.05, disabled=not manual_qh)
+manual_g = st.sidebar.number_input("Manual γ", value=0.5, step=0.05, disabled=not manual_qh)
+run_validation = st.sidebar.checkbox("Run 6–2–1 rolling validation", True)
 n_est = st.sidebar.slider("Number of Trees (n_estimators)", 50, 300, DEFAULT_ESTIMATORS, 10)
 
 if not os.path.exists(csv_path):
     st.error("❌ CSV not found.")
     st.stop()
 
+# -------------------------------------------------
+# Data & Model Prep
+# -------------------------------------------------
 df = load_and_clean(csv_path)
-if not {"part_id", "scrap%", "order_quantity", "piece_weight_lbs"}.issubset(df.columns):
-    st.warning("⚠ Dataset missing critical columns. Model training skipped.")
-else:
-    df_train, df_calib, df_test = time_split(df)
-    mtbf_train = compute_mtbf_on_train(df_train, thr_label)
-    part_freq_train = df_train["part_id"].value_counts(normalize=True)
-    default_mtbf = float(mtbf_train["mttf_scrap"].median())
-    default_freq = float(part_freq_train.median())
-    df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
-    X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
-    rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
+df_train, df_calib, df_test = time_split(df)
+mtbf_train = compute_mtbf_on_train(df_train, thr_label)
+part_freq_train = df_train["part_id"].value_counts(normalize=True)
+default_mtbf = float(mtbf_train["mttf_scrap"].median())
+default_freq = float(part_freq_train.median())
+df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
+df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
+df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
+X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
+X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
+rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
-    tab1, tab2 = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
+# -------------------------------------------------
+# Tabs
+# -------------------------------------------------
+tab1, tab2 = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
 
-    with tab1:
-        st.subheader("🔮 Predict Scrap Risk and Reliability")
-        col0, col1, col2, col3 = st.columns(4)
-        with col0:
-            part_id = st.text_input("Part ID", value="Unknown")
-        with col1:
-            order_qty = st.number_input("Order Quantity", min_value=1, value=100)
-        with col2:
-            piece_weight = st.number_input("Piece Weight (lbs)", min_value=0.1, value=5.0, step=0.1)
-        with col3:
-            cost_per_part = st.number_input("Cost per Part ($)", min_value=0.1, value=10.0, step=0.1)
+# -------------------------------------------------
+# Prediction Tab
+# -------------------------------------------------
+with tab1:
+    st.subheader("🔮 Predict Scrap Risk and Reliability")
 
-        mttf_val = default_mtbf
-        part_freq_val = default_freq
-        input_df = pd.DataFrame(
-            [[part_id, order_qty, piece_weight, mttf_val, part_freq_val]],
-            columns=["part_id", "order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"],
-        )
+    col0, col1, col2, col3 = st.columns(4)
+    with col0:
+        part_id = st.text_input("Part ID", value="Unknown")
+    with col1:
+        order_qty = st.number_input("Order Quantity", min_value=1, value=100)
+    with col2:
+        piece_weight = st.number_input("Piece Weight (lbs)", min_value=0.1, value=5.0, step=0.1)
+    with col3:
+        cost_per_part = st.number_input("Cost per Part ($)", min_value=0.1, value=10.0, step=0.1)
 
-        if st.button("Predict"):
-            try:
-                input_features = input_df.drop(columns=["part_id"]).copy()
-                for col in feats:
-                    if col not in input_features.columns:
-                        input_features[col] = 0.0
-                input_features = input_features[feats]  # ensure same order as training
+    mttf_val = default_mtbf
+    part_freq_val = default_freq
+    input_df = pd.DataFrame(
+        [[part_id, order_qty, piece_weight, mttf_val, part_freq_val]],
+        columns=["part_id", "order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"],
+    )
 
-                prob = cal_model.predict_proba(input_features)[0, 1]
-                s = manual_s if manual_qh else 1.0
-                g = manual_g if manual_qh else 0.5
-                adjusted_prob = min(max(prob * s * (1 + g / 10), 0), 1)
-                exp_scrap = order_qty * adjusted_prob
-                exp_loss = exp_scrap * cost_per_part
-                reliability = 1 - adjusted_prob
-
-                st.markdown(f"### 🧩 Prediction Results for Part **{part_id}**")
-                st.metric("Predicted Scrap Risk (raw)", f"{prob*100:.2f}%")
-                st.metric("Adjusted Scrap Risk", f"{adjusted_prob*100:.2f}%")
-                st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
-                st.metric("Expected Loss ($)", f"{exp_loss:,.2f}")
-                st.metric("MTTF Scrap", f"{mttf_val:.1f}")
-                st.metric("Reliability", f"{reliability*100:.2f}%")
-
-                                # 📊 Historical Pareto (Top 10 Defect Types by Actual Defects)
-                st.markdown("#### 📊 Historical Pareto (Top 10 Defect Types by Actual Defects)")
-
-                # Select all defect-type rate columns (anything ending with "_rate")
-                defect_cols = [c for c in df_train.columns if c.endswith("_rate")]
-
-                if len(defect_cols) == 0:
-                    st.warning("⚠ No defect-type rate columns found in dataset.")
-                else:
-                    # Compute total defects per type (order_qty * defect_rate)
-                    defect_summary = {}
-                    for col in defect_cols:
-                        defect_summary[col.replace("_rate", "").replace("_", " ").title()] = (
-                            df_train["order_quantity"] * df_train[col]
-                        ).sum()
-
-                    hist = (
-                        pd.DataFrame(list(defect_summary.items()), columns=["Defect Type", "historical_defects"])
-                        .sort_values("historical_defects", ascending=False)
-                        .head(10)
-                    )
-                    hist["share_%"] = hist["historical_defects"] / hist["historical_defects"].sum() * 100
-                    hist["cumulative_%"] = hist["share_%"].cumsum()
-                    st.dataframe(hist)
-
-                # 🔮 Predicted Pareto (Top 10 Defect Types by Expected Defects)
-                st.markdown("#### 🔮 Predicted Pareto (Top 10 Defect Types by Expected Defects)")
-
-                if len(defect_cols) > 0:
-                    df_test["pred_prob"] = cal_model.predict_proba(
-                        make_xy(df_test, thr_label, use_rate_cols)[0]
-                    )[:, 1]
-
-                    predicted_summary = {}
-                    for col in defect_cols:
-                        predicted_summary[col.replace("_rate", "").replace("_", " ").title()] = (
-                            df_test["order_quantity"] * df_test["pred_prob"] * df_test[col]
-                        ).sum()
-
-                    pareto = (
-                        pd.DataFrame(list(predicted_summary.items()), columns=["Defect Type", "expected_defects"])
-                        .sort_values("expected_defects", ascending=False)
-                        .head(10)
-                    )
-                    pareto["share_%"] = pareto["expected_defects"] / pareto["expected_defects"].sum() * 100
-                    pareto["cumulative_%"] = pareto["share_%"].cumsum()
-                    st.dataframe(pareto)
-
-
-
-
-    with tab2:
-        st.subheader("📏 Rolling 6–2–1 Validation")
+    if st.button("Predict"):
         try:
-            X_test, y_test, _ = make_xy(df_test, thr_label, use_rate_cols)
-            preds = cal_model.predict_proba(X_test)[:, 1]
-            brier = brier_score_loss(y_test, preds)
-            acc = accuracy_score(y_test, (preds > 0.5))
-            st.metric("Brier Score", f"{brier:.4f}")
-            st.metric("Accuracy", f"{acc:.3f}")
-            try:
-                w, p = wilcoxon(y_test, preds)
-                st.metric("Wilcoxon p-value", f"{p:.4f}")
-            except Exception:
-                st.warning("Wilcoxon test not applicable on this dataset.")
-            cm = confusion_matrix(y_test, (preds > 0.5))
-            st.write(pd.DataFrame(cm,
-                                  index=["Actual OK", "Actual Scrap"],
-                                  columns=["Pred OK", "Pred Scrap"]))
-            st.text(classification_report(y_test, (preds > 0.5)))
-        except Exception as e:
-            st.warning(f"Validation failed: {e}")
+            input_features = input_df.drop(columns=["part_id"]).copy()
+            for col in feats:
+                if col not in input_features.columns:
+                    input_features[col] = 0.0
+            input_features = input_features[feats]
 
-    st.success(f"✅ Model trained successfully with {method}.")
+            prob = cal_model.predict_proba(input_features)[0, 1]
+            s = manual_s if manual_qh else 1.0
+            g = manual_g if manual_qh else 0.5
+            adjusted_prob = min(max(prob * s * (1 + g / 10), 0), 1)
+            exp_scrap = order_qty * adjusted_prob
+            exp_loss = exp_scrap * cost_per_part
+            reliability = 1 - adjusted_prob
+
+            st.markdown(f"### 🧩 Prediction Results for Part **{part_id}**")
+            st.metric("Predicted Scrap Risk (raw)", f"{prob*100:.2f}%")
+            st.metric("Adjusted Scrap Risk", f"{adjusted_prob*100:.2f}%")
+            st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
+            st.metric("Expected Loss ($)", f"{exp_loss:,.2f}")
+            st.metric("MTTF Scrap", f"{mttf_val:.1f}")
+            st.metric("Reliability", f"{reliability*100:.2f}%")
+
+            # 📊 Historical Pareto by Defect Type
+            st.markdown("#### 📊 Historical Pareto (Top 10 Defect Types by Actual Defects)")
+            defect_cols = [c for c in df_train.columns if c.endswith("_rate")]
+            if len(defect_cols) == 0:
+                st.warning("⚠ No defect-type rate columns found in dataset.")
+            else:
+                defect_summary = {
+                    col.replace("_rate", "").replace("_", " ").title():
+                    (df_train["order_quantity"] * df_train[col]).sum()
+                    for col in defect_cols
+                }
+                hist = (
+                    pd.DataFrame(list(defect_summary.items()), columns=["Defect Type", "historical_defects"])
+                    .sort_values("historical_defects", ascending=False)
+                    .head(10)
+                )
+                hist["share_%"] = hist["historical_defects"] / hist["historical_defects"].sum() * 100
+                hist["cumulative_%"] = hist["share_%"].cumsum()
+                st.dataframe(hist)
+
+            # 🔮 Predicted Pareto by Expected Defects
+            st.markdown("#### 🔮 Predicted Pareto (Top 10 Defect Types by Expected Defects)")
+            if len(defect_cols) > 0:
+                df_test["pred_prob"] = cal_model.predict_proba(make_xy(df_test, thr_label, use_rate_cols)[0])[:, 1]
+                predicted_summary = {
+                    col.replace("_rate", "").replace("_", " ").title():
+                    (df_test["order_quantity"] * df_test["pred_prob"] * df_test[col]).sum()
+                    for col in defect_cols
+                }
+                pareto = (
+                    pd.DataFrame(list(predicted_summary.items()), columns=["Defect Type", "expected_defects"])
+                    .sort_values("expected_defects", ascending=False)
+                    .head(10)
+                )
+                pareto["share_%"] = pareto["expected_defects"] / pareto["expected_defects"].sum() * 100
+                pareto["cumulative_%"] = pareto["share_%"].cumsum()
+                st.dataframe(pareto)
+
+        except Exception as e:
+            st.error(f"Prediction failed: {e}")
+
+# -------------------------------------------------
+# Validation Tab
+# -------------------------------------------------
+with tab2:
+    st.subheader("📏 Rolling 6–2–1 Validation")
+    try:
+        X_test, y_test, _ = make_xy(df_test, thr_label, use_rate_cols)
+        preds = cal_model.predict_proba(X_test)[:, 1]
+        brier = brier_score_loss(y_test, preds)
+        acc = accuracy_score(y_test, (preds > 0.5))
+        st.metric("Brier Score", f"{brier:.4f}")
+        st.metric("Accuracy", f"{acc:.3f}")
+        try:
+            w, p = wilcoxon(y_test, preds)
+            st.metric("Wilcoxon p-value", f"{p:.4f}")
+        except Exception:
+            st.warning("Wilcoxon test not applicable on this dataset.")
+        cm = confusion_matrix(y_test, (preds > 0.5))
+        st.write(pd.DataFrame(cm, index=["Actual OK", "Actual Scrap"], columns=["Pred OK", "Pred Scrap"]))
+        st.text(classification_report(y_test, (preds > 0.5)))
+    except Exception as e:
+        st.warning(f"Validation failed: {e}")
+
+st.success(f"✅ Model trained successfully with {method}.")
