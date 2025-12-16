@@ -30,68 +30,76 @@ DEFAULT_THRESHOLD = 6.5
 @st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
+
+    # Normalize all column names
     df.columns = (
         df.columns.str.strip()
         .str.lower()
-        .str.replace(" ", "_")
-        .str.replace("(", "", regex=False)
-        .str.replace(")", "", regex=False)
-        .str.replace("#", "num", regex=False)
+        .str.replace(r"[^\w\s]", "_", regex=True)   # replace special chars with _
+        .str.replace("__+", "_", regex=True)         # collapse multiple underscores
+        .str.replace("_$", "", regex=True)           # remove trailing underscores
     )
-    needed = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
-    missing = [c for c in needed if c not in df.columns]
+
+    # Standardize specific known columns
+    rename_map = {
+        "work_order_num": "work_order",
+        "order_quantity": "order_quantity",
+        "pieces_scrapped": "pieces_scrapped",
+        "total_scrap_weight_lbs": "total_scrap_weight_lbs",
+        "scrap_": "scrap%",
+        "week_ending": "week_ending",
+        "piece_weight_lbs": "piece_weight_lbs",
+        "part_id": "part_id",
+    }
+    df.rename(columns=rename_map, inplace=True)
+
+    # Verify critical columns
+    required = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
+    missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing columns: {missing}")
+        raise ValueError(f"❌ Missing critical columns: {missing}")
+
+    # Type cleanup
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-    df = df.dropna(subset=needed).copy()
-    for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["week_ending"])
+    for col in ["scrap%", "order_quantity", "piece_weight_lbs"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
+
+    # Calculate missing engineered features if not present
     if "pieces_scrapped" not in df.columns:
-        df["pieces_scrapped"] = np.round(
-            (df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]
-        ).astype(int)
-    df = df.sort_values("week_ending").reset_index(drop=True)
+        df["pieces_scrapped"] = np.round(df["order_quantity"] * df["scrap%"].clip(lower=0) / 100).astype(int)
+
+    df.sort_values("week_ending", inplace=True)
+    df.reset_index(drop=True, inplace=True)
     return df
 
-def time_split(df, train_frac=0.6, calib_frac=0.2):
-    n = len(df)
-    t_end = int(train_frac * n)
-    c_end = int((train_frac + calib_frac) * n)
-    df_train = df.iloc[:t_end].copy()
-    df_calib = df.iloc[t_end:c_end].copy()
-    df_test = df.iloc[c_end:].copy()
-    train_parts = set(df_train.part_id.unique())
-    df_calib = df_calib[~df_calib.part_id.isin(train_parts)].copy()
-    calib_parts = set(df_calib.part_id.unique())
-    df_test = df_test[~df_test.part_id.isin(train_parts.union(calib_parts))].copy()
-    return df_train, df_calib, df_test
-
-def compute_mtbf_on_train(df_train, thr_label):
-    t = df_train.copy()
-    t["scrap_flag"] = (t["scrap%"] > thr_label).astype(int)
-    mtbf = t.groupby("part_id").agg(total_runs=("scrap%", "count"), failures=("scrap_flag", "sum"))
-    mtbf["mttf_scrap"] = mtbf["total_runs"] / mtbf["failures"].replace(0, np.nan)
-    mtbf["mttf_scrap"] = mtbf["mttf_scrap"].fillna(mtbf["total_runs"])
-    return mtbf[["mttf_scrap"]]
 
 def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, default_freq):
+    # Merge with training statistics, safely
     s = df_sub.merge(mtbf_train, on="part_id", how="left")
-    s["mttf_scrap"].fillna(default_mtbf, inplace=True)
+    s["mttf_scrap"] = s["mttf_scrap"].fillna(default_mtbf)
     s = s.merge(part_freq_train.rename("part_freq"), left_on="part_id", right_index=True, how="left")
-    s["part_freq"].fillna(default_freq, inplace=True)
+    s["part_freq"] = s["part_freq"].fillna(default_freq)
     return s
+
 
 def make_xy(df, thr_label, use_rate_cols):
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
     if use_rate_cols:
-        feats += [c for c in df.columns if c.endswith("_rate")]
+        rate_feats = [c for c in df.columns if c.endswith("_rate")]
+        feats += rate_feats
+
     missing = [f for f in feats if f not in df.columns]
     if missing:
-        raise KeyError(f"Missing expected features: {missing}")
+        st.warning(f"⚠ Missing features automatically filled: {missing}")
+        for f in missing:
+            df[f] = 0.0
+
     X = df[feats].copy()
     y = (df["scrap%"] > thr_label).astype(int)
     return X, y, feats
+
 
 @st.cache_resource(show_spinner=True)
 def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
