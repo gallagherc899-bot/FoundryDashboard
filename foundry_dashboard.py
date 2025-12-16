@@ -111,16 +111,19 @@ def make_xy(df, thr_label: float, use_rate_cols: bool):
     y = (df["scrap%"] > thr_label).astype(int)
     return X, y, feats
 
-@st.cache_resource(show_spinner=True, version=2) # <-- NEW VERSION PARAMETER
-def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
-    # 1. Base Model: Always fit RF on the full training data (X_train).
-    rf_base = RandomForestClassifier(
+@st.cache_resource(show_spinner=True, version=4) # <-- NEW VERSION PARAMETER
+def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int, _cache_bust=4): # <-- NEW DUMMY ARGUMENT
+    # 1. Base Model: Always define the base estimator here
+    base_estimator = RandomForestClassifier(
         n_estimators=n_estimators,
         min_samples_leaf=MIN_SAMPLES_LEAF,
         class_weight="balanced",
         random_state=RANDOM_STATE,
         n_jobs=-1
-    ).fit(X_train, y_train)
+    )
+    
+    # Fit the base model on the full training data (X_train). 
+    rf_base = base_estimator.fit(X_train, y_train)
 
     # 2. Calibration Data Check (Stricter Guardrail)
     min_samples_needed = 5
@@ -134,7 +137,7 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
     # 3. Calibration Attempt (Using robust CV=3 to avoid the 'cv="prefit"' error)
     method = "isotonic" if len(y_calib) > 500 else "sigmoid"
     try:
-        # Create a new, unfitted estimator instance for CalibratedClassifierCV to use.
+        # Create a new, unfitted base estimator instance for CalibratedClassifierCV to use.
         rf_calib_base = RandomForestClassifier(
             n_estimators=n_estimators,
             min_samples_leaf=MIN_SAMPLES_LEAF,
@@ -143,14 +146,14 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
             n_jobs=-1
         )
         
-        # This line is the critical fix. It uses the compatible integer CV=3 instead of "prefit".
+        # FIX: Using the compatible integer CV=3 instead of "prefit".
         cal_model = CalibratedClassifierCV(estimator=rf_calib_base, method=method, cv=3).fit(X_calib, y_calib)
         
         # Return the original rf_base (for diagnostics) and the new calibrated model (for prediction)
         return rf_base, cal_model, f"calibrated (CV=3, method={method})"
         
     except Exception as e:
-        # Keep the robust catch for all other unexpected errors
+        # Catch for all other unexpected errors
         st.error(f"Calibration attempt failed unexpectedly. Error: {e}. Falling back to uncalibrated RF.")
         return rf_base, rf_base, "uncalibrated (calibration failed)"
 
@@ -446,6 +449,7 @@ with tabs[1]:
                 X_va, y_va, _ = make_xy(val_f, thr_label, USE_RATE_COLS_PERMANENT)
                 X_te, y_te, _ = make_xy(test_f, thr_label, USE_RATE_COLS_PERMANENT)
 
+                # Base model defined here for rolling validation window
                 base = RandomForestClassifier(
                     n_estimators=n_estimators,
                     min_samples_leaf=MIN_SAMPLES_LEAF,
@@ -455,7 +459,7 @@ with tabs[1]:
                 )
                 X_calibfit = pd.concat([X_tr, X_va], axis=0)
                 y_calibfit = pd.concat([y_tr, y_va], axis=0)
-                # This calibration uses the base unfitted estimator and cv=3, which is correct.
+                # Calibration for validation: uses a fresh, unfitted base estimator and cv=3.
                 cal = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=3).fit(X_calibfit, y_calibfit)
 
                 p_val_raw  = cal.predict_proba(X_va)[:, 1]
@@ -568,7 +572,8 @@ with tabs[0]:
 
     # Note: Use n_estimators from validation tab, if running prediction on its own, it uses DEFAULT_ESTIMATORS
     n_est = st.session_state.validation_results.get("n_estimators", DEFAULT_ESTIMATORS)
-    # The call to train_and_calibrate now uses the safe CV=3 method internally, and is versioned=2
+    # The call to train_and_calibrate now uses the safe CV=3 method internally, and is versioned=4
+    # The new dummy argument is also passed (default value is used)
     _, calibrated_model, calib_method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
     # p_calib and p_test generation updated to handle "uncalibrated" model return
