@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------
-# 🧪 Foundry Scrap Risk Dashboard — Fixed Streamlit App
-# Compatible with: Python 3.10–3.13, scikit-learn >=1.3
+# 🧪 Foundry Scrap Risk Dashboard — Fixed Version (Dec 2025)
+# Compatible with Python 3.13 + scikit-learn 1.8.0 + Streamlit 1.52
 # ---------------------------------------------------------------
 
 import warnings
@@ -68,7 +68,9 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
 
     if "pieces_scrapped" not in df.columns:
-        df["pieces_scrapped"] = np.round((df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]).astype(int)
+        df["pieces_scrapped"] = np.round(
+            (df["scrap%"].clip(lower=0) / 100.0) * df["order_quantity"]
+        ).astype(int)
 
     df = df.sort_values("week_ending").reset_index(drop=True)
     return df
@@ -115,6 +117,9 @@ def make_xy(df, thr_label: float, use_rate_cols: bool):
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
     if use_rate_cols:
         feats += [c for c in df.columns if c.endswith("_rate")]
+    missing = [f for f in feats if f not in df.columns]
+    if missing:
+        raise KeyError(f"Missing expected features in DataFrame: {missing}")
     X = df[feats].copy()
     y = (df["scrap%"] > thr_label).astype(int)
     return X, y, feats
@@ -124,7 +129,6 @@ def make_xy(df, thr_label: float, use_rate_cols: bool):
 # ---------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
 def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
-    # Base RF
     rf = RandomForestClassifier(
         n_estimators=n_estimators,
         min_samples_leaf=MIN_SAMPLES_LEAF,
@@ -133,50 +137,19 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
         n_jobs=-1
     ).fit(X_train, y_train)
 
-    # Guard against sparse calibration
     has_both = (y_calib.sum() > 0) and (y_calib.sum() < len(y_calib))
     if not has_both:
         st.warning("⚠️ Calibration skipped — only one class in calibration set.")
         return rf, rf, "uncalibrated"
 
     method = "isotonic" if len(y_calib) > 500 else "sigmoid"
-
     try:
-        # Handle sklearn >=1.6 stricter param validation
-        cv_value = "prefit" if version.parse(skl_version) < version.parse("1.8") else 3
+        cv_value = 3  # use cross-validation instead of prefit for sklearn >=1.6
         cal = CalibratedClassifierCV(estimator=rf, method=method, cv=cv_value).fit(X_calib, y_calib)
         return rf, cal, f"calibrated ({method}, cv={cv_value})"
     except Exception as e:
         st.error(f"Calibration failed ({type(e).__name__}: {e}). Using uncalibrated RF.")
         return rf, rf, "uncalibrated"
-
-# ---------------------------------------------------------------
-# Risk Utilities
-# ---------------------------------------------------------------
-def tune_s_gamma_on_validation(p_val_raw, y_val, part_ids_val, part_scale,
-                               s_grid=S_GRID, gamma_grid=GAMMA_GRID):
-    if not len(p_val_raw):
-        return {"brier_val": np.nan, "s": 1.0, "gamma": 1.0}
-    ps = part_scale.reindex(part_ids_val).fillna(1.0).to_numpy(dtype=float)
-    best = (np.inf, 1.0, 1.0)
-    for s in s_grid:
-        for g in gamma_grid:
-            p_adj = np.clip(p_val_raw * (s * (ps ** g)), 0, 1)
-            score = brier_score_loss(y_val, p_adj)
-            if score < best[0]:
-                best = (score, s, g)
-    return {"brier_val": best[0], "s": best[1], "gamma": best[2]}
-
-
-def compute_part_exceedance_baselines(df_train: pd.DataFrame, thr_label: float):
-    part_prev = (
-        df_train.assign(exceed=(df_train["scrap%"] > thr_label).astype(int))
-                .groupby("part_id")["exceed"].mean()
-                .clip(lower=1e-6, upper=0.999)
-    )
-    global_prev = float(part_prev.mean()) if len(part_prev) else 0.5
-    part_scale = (part_prev / max(global_prev, 1e-6)).fillna(1.0).clip(lower=0.25, upper=4.0)
-    return part_prev, part_scale, global_prev
 
 # ---------------------------------------------------------------
 # Streamlit UI
@@ -201,12 +174,29 @@ df = load_and_clean(csv_path)
 st.title("🧠 Foundry Scrap Risk Dashboard — Actionable Insights")
 st.caption("Random Forest + calibrated probabilities • per-part reliability & Pareto analysis")
 
-# Example training flow (simplified preview)
+# 1️⃣ Split data
 df_train, df_calib, df_test = time_split(df)
-X_train, y_train, feats = make_xy(df_train, thr_label, USE_RATE_COLS_PERMANENT)
-X_calib, y_calib, _ = make_xy(df_calib, thr_label, USE_RATE_COLS_PERMANENT)
 
+# 2️⃣ Compute reliability and frequency features
+mtbf_train = compute_mtbf_on_train(df_train, thr_label)
+part_freq_train = df_train["part_id"].value_counts(normalize=True)
+default_mtbf = float(mtbf_train["mttf_scrap"].median())
+default_freq = float(part_freq_train.median())
+
+df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
+df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
+df_test  = attach_train_features(df_test,  mtbf_train, part_freq_train, default_mtbf, default_freq)
+
+# 3️⃣ Build feature matrices
+X_train, y_train, feats = make_xy(df_train, thr_label, USE_RATE_COLS_PERMANENT)
+X_calib, y_calib, _     = make_xy(df_calib, thr_label, USE_RATE_COLS_PERMANENT)
+
+# 4️⃣ Train + calibrate
 rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, DEFAULT_ESTIMATORS)
 
+# ---------------------------------------------------------------
+# Display Results
+# ---------------------------------------------------------------
 st.success(f"✅ Model trained successfully with {method}.")
-st.write(f"Features used: {feats}")
+st.write(f"**Features used:** {feats}")
+st.write(f"Training samples: {len(X_train):,}, Calibration samples: {len(X_calib):,}")
