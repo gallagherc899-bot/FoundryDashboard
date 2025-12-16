@@ -207,7 +207,13 @@ else:
 
         if st.button("Predict"):
             try:
-                prob = cal_model.predict_proba(input_df.drop(columns=["part_id"]))[0, 1]
+                input_features = input_df.drop(columns=["part_id"]).copy()
+                for col in feats:
+                    if col not in input_features.columns:
+                        input_features[col] = 0.0
+                input_features = input_features[feats]  # ensure same order as training
+
+                prob = cal_model.predict_proba(input_features)[0, 1]
                 s = manual_s if manual_qh else 1.0
                 g = manual_g if manual_qh else 0.5
                 adjusted_prob = min(max(prob * s * (1 + g / 10), 0), 1)
