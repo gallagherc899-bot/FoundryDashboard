@@ -229,54 +229,54 @@ else:
                 st.metric("MTTF Scrap", f"{mttf_val:.1f}")
                 st.metric("Reliability", f"{reliability*100:.2f}%")
 
-                # 📊 Historical Pareto (Top 10 Defect Types by Actual Defects)
-st.markdown("#### 📊 Historical Pareto (Top 10 Defect Types by Actual Defects)")
+                                # 📊 Historical Pareto (Top 10 Defect Types by Actual Defects)
+                st.markdown("#### 📊 Historical Pareto (Top 10 Defect Types by Actual Defects)")
 
-# Select all defect-type rate columns (anything ending with "_rate")
-defect_cols = [c for c in df_train.columns if c.endswith("_rate")]
+                # Select all defect-type rate columns (anything ending with "_rate")
+                defect_cols = [c for c in df_train.columns if c.endswith("_rate")]
 
-if len(defect_cols) == 0:
-    st.warning("⚠ No defect-type rate columns found in dataset.")
-else:
-    # Compute total defects per type (order_qty * defect_rate)
-    defect_summary = {}
-    for col in defect_cols:
-        defect_summary[col.replace("_rate", "").replace("_", " ").title()] = (
-            df_train["order_quantity"] * df_train[col]
-        ).sum()
+                if len(defect_cols) == 0:
+                    st.warning("⚠ No defect-type rate columns found in dataset.")
+                else:
+                    # Compute total defects per type (order_qty * defect_rate)
+                    defect_summary = {}
+                    for col in defect_cols:
+                        defect_summary[col.replace("_rate", "").replace("_", " ").title()] = (
+                            df_train["order_quantity"] * df_train[col]
+                        ).sum()
 
-    hist = (
-        pd.DataFrame(list(defect_summary.items()), columns=["Defect Type", "historical_defects"])
-        .sort_values("historical_defects", ascending=False)
-        .head(10)
-    )
-    hist["share_%"] = hist["historical_defects"] / hist["historical_defects"].sum() * 100
-    hist["cumulative_%"] = hist["share_%"].cumsum()
-    st.dataframe(hist)
+                    hist = (
+                        pd.DataFrame(list(defect_summary.items()), columns=["Defect Type", "historical_defects"])
+                        .sort_values("historical_defects", ascending=False)
+                        .head(10)
+                    )
+                    hist["share_%"] = hist["historical_defects"] / hist["historical_defects"].sum() * 100
+                    hist["cumulative_%"] = hist["share_%"].cumsum()
+                    st.dataframe(hist)
 
-# 🔮 Predicted Pareto (Top 10 Defect Types by Expected Defects)
-st.markdown("#### 🔮 Predicted Pareto (Top 10 Defect Types by Expected Defects)")
+                # 🔮 Predicted Pareto (Top 10 Defect Types by Expected Defects)
+                st.markdown("#### 🔮 Predicted Pareto (Top 10 Defect Types by Expected Defects)")
 
-if len(defect_cols) > 0:
-    df_test["pred_prob"] = cal_model.predict_proba(
-        make_xy(df_test, thr_label, use_rate_cols)[0]
-    )[:, 1]
+                if len(defect_cols) > 0:
+                    df_test["pred_prob"] = cal_model.predict_proba(
+                        make_xy(df_test, thr_label, use_rate_cols)[0]
+                    )[:, 1]
 
-    # Predicted defects per type (expected_defects * rate proportion)
-    predicted_summary = {}
-    for col in defect_cols:
-        predicted_summary[col.replace("_rate", "").replace("_", " ").title()] = (
-            df_test["order_quantity"] * df_test["pred_prob"] * df_test[col]
-        ).sum()
+                    predicted_summary = {}
+                    for col in defect_cols:
+                        predicted_summary[col.replace("_rate", "").replace("_", " ").title()] = (
+                            df_test["order_quantity"] * df_test["pred_prob"] * df_test[col]
+                        ).sum()
 
-    pareto = (
-        pd.DataFrame(list(predicted_summary.items()), columns=["Defect Type", "expected_defects"])
-        .sort_values("expected_defects", ascending=False)
-        .head(10)
-    )
-    pareto["share_%"] = pareto["expected_defects"] / pareto["expected_defects"].sum() * 100
-    pareto["cumulative_%"] = pareto["share_%"].cumsum()
-    st.dataframe(pareto)
+                    pareto = (
+                        pd.DataFrame(list(predicted_summary.items()), columns=["Defect Type", "expected_defects"])
+                        .sort_values("expected_defects", ascending=False)
+                        .head(10)
+                    )
+                    pareto["share_%"] = pareto["expected_defects"] / pareto["expected_defects"].sum() * 100
+                    pareto["cumulative_%"] = pareto["share_%"].cumsum()
+                    st.dataframe(pareto)
+
 
 
 
