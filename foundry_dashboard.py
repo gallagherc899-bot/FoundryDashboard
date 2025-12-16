@@ -113,8 +113,9 @@ def make_xy(df, thr_label: float, use_rate_cols: bool):
 
 @st.cache_resource(show_spinner=True)
 def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
-    # Fit the base model (RF)
-    rf = RandomForestClassifier(
+    # 1. Base Model: Always fit RF on the full training data (X_train).
+    # This model (rf_base) is the reference for uncalibrated predictions.
+    rf_base = RandomForestClassifier(
         n_estimators=n_estimators,
         min_samples_leaf=MIN_SAMPLES_LEAF,
         class_weight="balanced",
@@ -122,30 +123,39 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
         n_jobs=-1
     ).fit(X_train, y_train)
 
-    # **CRITICAL FIX 1: Stricter Data Guardrail**
-    # Require a minimum of 5 samples for both classes to fit the CalibratedClassifierCV.
+    # 2. Calibration Data Check (Stricter Guardrail)
     min_samples_needed = 5
     pos_samples = y_calib.sum()
     neg_samples = len(y_calib) - pos_samples
     
     if pos_samples < min_samples_needed or neg_samples < min_samples_needed:
         st.warning(f"Calibration data is too sparse ({pos_samples} positive, {neg_samples} negative). Using uncalibrated predictions.")
-        return rf, rf, "uncalibrated (data too sparse)"
+        return rf_base, rf_base, "uncalibrated (data too sparse)"
 
-    # If the check passes, proceed with calibration attempt
+    # 3. Calibration Attempt (Using robust CV=3 to avoid the 'cv="prefit"' error)
     method = "isotonic" if len(y_calib) > 500 else "sigmoid"
     try:
-        # **CRITICAL FIX 2: Universal Error Catch**
-        # Attempt calibration with selected method. This line is expected to raise InvalidParameterError
-        # for cv="prefit" on some sklearn versions. The catch below handles it.
-        cal = CalibratedClassifierCV(estimator=rf, method=method, cv="prefit").fit(X_calib, y_calib)
-        return rf, cal, method
+        # Create a new, unfitted estimator instance for CalibratedClassifierCV to use.
+        # This avoids the 'cv="prefit"' InvalidParameterError and uses internal CV (cv=3)
+        # on the calibration data (X_calib, y_calib).
+        rf_calib_base = RandomForestClassifier(
+            n_estimators=n_estimators,
+            min_samples_leaf=MIN_SAMPLES_LEAF,
+            class_weight="balanced",
+            random_state=RANDOM_STATE,
+            n_jobs=-1
+        )
+        
+        # NOTE: We use cv=3 to avoid the scikit-learn InvalidParameterError for cv="prefit"
+        cal_model = CalibratedClassifierCV(estimator=rf_calib_base, method=method, cv=3).fit(X_calib, y_calib)
+        
+        # Return the original rf_base (for metrics/diagnostics) and the new calibrated model (for prediction)
+        return rf_base, cal_model, f"calibrated (CV=3, method={method})"
         
     except Exception as e:
-        # Catch ANY exception (including the InvalidParameterError for cv='prefit') 
-        # and fall back gracefully to the uncalibrated model.
+        # Keep the robust catch for all other unexpected errors
         st.error(f"Calibration attempt failed unexpectedly. Error: {e}. Falling back to uncalibrated RF.")
-        return rf, rf, "uncalibrated (calibration failed)"
+        return rf_base, rf_base, "uncalibrated (calibration failed)"
 
 def tune_s_gamma_on_validation(p_val_raw, y_val, part_ids_val, part_scale,
                                s_grid=S_GRID, gamma_grid=GAMMA_GRID):
@@ -561,6 +571,7 @@ with tabs[0]:
 
     # Note: Use n_estimators from validation tab, if running prediction on its own, it uses DEFAULT_ESTIMATORS
     n_est = st.session_state.validation_results.get("n_estimators", DEFAULT_ESTIMATORS)
+    # The call to train_and_calibrate now uses the safe CV=3 method internally
     _, calibrated_model, calib_method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
     # p_calib and p_test generation updated to handle "uncalibrated" model return
@@ -706,7 +717,7 @@ with tabs[0]:
                             hist_mean_rate=lambda d: d["hist_mean_rate"].round(4)
                         ).assign(**{
                             "share_%": lambda d: d["share_%"].round(2),
-                            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+                            "cumulative_%" : lambda d: d["cumulative_%"].round(1),
                         }),
                         use_container_width=True
                     )
@@ -720,8 +731,8 @@ with tabs[0]:
                         pred_pareto.assign(
                             delta_prob_raw=lambda d: (d["delta_prob_raw"]*100).round(2)
                         ).assign(**{
-                            "share_%": lambda d: d["share_%"].round(2),
-                            "cumulative_%": lambda d: d["cumulative_%"].round(1),
+                            "share_%" : lambda d: d["share_%"].round(2),
+                            "cumulative_%" : lambda d: d["cumulative_%"].round(1),
                         }).rename(columns={"delta_prob_raw": "Δ prob (pp)"}),
                         use_container_width=True
                     )
