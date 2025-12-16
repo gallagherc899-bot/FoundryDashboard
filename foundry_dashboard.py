@@ -122,10 +122,18 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
     ).fit(X_train, y_train)
 
     has_both = (y_calib.sum() > 0) and (y_calib.sum() < len(y_calib))
-    method = "isotonic" if has_both and len(y_calib) > 500 else "sigmoid"
+    
+    if not has_both:
+        # FIX: Guardrail against single-class calibration data, which causes the InvalidParameterError 
+        # when data shifts and the calibration window contains only one class.
+        st.warning(f"Calibration data is single-class (only {y_calib.sum()} positive events). Using uncalibrated predictions.")
+        return rf, rf, "uncalibrated (data too scarce/unbalanced)"
+
+    method = "isotonic" if len(y_calib) > 500 else "sigmoid"
     try:
         cal = CalibratedClassifierCV(estimator=rf, method=method, cv="prefit").fit(X_calib, y_calib)
     except Exception:
+        # Fallback to sigmoid if the first attempt fails for other reasons (e.g., small N for isotonic).
         cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv="prefit").fit(X_calib, y_calib)
         method = "sigmoid"
     return rf, cal, method
@@ -545,6 +553,7 @@ with tabs[0]:
     n_est = st.session_state.validation_results.get("n_estimators", DEFAULT_ESTIMATORS)
     _, calibrated_model, calib_method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
+    # Note: If calibration was skipped, calibrated_model is just rf, and calib_method says "uncalibrated"
     p_calib = calibrated_model.predict_proba(X_calib)[:, 1] if len(X_calib) else np.array([])
     p_test  = calibrated_model.predict_proba(X_test)[:, 1]  if len(X_test) else np.array([])
 
