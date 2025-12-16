@@ -111,10 +111,9 @@ def make_xy(df, thr_label: float, use_rate_cols: bool):
     y = (df["scrap%"] > thr_label).astype(int)
     return X, y, feats
 
-@st.cache_resource(show_spinner=True)
+@st.cache_resource(show_spinner=True, version=2) # <-- NEW VERSION PARAMETER
 def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
     # 1. Base Model: Always fit RF on the full training data (X_train).
-    # This model (rf_base) is the reference for uncalibrated predictions.
     rf_base = RandomForestClassifier(
         n_estimators=n_estimators,
         min_samples_leaf=MIN_SAMPLES_LEAF,
@@ -136,8 +135,6 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
     method = "isotonic" if len(y_calib) > 500 else "sigmoid"
     try:
         # Create a new, unfitted estimator instance for CalibratedClassifierCV to use.
-        # This avoids the 'cv="prefit"' InvalidParameterError and uses internal CV (cv=3)
-        # on the calibration data (X_calib, y_calib).
         rf_calib_base = RandomForestClassifier(
             n_estimators=n_estimators,
             min_samples_leaf=MIN_SAMPLES_LEAF,
@@ -146,10 +143,10 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators: int):
             n_jobs=-1
         )
         
-        # NOTE: We use cv=3 to avoid the scikit-learn InvalidParameterError for cv="prefit"
+        # This line is the critical fix. It uses the compatible integer CV=3 instead of "prefit".
         cal_model = CalibratedClassifierCV(estimator=rf_calib_base, method=method, cv=3).fit(X_calib, y_calib)
         
-        # Return the original rf_base (for metrics/diagnostics) and the new calibrated model (for prediction)
+        # Return the original rf_base (for diagnostics) and the new calibrated model (for prediction)
         return rf_base, cal_model, f"calibrated (CV=3, method={method})"
         
     except Exception as e:
@@ -458,7 +455,7 @@ with tabs[1]:
                 )
                 X_calibfit = pd.concat([X_tr, X_va], axis=0)
                 y_calibfit = pd.concat([y_tr, y_va], axis=0)
-                # Note: Calibration for validation is done differently (cv=3). This does not use cv="prefit".
+                # This calibration uses the base unfitted estimator and cv=3, which is correct.
                 cal = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=3).fit(X_calibfit, y_calibfit)
 
                 p_val_raw  = cal.predict_proba(X_va)[:, 1]
@@ -571,7 +568,7 @@ with tabs[0]:
 
     # Note: Use n_estimators from validation tab, if running prediction on its own, it uses DEFAULT_ESTIMATORS
     n_est = st.session_state.validation_results.get("n_estimators", DEFAULT_ESTIMATORS)
-    # The call to train_and_calibrate now uses the safe CV=3 method internally
+    # The call to train_and_calibrate now uses the safe CV=3 method internally, and is versioned=2
     _, calibrated_model, calib_method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
     # p_calib and p_test generation updated to handle "uncalibrated" model return
