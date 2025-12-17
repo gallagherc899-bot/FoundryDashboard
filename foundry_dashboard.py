@@ -3,7 +3,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", module="sklearn.utils.parallel")
 
 import os
-import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -26,7 +25,6 @@ DEFAULT_ESTIMATORS = 180
 MIN_SAMPLES_LEAF = 2
 DEFAULT_THRESHOLD = 6.5
 
-
 # ------------------------------------------------------
 # Data loading and cleaning
 # ------------------------------------------------------
@@ -41,7 +39,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
             for col in df.columns.values
         ]
 
-    # 🔧 Normalize column headers
+    # Normalize header names
     df.columns = (
         df.columns.astype(str)
         .str.strip()
@@ -55,7 +53,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         .str.strip("_")
     )
 
-    # ✅ Specific mapping for your dataset
+    # Header mapping for your dataset
     rename_map = {
         "work_order": "part_id",
         "work_order_#": "part_id",
@@ -74,10 +72,17 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         "piece_weight_lbs_": "piece_weight_lbs",
     }
 
-    # Apply mapping
     df.rename(columns=rename_map, inplace=True)
 
-    # ✅ Verify all required columns
+    # Handle duplicate 'part_id' columns
+    if df.columns.duplicated().any():
+        dupes = df.columns[df.columns.duplicated()].tolist()
+        if "part_id" in dupes:
+            st.warning("⚠ Detected multiple 'part_id' columns — keeping the first one.")
+            first_idx = [i for i, c in enumerate(df.columns) if c == "part_id"][0]
+            df = df.loc[:, ~((df.columns == "part_id") & (df.columns.duplicated(keep="first")))]
+
+    # Validate key fields
     required = ["part_id", "scrap%", "order_quantity", "piece_weight_lbs", "week_ending"]
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -85,25 +90,23 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         st.write("🔍 Columns after normalization:", list(df.columns))
         st.stop()
 
-    # Flatten if any column became 2D accidentally
-    for c in required:
-        if isinstance(df[c], pd.DataFrame):
-            st.warning(f"⚠ Column '{c}' flattened (multi-dimensional source).")
-            df[c] = df[c].iloc[:, 0]
+    # Flatten part_id if multi-dimensional
+    if isinstance(df["part_id"], pd.DataFrame):
+        st.warning("⚠ 'part_id' flattened (multi-dimensional source).")
+        df["part_id"] = df["part_id"].iloc[:, 0]
 
-    # Convert datatypes
+    # Convert data types
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df.dropna(subset=["week_ending"], inplace=True)
     for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
         df[c] = pd.to_numeric(df[c].squeeze(), errors="coerce")
-
     df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"], inplace=True)
 
-    # Add missing computed columns
+    # Add missing computed column
     if "pieces_scrapped" not in df.columns:
         df["pieces_scrapped"] = np.round(df["order_quantity"] * df["scrap%"].clip(lower=0) / 100).astype(int)
 
-    # Defect rate normalization
+    # Normalize defect rate columns
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
     for c in defect_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
@@ -112,16 +115,14 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         f"✅ Loaded {len(df):,} records with {len(df.columns)} columns. "
         f"Detected {len(defect_cols)} defect-type rate columns."
     )
-
     st.write("🧩 Final cleaned column names:", list(df.columns))
 
     df.sort_values("week_ending", inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
 
-
 # ------------------------------------------------------
-# Utility functions
+# Utility Functions
 # ------------------------------------------------------
 def time_split(df, train_ratio=0.75, calib_ratio=0.1):
     n = len(df)
@@ -175,9 +176,8 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
     except Exception:
         return rf, rf, "uncalibrated"
 
-
 # ------------------------------------------------------
-# Sidebar
+# Sidebar Controls
 # ------------------------------------------------------
 st.sidebar.header("📂 Data Source")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
@@ -188,9 +188,8 @@ use_rate_cols = st.sidebar.checkbox("Include *_rate defect features", True)
 n_est = st.sidebar.slider("Number of Trees", 50, 300, DEFAULT_ESTIMATORS, 10)
 run_validation = st.sidebar.checkbox("Run 6–2–1 rolling validation", True)
 
-
 # ------------------------------------------------------
-# Load and prepare
+# Load & Prepare Data
 # ------------------------------------------------------
 if not os.path.exists(csv_path):
     st.error("❌ CSV not found.")
@@ -210,7 +209,6 @@ df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mt
 X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
 X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
 rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
-
 
 # ------------------------------------------------------
 # Tabs
@@ -281,7 +279,6 @@ with tab1:
         )
         st.dataframe(pareto)
 
-
 # -------------------------------
 # Validation Tab
 # -------------------------------
@@ -296,9 +293,7 @@ with tab2:
         st.metric("Accuracy", f"{acc:.3f}")
 
         cm = confusion_matrix(y_test, (preds > 0.5))
-        st.write(pd.DataFrame(cm,
-                              index=["Actual OK", "Actual Scrap"],
-                              columns=["Pred OK", "Pred Scrap"]))
+        st.write(pd.DataFrame(cm, index=["Actual OK", "Actual Scrap"], columns=["Pred OK", "Pred Scrap"]))
         st.text(classification_report(y_test, (preds > 0.5)))
 
 st.success(f"✅ Model trained successfully with {method}.")
