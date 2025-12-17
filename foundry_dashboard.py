@@ -7,7 +7,6 @@ import re
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.stats import wilcoxon
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
@@ -42,59 +41,57 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
             for col in df.columns.values
         ]
 
-    # Normalize headers
+    # 🔧 Normalize column headers
     df.columns = (
         df.columns.astype(str)
         .str.strip()
+        .str.lower()
         .str.replace(r"[\u00A0\u200B\t]+", "", regex=True)
         .str.replace(r"\s+", " ", regex=True)
-        .str.lower()
-        .str.replace(r"[^\w\s%]", "_", regex=True)
-        .str.replace("__+", "_", regex=True)
+        .str.replace(r" _", "_", regex=True)
+        .str.replace(r"_ ", "_", regex=True)
+        .str.replace(r"[^\w\s%]", "", regex=True)
+        .str.replace(r"\s+", "_", regex=True)
         .str.strip("_")
     )
 
-    # Drop duplicates
-    if df.columns.duplicated().any():
-        df = df.loc[:, ~df.columns.duplicated()]
-
-    # Map real headers to standardized names
+    # ✅ Specific mapping for your dataset
     rename_map = {
         "work_order": "part_id",
-        "work_order_number": "part_id",
         "work_order_#": "part_id",
-        "work_order_no": "part_id",
+        "work_order_number": "part_id",
         "work_order_number_": "part_id",
+        "part_id": "part_id",
         "order_quantity": "order_quantity",
-        "order_qty": "order_quantity",
         "pieces_scrapped": "pieces_scrapped",
         "total_scrap_weight_lbs": "total_scrap_weight_lbs",
-        "scrap%": "scrap%",
         "scrap": "scrap%",
+        "scrap%": "scrap%",
         "sellable": "sellable",
         "heats": "heats",
         "week_ending": "week_ending",
         "piece_weight_lbs": "piece_weight_lbs",
-        "piece_weight": "piece_weight_lbs",
-        "part_id": "part_id",
+        "piece_weight_lbs_": "piece_weight_lbs",
     }
+
+    # Apply mapping
     df.rename(columns=rename_map, inplace=True)
 
-    # Check essentials
+    # ✅ Verify all required columns
     required = ["part_id", "scrap%", "order_quantity", "piece_weight_lbs", "week_ending"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         st.error(f"❌ Missing critical columns: {missing}")
-        st.write("🔍 Columns found:", list(df.columns))
+        st.write("🔍 Columns after normalization:", list(df.columns))
         st.stop()
 
-    # Flatten columns that became DataFrames
+    # Flatten if any column became 2D accidentally
     for c in required:
-        if c in df.columns and isinstance(df[c], pd.DataFrame):
-            st.warning(f"⚠ Column '{c}' was multi-dimensional. Flattening.")
+        if isinstance(df[c], pd.DataFrame):
+            st.warning(f"⚠ Column '{c}' flattened (multi-dimensional source).")
             df[c] = df[c].iloc[:, 0]
 
-    # Convert and clean numeric/time data
+    # Convert datatypes
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df.dropna(subset=["week_ending"], inplace=True)
     for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
@@ -102,11 +99,11 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
 
     df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"], inplace=True)
 
-    # Add missing column if needed
+    # Add missing computed columns
     if "pieces_scrapped" not in df.columns:
         df["pieces_scrapped"] = np.round(df["order_quantity"] * df["scrap%"].clip(lower=0) / 100).astype(int)
 
-    # Normalize defect rate columns
+    # Defect rate normalization
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
     for c in defect_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
@@ -115,6 +112,8 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         f"✅ Loaded {len(df):,} records with {len(df.columns)} columns. "
         f"Detected {len(defect_cols)} defect-type rate columns."
     )
+
+    st.write("🧩 Final cleaned column names:", list(df.columns))
 
     df.sort_values("week_ending", inplace=True)
     df.reset_index(drop=True, inplace=True)
@@ -212,6 +211,7 @@ X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
 X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
 rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
+
 # ------------------------------------------------------
 # Tabs
 # ------------------------------------------------------
@@ -280,6 +280,7 @@ with tab1:
             .head(10)
         )
         st.dataframe(pareto)
+
 
 # -------------------------------
 # Validation Tab
