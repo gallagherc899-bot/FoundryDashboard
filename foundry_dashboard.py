@@ -1,4 +1,4 @@
-# Foundry Scrap Risk Dashboard — FINAL FIX (Handles Your Header Names Exactly)
+# Foundry Scrap Risk Dashboard — Robust Defect Column Detection Version
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -12,11 +12,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss, accuracy_score, confusion_matrix, classification_report
 from scipy.stats import wilcoxon
-import matplotlib.pyplot as plt
 
-# -------------------------------------------------
-# Streamlit Setup
-# -------------------------------------------------
 st.set_page_config(page_title="Foundry Scrap Risk Dashboard", layout="wide")
 
 RANDOM_STATE = 42
@@ -25,22 +21,22 @@ MIN_SAMPLES_LEAF = 2
 DEFAULT_THRESHOLD = 6.5
 
 # -------------------------------------------------
-# Data Cleaning Function (Fully Mapped for Your Headers)
+# Data Loading & Cleaning
 # -------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
 
-    # Normalize header text
+    # Normalize header names (make lowercase, unify spaces)
     df.columns = (
         df.columns.str.strip()
         .str.lower()
-        .str.replace(r"[^\w\s]", "_", regex=True)
-        .str.replace("__+", "_", regex=True)
+        .str.replace(r"[^\w\s]", " ", regex=True)
+        .str.replace(r"\s+", "_", regex=True)
         .str.strip("_")
     )
 
-    # Explicit mapping for your headers
+    # Explicit rename mapping for your known headers
     rename_map = {
         "work_order": "part_id",
         "work_order_number": "part_id",
@@ -50,17 +46,17 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         "pieces_scrapped": "pieces_scrapped",
         "total_scrap_weight_lbs": "total_scrap_weight_lbs",
         "scrap": "scrap%",
-        "scrap_": "scrap%",
         "scrap_percent": "scrap%",
         "scrap_percentage": "scrap%",
+        "scrap_": "scrap%",
         "week_ending": "week_ending",
         "piece_weight_lbs": "piece_weight_lbs",
-        "piece_weight__lbs": "piece_weight_lbs",
+        "piece_weight_lbs_": "piece_weight_lbs",
+        "piece_weight": "piece_weight_lbs",
     }
-
     df.rename(columns=rename_map, inplace=True)
 
-    # Verify & fill missing critical columns
+    # Fill missing criticals if needed
     required = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -68,22 +64,25 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         for m in missing:
             df[m] = 0.0
 
-    # Convert week_ending to datetime
-    if "week_ending" in df.columns:
-        df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-
-    # Numeric conversions
+    # Convert date & numeric types
+    df["week_ending"] = pd.to_datetime(df.get("week_ending", pd.NaT), errors="coerce")
     for col in ["scrap%", "order_quantity", "piece_weight_lbs"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Compute pieces_scrapped if missing
+    # Compute missing pieces_scrapped
     if "pieces_scrapped" not in df.columns:
         df["pieces_scrapped"] = np.round(df["order_quantity"] * df["scrap%"].clip(lower=0) / 100).astype(float)
 
+    # Clean & sort
     df = df.dropna(subset=["week_ending"])
     df.sort_values("week_ending", inplace=True)
     df.reset_index(drop=True, inplace=True)
+
+    # Detect all *_rate columns robustly
+    rate_cols = [c for c in df.columns if "rate" in c and not c.startswith("scrap")]
+    st.info(f"✅ Detected {len(rate_cols)} defect columns: {', '.join(rate_cols)}")
+
     return df
 
 # -------------------------------------------------
@@ -111,7 +110,7 @@ def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, def
 def make_xy(df, thr_label, use_rate_cols):
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
     if use_rate_cols:
-        feats += [c for c in df.columns if c.endswith("_rate")]
+        feats += [c for c in df.columns if "rate" in c and not c.startswith("scrap")]
     for f in feats:
         if f not in df.columns:
             df[f] = 0.0
@@ -127,10 +126,8 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
         random_state=RANDOM_STATE,
         n_jobs=-1,
     ).fit(X_train, y_train)
-
     if y_calib.sum() == 0 or y_calib.sum() == len(y_calib):
         return rf, rf, "uncalibrated"
-
     cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
     return rf, cal, "calibrated (sigmoid, cv=3)"
 
@@ -169,13 +166,10 @@ X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
 rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
 # -------------------------------------------------
-# Tabs
+# Prediction Tab
 # -------------------------------------------------
 tab1, tab2 = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
 
-# -------------------------------------------------
-# Prediction Tab
-# -------------------------------------------------
 with tab1:
     st.subheader("🔮 Predict Scrap Risk and Reliability")
 
@@ -192,59 +186,54 @@ with tab1:
 
     if st.button("Predict"):
         try:
-            input_features = input_df.drop(columns=["part_id"]).copy()
+            X_input = input_df.drop(columns=["part_id"])
             for col in feats:
-                if col not in input_features.columns:
-                    input_features[col] = 0.0
-            input_features = input_features[feats]
-
-            prob = cal_model.predict_proba(input_features)[0, 1]
-            adjusted_prob = min(max(prob, 0), 1)
-            exp_scrap = order_qty * adjusted_prob
+                if col not in X_input.columns:
+                    X_input[col] = 0.0
+            X_input = X_input[feats]
+            prob = cal_model.predict_proba(X_input)[0, 1]
+            adj_prob = np.clip(prob, 0, 1)
+            exp_scrap = order_qty * adj_prob
             exp_loss = exp_scrap * cost_per_part
-            reliability = 1 - adjusted_prob
+            reliability = 1 - adj_prob
 
             st.markdown(f"### 🧩 Prediction Results for Part **{part_id}**")
             st.metric("Predicted Scrap Risk (raw)", f"{prob*100:.2f}%")
-            st.metric("Adjusted Scrap Risk", f"{adjusted_prob*100:.2f}%")
+            st.metric("Adjusted Scrap Risk", f"{adj_prob*100:.2f}%")
             st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
             st.metric("Expected Loss ($)", f"{exp_loss:,.2f}")
             st.metric("MTTF Scrap", f"{default_mtbf:.1f}")
             st.metric("Reliability", f"{reliability*100:.2f}%")
 
-            # 📊 Historical Pareto by Defect Type
-            st.markdown("#### 📊 Historical Pareto (Top 10 Defect Types by Actual Defects)")
-            defect_cols = [c for c in df_train.columns if c.endswith("_rate")]
+            # Pareto Analysis by Defect Type
+            defect_cols = [c for c in df.columns if "rate" in c and not c.startswith("scrap")]
             if len(defect_cols) == 0:
                 st.warning("⚠ No defect-type rate columns found in dataset.")
             else:
-                defect_summary = {
-                    col.replace("_rate", "").replace("_", " ").title():
-                    (df_train["order_quantity"] * df_train[col]).sum()
-                    for col in defect_cols
-                }
+                # Historical
+                st.markdown("#### 📊 Historical Pareto (Top 10 Defect Types)")
                 hist = (
-                    pd.DataFrame(list(defect_summary.items()), columns=["Defect Type", "historical_defects"])
-                    .sort_values("historical_defects", ascending=False)
+                    pd.DataFrame({
+                        "Defect Type": [c.replace("_rate", "").replace("_", " ").title() for c in defect_cols],
+                        "Historical Defects": [(df_train["order_quantity"] * df_train[c]).sum() for c in defect_cols]
+                    })
+                    .sort_values("Historical Defects", ascending=False)
                     .head(10)
                 )
                 st.bar_chart(hist.set_index("Defect Type"))
 
-            # 🔮 Predicted Pareto by Expected Defects
-            st.markdown("#### 🔮 Predicted Pareto (Top 10 Defect Types by Expected Defects)")
-            if len(defect_cols) > 0:
+                # Predicted
+                st.markdown("#### 🔮 Predicted Pareto (Top 10 Expected Defects)")
                 df_test["pred_prob"] = cal_model.predict_proba(make_xy(df_test, thr_label, use_rate_cols)[0])[:, 1]
-                predicted_summary = {
-                    col.replace("_rate", "").replace("_", " ").title():
-                    (df_test["order_quantity"] * df_test["pred_prob"] * df_test[col]).sum()
-                    for col in defect_cols
-                }
-                pareto = (
-                    pd.DataFrame(list(predicted_summary.items()), columns=["Defect Type", "expected_defects"])
-                    .sort_values("expected_defects", ascending=False)
+                pred = (
+                    pd.DataFrame({
+                        "Defect Type": [c.replace("_rate", "").replace("_", " ").title() for c in defect_cols],
+                        "Expected Defects": [(df_test["order_quantity"] * df_test[c] * df_test["pred_prob"]).sum() for c in defect_cols]
+                    })
+                    .sort_values("Expected Defects", ascending=False)
                     .head(10)
                 )
-                st.bar_chart(pareto.set_index("Defect Type"))
+                st.bar_chart(pred.set_index("Defect Type"))
 
         except Exception as e:
             st.error(f"Prediction failed: {e}")
