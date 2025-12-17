@@ -34,96 +34,71 @@ MIN_SAMPLES_LEAF = 2
 # -------------------------------
 @st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
-    # Read CSV (robust to weird headers)
-    df = pd.read_csv(csv_path)
+    # Try reading CSV robustly
+    df = pd.read_csv(csv_path, header=0)
 
-    # Flatten multi-index column headers if present (Excel multi-row headers)
+    # --- Detect multi-index header (extra blank rows above header) ---
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ["_".join([str(x) for x in col if str(x) != "None"]).strip() for col in df.columns.values]
-    # --- Clean up duplicate / messy columns ---
-    df.columns = df.columns.str.strip()               # remove leading/trailing spaces
-    df.columns = df.columns.str.replace(r"\s+", " ", regex=True)  # collapse multiple spaces
-    df = df.loc[:, ~df.columns.duplicated()]          # drop duplicate-named columns
+        st.warning("⚠ Multi-index header detected. Flattening column names.")
+        df.columns = [
+            "_".join([str(x) for x in col if pd.notna(x)]).strip()
+            for col in df.columns.values
+        ]
 
-
-    # Normalize headers
+    # --- Clean up and normalize headers ---
     df.columns = (
-        pd.Index(df.columns)
+        df.columns.astype(str)
         .str.strip()
+        .str.replace(r"[\u00A0\u200B\t]+", "", regex=True)  # remove non-breaking / invisible chars
+        .str.replace(r"\s+", " ", regex=True)  # collapse spaces
         .str.lower()
-        .str.replace(r"[^\w\s]", " ", regex=True)
-        .str.replace(r"\s+", "_", regex=True)
+        .str.replace(r"[^\w\s]", "_", regex=True)
+        .str.replace("__+", "_", regex=True)
         .str.strip("_")
     )
 
-    # Rename important fields to canonical names
+    # Drop duplicate columns if any remain
+    if df.columns.duplicated().any():
+        dupes = df.columns[df.columns.duplicated()].unique()
+        st.warning(f"⚠ Found duplicate columns: {', '.join(dupes)}. Keeping first occurrence.")
+        df = df.loc[:, ~df.columns.duplicated()]
+
+    # Rename key columns to match model expectations
     rename_map = {
-        "work_order": "part_id",
-        "work_order_number": "part_id",
-        "work_order_#": "part_id",
-        "work_ord": "part_id",
-        "part_id": "part_id",
+        "work_order_#": "work_order",
         "order_quantity": "order_quantity",
-        "order_qty": "order_quantity",
-        "pieces": "order_quantity",
-        "scrap": "scrap%",
-        "scrap_percent": "scrap%",
-        "scrap_percentage": "scrap%",
+        "pieces_scrapped": "pieces_scrapped",
+        "total_scrap_weight_lbs": "total_scrap_weight_lbs",
         "scrap_": "scrap%",
-        "scrap%": "scrap%",
         "week_ending": "week_ending",
-        "week_end": "week_ending",
-        "week_end_date": "week_ending",
         "piece_weight_lbs": "piece_weight_lbs",
-        "piece_weight": "piece_weight_lbs",
-        "piece_wei": "piece_weight_lbs",
+        "part_id": "part_id",
     }
     df.rename(columns=rename_map, inplace=True)
 
-    # Fallbacks for missing key columns
-    for c in ["part_id", "scrap%", "order_quantity", "piece_weight_lbs", "week_ending"]:
-        if c not in df.columns:
-            df[c] = np.nan
+    # Verify critical columns exist
+    required = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"❌ Missing critical columns: {missing}")
 
-    # Convert data types (coerce errors)
+    # Convert types safely
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-    df["scrap%"] = pd.to_numeric(df["scrap%"], errors="coerce")
-    df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce")
-    df["piece_weight_lbs"] = pd.to_numeric(df["piece_weight_lbs"], errors="coerce")
+    df = df.dropna(subset=["week_ending"])
+    for col in ["scrap%", "order_quantity", "piece_weight_lbs"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["scrap%", "order_quantity", "piece_weight_lbs"]).copy()
 
-    # Drop rows with invalid week_ending
-    df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
+    # Derive pieces_scrapped if missing
+    if "pieces_scrapped" not in df.columns:
+        df["pieces_scrapped"] = np.round(df["order_quantity"] * df["scrap%"].clip(lower=0) / 100).astype(int)
 
-    # Normalize defect rate columns to numeric, fill missing with 0
-    defect_cols = [c for c in df.columns if c.endswith("_rate")]
-    for col in defect_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    if len(defect_cols) > 0:
-        st.info(f"✅ Detected {len(defect_cols)} defect columns: {', '.join(defect_cols)}")
-    else:
-        st.warning("⚠ No *_rate defect columns detected. Model will use base features only.")
+    df.sort_values("week_ending", inplace=True)
+    df.reset_index(drop=True, inplace=True)
 
-    # Flatten part_id if multi-column or nested
-    if "part_id" in df.columns:
-        # If a column accidentally became a DataFrame
-        if isinstance(df["part_id"], pd.DataFrame):
-            st.warning("⚠ 'part_id' detected as multi-column. Flattening first column.")
-            df["part_id"] = df["part_id"].iloc[:, 0]
-        # If nested values like tuples/lists
-        if len(df) > 0 and isinstance(df["part_id"].iloc[0], (list, tuple)):
-            st.warning("⚠ 'part_id' contains nested values. Flattening with first element.")
-            df["part_id"] = df["part_id"].apply(lambda x: x[0] if isinstance(x, (list, tuple)) else x)
-    else:
-        df["part_id"] = np.nan
-
-    # Ensure string and fill missing
-    df["part_id"] = df["part_id"].astype(str)
-    df["part_id"].replace({"nan": "unknown", "": "unknown"}, inplace=True)
-
-    # De-duplicate columns silently (rare header issues)
-    df = df.loc[:, ~df.columns.duplicated()]
-
+    st.info(f"✅ Loaded {len(df):,} records and {len(df.columns)} columns successfully.")
     return df
+
 
 
 # -------------------------------
