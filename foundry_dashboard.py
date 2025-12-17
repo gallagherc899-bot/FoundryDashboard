@@ -40,6 +40,11 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     # Flatten multi-index column headers if present (Excel multi-row headers)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ["_".join([str(x) for x in col if str(x) != "None"]).strip() for col in df.columns.values]
+    # --- Clean up duplicate / messy columns ---
+    df.columns = df.columns.str.strip()               # remove leading/trailing spaces
+    df.columns = df.columns.str.replace(r"\s+", " ", regex=True)  # collapse multiple spaces
+    df = df.loc[:, ~df.columns.duplicated()]          # drop duplicate-named columns
+
 
     # Normalize headers
     df.columns = (
