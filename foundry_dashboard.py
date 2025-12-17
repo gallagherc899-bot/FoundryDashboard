@@ -1,4 +1,4 @@
-# Foundry Scrap Risk Dashboard — Robust Defect Column Detection Version
+# Foundry Scrap Risk Dashboard — Stable Final Build (Auto Handles Defects & Part IDs)
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -10,9 +10,17 @@ import pandas as pd
 import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import brier_score_loss, accuracy_score, confusion_matrix, classification_report
+from sklearn.metrics import (
+    brier_score_loss,
+    accuracy_score,
+    confusion_matrix,
+    classification_report,
+)
 from scipy.stats import wilcoxon
 
+# -------------------------------------------------
+# Streamlit Page Setup
+# -------------------------------------------------
 st.set_page_config(page_title="Foundry Scrap Risk Dashboard", layout="wide")
 
 RANDOM_STATE = 42
@@ -27,7 +35,7 @@ DEFAULT_THRESHOLD = 6.5
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
 
-    # Normalize header names (make lowercase, unify spaces)
+    # Normalize header names
     df.columns = (
         df.columns.str.strip()
         .str.lower()
@@ -36,7 +44,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         .str.strip("_")
     )
 
-    # Explicit rename mapping for your known headers
+    # Rename key columns
     rename_map = {
         "work_order": "part_id",
         "work_order_number": "part_id",
@@ -51,35 +59,30 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         "scrap_": "scrap%",
         "week_ending": "week_ending",
         "piece_weight_lbs": "piece_weight_lbs",
-        "piece_weight_lbs_": "piece_weight_lbs",
         "piece_weight": "piece_weight_lbs",
     }
     df.rename(columns=rename_map, inplace=True)
 
-    # Fill missing criticals if needed
+    # Fill missing key columns
     required = ["part_id", "week_ending", "scrap%", "order_quantity", "piece_weight_lbs"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        st.warning(f"⚠ Missing critical columns automatically filled: {missing}")
-        for m in missing:
-            df[m] = 0.0
+    for col in required:
+        if col not in df.columns:
+            df[col] = 0.0
 
-    # Convert date & numeric types
+    # Type conversions
     df["week_ending"] = pd.to_datetime(df.get("week_ending", pd.NaT), errors="coerce")
-    for col in ["scrap%", "order_quantity", "piece_weight_lbs"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    for c in ["scrap%", "order_quantity", "piece_weight_lbs"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Compute missing pieces_scrapped
+    # Compute pieces scrapped if missing
     if "pieces_scrapped" not in df.columns:
         df["pieces_scrapped"] = np.round(df["order_quantity"] * df["scrap%"].clip(lower=0) / 100).astype(float)
 
-    # Clean & sort
     df = df.dropna(subset=["week_ending"])
     df.sort_values("week_ending", inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # Detect all *_rate columns robustly
+    # Detect defect columns robustly
     rate_cols = [c for c in df.columns if "rate" in c and not c.startswith("scrap")]
     st.info(f"✅ Detected {len(rate_cols)} defect columns: {', '.join(rate_cols)}")
 
@@ -95,7 +98,20 @@ def time_split(df, train_ratio=0.75, calib_ratio=0.1):
     return df.iloc[:train_end].copy(), df.iloc[train_end:calib_end].copy(), df.iloc[calib_end:].copy()
 
 def compute_mtbf_on_train(df_train, thr_label):
-    df_mtbf = df_train.groupby("part_id")["scrap%"].mean().reset_index()
+    # 🩹 Defensive fix for part_id
+    if "part_id" not in df_train.columns:
+        raise ValueError("❌ 'part_id' column missing from dataset.")
+    if isinstance(df_train["part_id"], pd.DataFrame):
+        st.warning("⚠ 'part_id' had multiple columns. Flattening.")
+        df_train["part_id"] = df_train["part_id"].iloc[:, 0]
+
+    df_train["part_id"] = df_train["part_id"].astype(str).fillna("unknown")
+
+    df_mtbf = (
+        df_train.groupby("part_id", dropna=False)["scrap%"]
+        .mean(numeric_only=True)
+        .reset_index()
+    )
     df_mtbf.rename(columns={"scrap%": "mttf_scrap"}, inplace=True)
     df_mtbf["mttf_scrap"] = np.where(df_mtbf["mttf_scrap"] <= thr_label, 1.0, df_mtbf["mttf_scrap"])
     return df_mtbf
@@ -151,6 +167,21 @@ if not os.path.exists(csv_path):
 # Data Prep
 # -------------------------------------------------
 df = load_and_clean(csv_path)
+
+# 🩹 Fallback part_id logic
+if "part_id" not in df.columns:
+    poss = [c for c in df.columns if "work" in c and "order" in c]
+    if poss:
+        df["part_id"] = df[poss[0]]
+        st.info(f"✅ Using '{poss[0]}' as part_id column.")
+    else:
+        df["part_id"] = "unknown"
+
+if isinstance(df["part_id"], pd.DataFrame):
+    df["part_id"] = df["part_id"].iloc[:, 0]
+df["part_id"] = df["part_id"].astype(str)
+
+# Split + Train
 df_train, df_calib, df_test = time_split(df)
 mtbf_train = compute_mtbf_on_train(df_train, thr_label)
 part_freq_train = df_train["part_id"].value_counts(normalize=True)
@@ -166,10 +197,13 @@ X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
 rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
 # -------------------------------------------------
-# Prediction Tab
+# Tabs
 # -------------------------------------------------
 tab1, tab2 = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
 
+# -------------------------------------------------
+# Prediction Tab
+# -------------------------------------------------
 with tab1:
     st.subheader("🔮 Predict Scrap Risk and Reliability")
 
@@ -205,12 +239,11 @@ with tab1:
             st.metric("MTTF Scrap", f"{default_mtbf:.1f}")
             st.metric("Reliability", f"{reliability*100:.2f}%")
 
-            # Pareto Analysis by Defect Type
+            # Historical Pareto
             defect_cols = [c for c in df.columns if "rate" in c and not c.startswith("scrap")]
             if len(defect_cols) == 0:
-                st.warning("⚠ No defect-type rate columns found in dataset.")
+                st.warning("⚠ No defect-type rate columns found.")
             else:
-                # Historical
                 st.markdown("#### 📊 Historical Pareto (Top 10 Defect Types)")
                 hist = (
                     pd.DataFrame({
@@ -220,9 +253,11 @@ with tab1:
                     .sort_values("Historical Defects", ascending=False)
                     .head(10)
                 )
-                st.bar_chart(hist.set_index("Defect Type"))
+                hist["Share (%)"] = hist["Historical Defects"] / hist["Historical Defects"].sum() * 100
+                st.dataframe(hist)
+                st.bar_chart(hist.set_index("Defect Type")["Historical Defects"])
 
-                # Predicted
+                # Predicted Pareto
                 st.markdown("#### 🔮 Predicted Pareto (Top 10 Expected Defects)")
                 df_test["pred_prob"] = cal_model.predict_proba(make_xy(df_test, thr_label, use_rate_cols)[0])[:, 1]
                 pred = (
@@ -233,7 +268,9 @@ with tab1:
                     .sort_values("Expected Defects", ascending=False)
                     .head(10)
                 )
-                st.bar_chart(pred.set_index("Defect Type"))
+                pred["Share (%)"] = pred["Expected Defects"] / pred["Expected Defects"].sum() * 100
+                st.dataframe(pred)
+                st.bar_chart(pred.set_index("Defect Type")["Expected Defects"])
 
         except Exception as e:
             st.error(f"Prediction failed: {e}")
