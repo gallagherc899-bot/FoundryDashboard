@@ -1,10 +1,9 @@
 # ================================================================
 # 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic)
 # ================================================================
-# This version is visually identical to the Working Dashboard 12.28.25
-# but integrates the Campbell 9-Process correlation model internally.
-# It automatically computes 9 process indices derived from your defect
-# columns, then silently adds them as features to the ML model.
+# Identical UI to "Working Dashboard 12.28.25"
+# Internally enhanced with Campbell 9-Process correlations.
+# Streamlit page configuration removed for simplicity and stability.
 # ================================================================
 
 import streamlit as st
@@ -18,12 +17,7 @@ from sklearn.metrics import (
     f1_score, brier_score_loss
 )
 import warnings
-import os
 
-# ================================================================
-# Streamlit setup (must be first Streamlit call)
-# ================================================================
-st.set_page_config(page_title="Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ================================================================
@@ -33,7 +27,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 def load_data():
     df = pd.read_csv("anonymized_parts.csv")
 
-    # Normalize column headers (strip spaces, lowercase, underscores)
+    # Normalize headers: lower case, underscores, no symbols
     df.columns = (
         df.columns.str.strip()
         .str.replace(r"[^\w\s]", "", regex=True)
@@ -41,48 +35,35 @@ def load_data():
         .str.lower()
     )
 
-    # Map known columns to consistent internal names
+    # Map consistent names for key fields
     rename_map = {
-        "work_order_": "part_id",
         "work_order": "part_id",
-        "work_order_number": "part_id",
         "work_order_#": "part_id",
         "order_quantity": "order_quantity",
-        "pieces_scrapped": "pieces_scrapped",
-        "total_scrap_weight_lbs": "total_scrap_weight_lbs",
-        "total_scrap_weight_(lbs)": "total_scrap_weight_lbs",
-        "scrap%": "scrap_percent",
         "scrap": "scrap_percent",
-        "sellable": "sellable",
-        "heats": "heats",
+        "scrap_percent": "scrap_percent",
+        "scrap%": "scrap_percent",
         "week_ending": "week_ending",
-        "piece_weight_lbs": "piece_weight_lbs",
-        "piece_weight_(lbs)": "piece_weight_lbs",
-        "part_id": "part_id"
     }
     df.rename(columns=rename_map, inplace=True)
 
-    # Convert data types
+    # Ensure proper types
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0.0)
     df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce").fillna(0.0)
-    df["piece_weight_lbs"] = pd.to_numeric(df["piece_weight_lbs"], errors="coerce").fillna(0.0)
 
-    # Drop missing dates
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
 
-    # Identify defect rate columns (those ending with '_rate')
+    # Identify defect columns dynamically
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
-
     return df, defect_cols
 
 df, defect_cols = load_data()
 
 # ================================================================
-# 2️⃣ Compute Campbell Process Indices (ENHANCEMENT)
+# 2️⃣ Campbell Process Index Calculation (ENHANCED LOGIC)
 # ================================================================
-# Each index = mean of associated defect rates
-# Defects are matched to your dataset's available defect columns
+# Each process index = mean of related defect rates that exist in your dataset.
 
 process_mapping = {
     "Sand_System_Index": ["sand_rate", "gas_porosity_rate", "runout_rate"],
@@ -97,19 +78,15 @@ process_mapping = {
                         "outside_process_scrap_rate", "zyglo_rate"]
 }
 
-# Create process indices only for defects that exist in your dataset
+# Compute only for existing defect columns
 for proc, cols in process_mapping.items():
-    existing = [c for c in cols if c in df.columns]
-    if existing:
-        df[proc] = df[existing].mean(axis=1)
-    else:
-        df[proc] = 0.0  # fallback if no defects found for that process
+    available = [c for c in cols if c in df.columns]
+    df[proc] = df[available].mean(axis=1) if available else 0.0
 
-# Combine all process index columns into a list
 process_indices = list(process_mapping.keys())
 
 # ================================================================
-# 3️⃣ Rolling 6–2–1 Split (same as original)
+# 3️⃣ Rolling 6–2–1 Validation Split
 # ================================================================
 def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
     weeks = sorted(df["week_ending"].unique())
@@ -122,11 +99,11 @@ def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
         )
 
 # ================================================================
-# 4️⃣ Train & Evaluate Function (now includes process indices)
+# 4️⃣ Model Training Function (Enhanced Feature Set)
 # ================================================================
 def train_and_evaluate(df, threshold):
     results = []
-    features = defect_cols + process_indices  # <- include both defects and process indices
+    features = defect_cols + process_indices  # add process indices silently
 
     for train, val, test in rolling_splits(df):
         for d in [train, val, test]:
@@ -145,7 +122,7 @@ def train_and_evaluate(df, threshold):
         )
         rf.fit(X_train, y_train)
 
-        # Calibration for probability accuracy
+        # Calibration (probabilistic smoothing)
         try:
             cal = CalibratedClassifierCV(rf, method="sigmoid", cv=3)
             cal.fit(X_val, y_val)
@@ -181,10 +158,10 @@ with st.sidebar:
 tab1, tab2 = st.tabs(["📈 Dashboard", "📊 Validation (6–2–1)"])
 
 # ================================================================
-# 6️⃣ Prediction Logic (unchanged externally, enhanced internally)
+# 6️⃣ Prediction Logic (Enhanced Internals)
 # ================================================================
 if predict:
-    with st.spinner("⏳ Training enhanced model..."):
+    with st.spinner("⏳ Training enhanced predictive model..."):
         df_part = df.copy() if not part_id else df[df["part_id"].astype(str).str.contains(str(part_id), case=False, na=False)]
         if df_part.empty:
             st.warning(f"No data found for Part ID '{part_id}'. Using full dataset.")
@@ -192,13 +169,12 @@ if predict:
 
         results, model = train_and_evaluate(df_part, threshold)
 
-        # Predict scrap risk
+        # Predict mean scrap risk
         scrap_pred = model.predict_proba(df_part[defect_cols + process_indices])[:, 1].mean() * 100
         expected_scrap = order_qty * (scrap_pred / 100)
         loss = expected_scrap * cost
         mtts = (len(df_part) / (expected_scrap + 1)) * 7
 
-        # Pareto calculations (unchanged UI)
         pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
         pareto_pred = pd.Series(model.feature_importances_, index=defect_cols + process_indices).sort_values(ascending=False)
 
@@ -213,7 +189,7 @@ if predict:
     st.success("✅ Prediction Complete!")
 
 # ================================================================
-# 7️⃣ Tab 1 — Dashboard View
+# 7️⃣ Dashboard Tab
 # ================================================================
 with tab1:
     st.header("📈 Scrap Risk & Pareto Dashboard")
@@ -238,7 +214,7 @@ with tab1:
             st.pyplot(fig)
 
 # ================================================================
-# 8️⃣ Tab 2 — Rolling Validation
+# 8️⃣ Validation Tab
 # ================================================================
 with tab2:
     st.header("📊 Rolling 6–2–1 Validation Results")
@@ -253,4 +229,4 @@ with tab2:
         ax.set_ylabel("Score")
         st.pyplot(fig)
 
-st.caption("© 2025 Foundry Analytics | Enhanced Predictive Engine (Internal Only)")
+st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Invisible in UI)")
