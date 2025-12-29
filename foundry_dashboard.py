@@ -1,9 +1,9 @@
 # ================================================================
-# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v4)
+# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v5)
 # ================================================================
-# Identical UI to original dashboard
-# Enhanced internally with Campbell 9-Process logic
-# Adds part-specific average scrap% and clear manager guidance
+# UI identical to your original dashboard
+# Internal logic enhanced with Campbell 9-Process indices
+# Includes per-Part scrap% context and natural language feedback
 # ================================================================
 
 import streamlit as st
@@ -12,16 +12,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score,
-    f1_score, brier_score_loss
-)
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, brier_score_loss
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ================================================================
-# 1️⃣ Data Loading & Cleaning
+# 1️⃣ Data Load
 # ================================================================
 @st.cache_data
 def load_data():
@@ -37,10 +34,10 @@ def load_data():
     rename_map = {
         "work_order": "part_id",
         "work_order_#": "part_id",
-        "order_quantity": "order_quantity",
+        "scrap%": "scrap_percent",
         "scrap": "scrap_percent",
         "scrap_percent": "scrap_percent",
-        "scrap%": "scrap_percent",
+        "order_quantity": "order_quantity",
         "week_ending": "week_ending",
     }
     df.rename(columns=rename_map, inplace=True)
@@ -53,10 +50,11 @@ def load_data():
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
     return df, defect_cols
 
+
 df, defect_cols = load_data()
 
 # ================================================================
-# 2️⃣ Campbell Process Index Calculation (ENHANCED LOGIC)
+# 2️⃣ Campbell 9-Process Mapping
 # ================================================================
 process_mapping = {
     "Sand_System_Index": ["sand_rate", "gas_porosity_rate", "runout_rate"],
@@ -72,26 +70,27 @@ process_mapping = {
 }
 
 for proc, cols in process_mapping.items():
-    existing = [c for c in cols if c in df.columns]
-    df[proc] = df[existing].mean(axis=1) if existing else 0.0
+    valid = [c for c in cols if c in df.columns]
+    df[proc] = df[valid].mean(axis=1) if valid else 0.0
 
 process_indices = list(process_mapping.keys())
 
 # ================================================================
-# 3️⃣ Rolling 6–2–1 Validation Split
+# 3️⃣ Rolling 6-2-1 Split
 # ================================================================
 def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
     weeks = sorted(df["week_ending"].unique())
     total = len(weeks) - (weeks_train + weeks_val + weeks_test) + 1
     for i in range(total):
         yield (
-            df[df["week_ending"].isin(weeks[i : i + weeks_train])].copy(),
-            df[df["week_ending"].isin(weeks[i + weeks_train : i + weeks_train + weeks_val])].copy(),
-            df[df["week_ending"].isin(weeks[i + weeks_train + weeks_val : i + weeks_train + weeks_val + weeks_test])].copy(),
+            df[df["week_ending"].isin(weeks[i:i+weeks_train])].copy(),
+            df[df["week_ending"].isin(weeks[i+weeks_train:i+weeks_train+weeks_val])].copy(),
+            df[df["week_ending"].isin(weeks[i+weeks_train+weeks_val:
+                                            i+weeks_train+weeks_val+weeks_test])].copy(),
         )
 
 # ================================================================
-# 4️⃣ Model Training & Evaluation (Part-Specific Averages)
+# 4️⃣ Train & Evaluate (part-aware)
 # ================================================================
 def train_and_evaluate(df_part, threshold):
     results = []
@@ -105,13 +104,16 @@ def train_and_evaluate(df_part, threshold):
         X_val, y_val     = val[features], val["Label"]
         X_test, y_test   = test[features], test["Label"]
 
-        # Context-aware check for single-class data
+        # --- Handle single-class case with contextual message ---
         if len(np.unique(y_train)) < 2:
-            avg_scrap = df_part["scrap_percent"].mean()
+            if "part_id" in df_part.columns and df_part["part_id"].nunique() == 1:
+                avg_scrap = df_part["scrap_percent"].mean()
+            else:
+                avg_scrap = df_part.groupby("part_id")["scrap_percent"].mean().mean()
+
             msg = (
                 f"ℹ️ The average scrap% for this part is **{avg_scrap:.2f}%**.  \n"
-                f"At your current threshold of **{threshold:.2f}%**, "
-                f"the model finds all runs already below this level — "
+                f"At your current threshold of **{threshold:.2f}%**, the model finds all runs already below this level — "
                 f"so you’re effectively at **100% yield** for that target.  \n\n"
                 f"➡️ To reduce scrap below the current average of {avg_scrap:.2f}%, "
                 f"try selecting a **lower threshold**."
@@ -120,11 +122,8 @@ def train_and_evaluate(df_part, threshold):
             return pd.DataFrame(), None
 
         rf = RandomForestClassifier(
-            n_estimators=180,
-            min_samples_leaf=2,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=-1
+            n_estimators=180, min_samples_leaf=2,
+            class_weight="balanced", random_state=42, n_jobs=-1
         )
         rf.fit(X_train, y_train)
 
@@ -136,11 +135,7 @@ def train_and_evaluate(df_part, threshold):
             model = rf
 
         probs = model.predict_proba(X_test)
-        if probs.shape[1] == 1:
-            probs = np.zeros(len(X_test))
-        else:
-            probs = probs[:, 1]
-
+        probs = probs[:, 1] if probs.shape[1] > 1 else np.zeros(len(X_test))
         preds = (probs > 0.5).astype(int)
 
         results.append({
@@ -150,6 +145,7 @@ def train_and_evaluate(df_part, threshold):
             "f1": f1_score(y_test, preds, zero_division=0),
             "brier": brier_score_loss(y_test, probs),
         })
+
     return pd.DataFrame(results), rf
 
 # ================================================================
@@ -170,7 +166,7 @@ with st.sidebar:
 tab1, tab2 = st.tabs(["📈 Dashboard", "📊 Validation (6–2–1)"])
 
 # ================================================================
-# 6️⃣ Prediction Logic
+# 6️⃣ Prediction
 # ================================================================
 if predict:
     with st.spinner("⏳ Training enhanced predictive model..."):
@@ -180,13 +176,9 @@ if predict:
             df_part = df.copy()
 
         results, model = train_and_evaluate(df_part, threshold)
-
         if model is not None and not results.empty:
             scrap_pred = model.predict_proba(df_part[defect_cols + process_indices])
-            if scrap_pred.shape[1] == 1:
-                scrap_pred = np.zeros(len(df_part))
-            else:
-                scrap_pred = scrap_pred[:, 1]
+            scrap_pred = scrap_pred[:, 1] if scrap_pred.shape[1] > 1 else np.zeros(len(df_part))
 
             scrap_pred = scrap_pred.mean() * 100
             expected_scrap = order_qty * (scrap_pred / 100)
@@ -197,13 +189,8 @@ if predict:
             pareto_pred = pd.Series(model.feature_importances_, index=defect_cols + process_indices).sort_values(ascending=False)
 
             st.session_state.update({
-                "results": results,
-                "pareto_hist": pareto_hist,
-                "pareto_pred": pareto_pred,
-                "scrap_pred": scrap_pred,
-                "loss": loss,
-                "mtts": mtts,
-                "df_part": df_part
+                "results": results, "pareto_hist": pareto_hist, "pareto_pred": pareto_pred,
+                "scrap_pred": scrap_pred, "loss": loss, "mtts": mtts, "df_part": df_part
             })
             st.success("✅ Prediction Complete!")
 
@@ -252,4 +239,4 @@ with tab2:
         ax.set_ylabel("Score")
         st.pyplot(fig)
 
-st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Part-Specific Context v4)")
+st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Part-Specific Context v5)")
