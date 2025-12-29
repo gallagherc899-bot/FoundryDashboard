@@ -1,9 +1,9 @@
 # ================================================================
-# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v2)
+# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v3)
 # ================================================================
 # Identical UI to "Working Dashboard 12.28.25"
 # Internally enhanced with Campbell 9-Process correlations.
-# Includes defensive fix for single-class thresholds.
+# Includes context-aware feedback for thresholds above average scrap%.
 # ================================================================
 
 import streamlit as st
@@ -27,7 +27,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 def load_data():
     df = pd.read_csv("anonymized_parts.csv")
 
-    # Normalize headers: lower case, underscores, no symbols
     df.columns = (
         df.columns.str.strip()
         .str.replace(r"[^\w\s]", "", regex=True)
@@ -35,7 +34,6 @@ def load_data():
         .str.lower()
     )
 
-    # Map consistent names for key fields
     rename_map = {
         "work_order": "part_id",
         "work_order_#": "part_id",
@@ -47,14 +45,11 @@ def load_data():
     }
     df.rename(columns=rename_map, inplace=True)
 
-    # Ensure proper types
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0.0)
     df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce").fillna(0.0)
 
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
-
-    # Identify defect columns dynamically
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
     return df, defect_cols
 
@@ -76,7 +71,6 @@ process_mapping = {
                         "outside_process_scrap_rate", "zyglo_rate"]
 }
 
-# Compute indices if corresponding defect columns exist
 for proc, cols in process_mapping.items():
     existing = [c for c in cols if c in df.columns]
     df[proc] = df[existing].mean(axis=1) if existing else 0.0
@@ -97,14 +91,13 @@ def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
         )
 
 # ================================================================
-# 4️⃣ Model Training & Evaluation (with IndexError Fix)
+# 4️⃣ Model Training & Evaluation (Enhanced with Manager Feedback)
 # ================================================================
 def train_and_evaluate(df, threshold):
     results = []
-    features = defect_cols + process_indices  # include both defect + process features
+    features = defect_cols + process_indices
 
     for train, val, test in rolling_splits(df):
-        # Apply label threshold
         for d in [train, val, test]:
             d["Label"] = (d["scrap_percent"] > threshold).astype(int)
 
@@ -112,9 +105,18 @@ def train_and_evaluate(df, threshold):
         X_val, y_val     = val[features], val["Label"]
         X_test, y_test   = test[features], test["Label"]
 
-        # Defensive: skip if y_train has only one class
+        # Context-aware check for single-class scenario
         if len(np.unique(y_train)) < 2:
-            st.warning("⚠️ Training set contains only one class at this threshold. Try lowering Scrap%.")
+            avg_scrap = df["scrap_percent"].mean()
+            msg = (
+                f"ℹ️ The average scrap% for this part is **{avg_scrap:.2f}%**.  \n"
+                f"At your current threshold of **{threshold:.2f}%**, "
+                f"the model finds all runs already below this level — "
+                f"so you’re effectively at **100% yield** for that target.  \n\n"
+                f"➡️ To reduce scrap below the current average of {avg_scrap:.2f}%, "
+                f"try selecting a **lower threshold**."
+            )
+            st.info(msg)
             return pd.DataFrame(), None
 
         rf = RandomForestClassifier(
@@ -126,7 +128,6 @@ def train_and_evaluate(df, threshold):
         )
         rf.fit(X_train, y_train)
 
-        # Calibration for smoother probability prediction
         try:
             cal = CalibratedClassifierCV(rf, method="sigmoid", cv=3)
             cal.fit(X_val, y_val)
@@ -134,7 +135,6 @@ def train_and_evaluate(df, threshold):
         except ValueError:
             model = rf
 
-        # Fix: handle single-class predict_proba outputs
         probs = model.predict_proba(X_test)
         if probs.shape[1] == 1:
             probs = np.zeros(len(X_test))
@@ -153,7 +153,7 @@ def train_and_evaluate(df, threshold):
     return pd.DataFrame(results), rf
 
 # ================================================================
-# 5️⃣ Streamlit UI (Identical to Original)
+# 5️⃣ Streamlit UI
 # ================================================================
 st.title("🏭 Aluminum Foundry Scrap Analytics Dashboard")
 
@@ -164,12 +164,13 @@ with st.sidebar:
     weight = st.number_input("Piece Weight (lbs)", min_value=0.0, value=10.0)
     cost = st.number_input("Cost per Part ($)", min_value=0.0, value=50.0)
     threshold = st.slider("Scrap% Threshold", 0.0, 5.0, 2.5, 0.5)
+    st.caption("ℹ️ Scrap Risk = probability that actual scrap% exceeds this threshold.")
     predict = st.button("🔮 Predict")
 
 tab1, tab2 = st.tabs(["📈 Dashboard", "📊 Validation (6–2–1)"])
 
 # ================================================================
-# 6️⃣ Prediction Logic (Enhanced Internals)
+# 6️⃣ Prediction Logic
 # ================================================================
 if predict:
     with st.spinner("⏳ Training enhanced predictive model..."):
@@ -211,10 +212,12 @@ if predict:
 with tab1:
     st.header("📈 Scrap Risk & Pareto Dashboard")
     if "results" in st.session_state:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Predicted Scrap %", f"{st.session_state.scrap_pred:.2f}%")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Predicted Scrap Risk", f"{st.session_state.scrap_pred:.2f}%")
         col2.metric("Expected Scrap Cost", f"${st.session_state.loss:,.2f}")
         col3.metric("MTTS (days)", f"{st.session_state.mtts:.1f}")
+        hist_scrap = df_part["scrap_percent"].mean()
+        col4.metric("Historical Mean Scrap%", f"{hist_scrap:.2f}%")
 
         colA, colB = st.columns(2)
         with colA:
@@ -246,4 +249,4 @@ with tab2:
         ax.set_ylabel("Score")
         st.pyplot(fig)
 
-st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Stable v2)")
+st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Context-Aware v3)")
