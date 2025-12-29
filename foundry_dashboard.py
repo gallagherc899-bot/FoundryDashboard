@@ -1,16 +1,9 @@
 # ================================================================
 # 🧠 Aluminum Foundry Scrap Analytics Dashboard (Doctoral Version)
-# ---------------------------------------------------------------
+# ================================================================
 # Author: [Your Name]
 # Based on Campbell (2003), Juran (1999), Taguchi (2004), AFS (2015)
-# ---------------------------------------------------------------
-# Description:
-# This Streamlit dashboard analyzes aluminum greensand foundry scrap
-# performance using SPC principles and a multivariate machine learning
-# approach integrating process-defect relationships.
 # ================================================================
-st.set_page_config("Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
-
 
 import streamlit as st
 import pandas as pd
@@ -23,7 +16,12 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from tqdm import tqdm
 
 # ------------------------------------------------
-# Load dataset
+# ✅ Page Config — must come before any Streamlit UI call
+# ------------------------------------------------
+st.set_page_config(page_title="Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
+
+# ------------------------------------------------
+# Load and prepare data
 # ------------------------------------------------
 @st.cache_data
 def load_data():
@@ -41,7 +39,7 @@ def load_data():
 df, defect_cols = load_data()
 
 # ------------------------------------------------
-# Define Campbell’s process-defect meta-feature groups
+# Define Campbell process-defect groups
 # ------------------------------------------------
 process_groups = {
     "Sand_System_Index": ["Sand_Rate", "Gas_Porosity_Rate", "Runout_Rate"],
@@ -52,13 +50,13 @@ process_groups = {
     "Finishing_Index": ["Over_Grind_Rate", "Bent_Rate", "Gouged_Rate", "Shift_Rate"],
 }
 
-# Add meta-feature columns
+# Add meta-features
 for name, cols in process_groups.items():
     present = [c for c in cols if c in df.columns]
     df[name] = df[present].mean(axis=1) if present else 0.0
 
 # ------------------------------------------------
-# Rolling 6–2–1 window split generator
+# Rolling 6–2–1 split
 # ------------------------------------------------
 def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
     weeks = sorted(df["Week_Ending"].unique())
@@ -76,7 +74,7 @@ def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
     return splits
 
 # ------------------------------------------------
-# Train and evaluate rolling windows
+# Train and evaluate model
 # ------------------------------------------------
 def train_and_evaluate(df, threshold, use_meta=False):
     results = []
@@ -87,7 +85,6 @@ def train_and_evaluate(df, threshold, use_meta=False):
 
     for roll, (train, val, test) in enumerate(tqdm(splits, desc=f"Rolling thr={threshold}")):
         train, val, test = train.copy(), val.copy(), test.copy()
-
         train["Label"] = (train["Scrap_"] > threshold).astype(int)
         val["Label"]   = (val["Scrap_"] > threshold).astype(int)
         test["Label"]  = (test["Scrap_"] > threshold).astype(int)
@@ -97,17 +94,14 @@ def train_and_evaluate(df, threshold, use_meta=False):
         X_test, y_test   = test[feature_cols], test["Label"]
 
         rf = RandomForestClassifier(
-            n_estimators=180,
-            min_samples_leaf=2,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=-1,
+            n_estimators=180, min_samples_leaf=2,
+            class_weight="balanced", random_state=42, n_jobs=-1
         )
         rf.fit(X_train, y_train)
 
         try:
             if len(np.unique(y_val)) < 2 or y_val.value_counts().min() < 3:
-                raise ValueError("Not enough samples to calibrate")
+                raise ValueError
             cal = CalibratedClassifierCV(rf, method="sigmoid", cv=3)
             cal.fit(X_val, y_val)
             model = cal
@@ -116,7 +110,6 @@ def train_and_evaluate(df, threshold, use_meta=False):
 
         probs = model.predict_proba(X_test)[:, 1]
         preds = (probs > 0.5).astype(int)
-
         results.append({
             "roll": roll + 1,
             "accuracy": accuracy_score(y_test, preds),
@@ -129,13 +122,13 @@ def train_and_evaluate(df, threshold, use_meta=False):
     return pd.DataFrame(results)
 
 # ------------------------------------------------
-# Streamlit Dashboard UI
+# Streamlit UI
 # ------------------------------------------------
-
 st.title("🏭 Aluminum Foundry Scrap Analytics Dashboard")
 st.markdown("""
-This dashboard integrates Statistical Process Control (SPC) with a multivariate Machine Learning model 
-to identify and predict casting defects based on both individual defect rates and interconnected foundry processes.
+This dashboard integrates Statistical Process Control (SPC) with Machine Learning (Random Forest)
+to predict and analyze aluminum casting defects.  
+It demonstrates how multivariate process relationships (Campbell, 2003) influence scrap generation.
 """)
 
 # Sidebar Inputs
@@ -143,6 +136,7 @@ with st.sidebar:
     st.header("Manager Input Controls")
     part_id = st.text_input("Enter Part ID")
     order_qty = st.number_input("Order Quantity", min_value=1, value=100)
+    weight = st.number_input("Piece Weight (lbs)", min_value=0.0, value=10.0)
     cost = st.number_input("Cost per Part ($)", min_value=0.0, value=50.0)
     threshold = st.slider("Scrap% Threshold", 0.0, 5.0, 2.5, 0.5)
     predict = st.button("🔮 Predict Scrap Performance")
@@ -151,31 +145,24 @@ with st.sidebar:
 tab1, tab2, tab3 = st.tabs(["📈 Manager Dashboard", "📊 Research Comparison", "⚙️ Enhanced Manager Dashboard"])
 
 # ------------------------------------------------
-# Prediction logic
+# Run Prediction
 # ------------------------------------------------
 if predict:
-    with st.spinner("Training models for selected Part ID..."):
+    with st.spinner("Training models and computing predictions..."):
         df_part = df[df["Part_ID"].astype(str).str.contains(str(part_id), case=False, na=False)]
         if df_part.empty:
-            st.warning(f"No records found for Part ID '{part_id}'. Using entire dataset.")
             df_part = df.copy()
+            st.warning(f"No records found for Part ID '{part_id}'. Using full dataset instead.")
 
-        # Re-run rolling evaluation
-        base_results = train_and_evaluate(df_part, threshold, use_meta=False)
-        enh_results = train_and_evaluate(df_part, threshold, use_meta=True)
+        base_res = train_and_evaluate(df_part, threshold, use_meta=False)
+        enh_res = train_and_evaluate(df_part, threshold, use_meta=True)
 
-        # Aggregate
-        base_summary = base_results.mean().to_dict()
-        enh_summary = enh_results.mean().to_dict()
-
-        # Train final models for visualization
         df_part["Label"] = (df_part["Scrap_"] > threshold).astype(int)
         rf_base = RandomForestClassifier(n_estimators=180, min_samples_leaf=2, class_weight="balanced", random_state=42)
         rf_enh  = RandomForestClassifier(n_estimators=180, min_samples_leaf=2, class_weight="balanced", random_state=42)
         rf_base.fit(df_part[defect_cols], df_part["Label"])
         rf_enh.fit(df_part[defect_cols + list(process_groups.keys())], df_part["Label"])
 
-        # Compute predictions
         scrap_pred_base = rf_base.predict_proba(df_part[defect_cols])[:, 1].mean() * 100
         scrap_pred_enh  = rf_enh.predict_proba(df_part[defect_cols + list(process_groups.keys())])[:, 1].mean() * 100
 
@@ -185,107 +172,97 @@ if predict:
         loss_base = expected_scrap_base * cost
         loss_enh  = expected_scrap_enh * cost
 
-        # Pareto charts
-        pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
-        pareto_pred_base = pd.Series(rf_base.feature_importances_, index=defect_cols).sort_values(ascending=False)
-        pareto_pred_enh  = pd.Series(rf_enh.feature_importances_, index=defect_cols + list(process_groups.keys())).sort_values(ascending=False)
+        # MTTS (Mean Time To Scrap)
+        mtts_base = (len(df_part) / (expected_scrap_base + 1)) * 7  # weekly data → approx days
+        mtts_enh  = (len(df_part) / (expected_scrap_enh + 1)) * 7
 
-        # Save to session for other tabs
+        pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
+        pareto_base = pd.Series(rf_base.feature_importances_, index=defect_cols).sort_values(ascending=False)
+        pareto_enh  = pd.Series(rf_enh.feature_importances_, index=defect_cols + list(process_groups.keys())).sort_values(ascending=False)
+
         st.session_state.update({
-            "base_summary": base_summary,
-            "enh_summary": enh_summary,
-            "pareto_hist": pareto_hist,
-            "pareto_pred_base": pareto_pred_base,
-            "pareto_pred_enh": pareto_pred_enh,
-            "scrap_pred_base": scrap_pred_base,
-            "scrap_pred_enh": scrap_pred_enh,
-            "loss_base": loss_base,
-            "loss_enh": loss_enh
+            "base_res": base_res, "enh_res": enh_res,
+            "pareto_hist": pareto_hist, "pareto_base": pareto_base, "pareto_enh": pareto_enh,
+            "scrap_pred_base": scrap_pred_base, "scrap_pred_enh": scrap_pred_enh,
+            "loss_base": loss_base, "loss_enh": loss_enh,
+            "mtts_base": mtts_base, "mtts_enh": mtts_enh
         })
-    st.success("✅ Prediction complete! Scroll down to view results.")
+    st.success("✅ Prediction completed successfully.")
 
 # ------------------------------------------------
-# Tab 1 – Baseline
+# TAB 1 — Manager Dashboard (Baseline)
 # ------------------------------------------------
 with tab1:
-    st.header("📈 Manager Dashboard — Baseline Model")
-    if "base_summary" in st.session_state:
-        st.metric("Predicted Scrap %", f"{st.session_state.scrap_pred_base:.2f}%")
-        st.metric("Expected Scrap Cost", f"${st.session_state.loss_base:,.2f}")
+    st.header("📈 Baseline Model")
+    if "base_res" in st.session_state:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Predicted Scrap %", f"{st.session_state.scrap_pred_base:.2f}%")
+        col2.metric("Expected Scrap Cost", f"${st.session_state.loss_base:,.2f}")
+        col3.metric("MTTS (days)", f"{st.session_state.mtts_base:.1f}")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Historical Pareto (Observed)")
+        colA, colB = st.columns(2)
+        with colA:
             fig, ax = plt.subplots(figsize=(5,3))
             st.session_state.pareto_hist.head(15).plot(kind="bar", ax=ax, color="steelblue")
-            ax.set_title("Observed Defect Rates")
-            ax.set_ylabel("Mean Rate (%)")
+            ax.set_title("Historical Pareto (Observed)")
             ax.tick_params(axis="x", rotation=90)
             st.pyplot(fig)
-
-        with col2:
-            st.subheader("Predicted Pareto (Baseline)")
+        with colB:
             fig, ax = plt.subplots(figsize=(5,3))
-            st.session_state.pareto_pred_base.head(15).plot(kind="bar", ax=ax, color="skyblue")
-            ax.set_title("Model Feature Importance (Baseline)")
-            ax.set_ylabel("Importance")
+            st.session_state.pareto_base.head(15).plot(kind="bar", ax=ax, color="skyblue")
+            ax.set_title("Predicted Pareto (Baseline)")
             ax.tick_params(axis="x", rotation=90)
             st.pyplot(fig)
-
-        st.write("This tab reflects traditional SPC univariate control aligned with Juran (1999) and AFS (2015).")
 
 # ------------------------------------------------
-# Tab 2 – Research Comparison
+# TAB 2 — Research Comparison
 # ------------------------------------------------
 with tab2:
-    st.header("📊 Research Comparison — Baseline vs Enhanced")
-    if "base_summary" in st.session_state:
-        comp_df = pd.DataFrame([
-            {"Model":"Baseline", **st.session_state.base_summary},
-            {"Model":"Enhanced", **st.session_state.enh_summary},
+    st.header("📊 Baseline vs Enhanced Comparison")
+    if "base_res" in st.session_state:
+        df_comp = pd.DataFrame([
+            {"Model": "Baseline", **st.session_state.base_res.mean().to_dict()},
+            {"Model": "Enhanced", **st.session_state.enh_res.mean().to_dict()},
         ])
-        st.dataframe(comp_df.style.format("{:.3f}"))
-        st.markdown("#### Feature Importance (Enhanced Model)")
+        st.dataframe(df_comp.style.format("{:.3f}"))
+
         fig, ax = plt.subplots(figsize=(8,4))
-        st.session_state.pareto_pred_enh.head(20).plot(kind="barh", ax=ax, color="teal")
-        ax.set_title("Top 20 Feature Importances — Enhanced Model")
+        st.session_state.pareto_enh.head(20).plot(kind="barh", ax=ax, color="teal")
+        ax.set_title("Feature Importance — Enhanced Model")
         st.pyplot(fig)
 
 # ------------------------------------------------
-# Tab 3 – Enhanced Manager Dashboard
+# TAB 3 — Enhanced Manager Dashboard
 # ------------------------------------------------
 with tab3:
-    st.header("⚙️ Enhanced Manager Dashboard — Process-Aware Model")
-    if "enh_summary" in st.session_state:
-        st.metric("Predicted Scrap % (Enhanced)", f"{st.session_state.scrap_pred_enh:.2f}%")
-        st.metric("Expected Scrap Cost (Enhanced)", f"${st.session_state.loss_enh:,.2f}")
+    st.header("⚙️ Process-Aware Model (Enhanced)")
+    if "enh_res" in st.session_state:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Predicted Scrap %", f"{st.session_state.scrap_pred_enh:.2f}%")
+        col2.metric("Expected Scrap Cost", f"${st.session_state.loss_enh:,.2f}")
+        col3.metric("MTTS (days)", f"{st.session_state.mtts_enh:.1f}")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Historical Pareto (Observed)")
+        colA, colB = st.columns(2)
+        with colA:
             fig, ax = plt.subplots(figsize=(5,3))
             st.session_state.pareto_hist.head(15).plot(kind="bar", ax=ax, color="steelblue")
-            ax.set_title("Observed Defect Rates")
+            ax.set_title("Historical Pareto")
             st.pyplot(fig)
-
-        with col2:
-            st.subheader("Predicted Pareto (Enhanced Model)")
+        with colB:
             fig, ax = plt.subplots(figsize=(5,3))
-            st.session_state.pareto_pred_enh.head(15).plot(kind="bar", ax=ax, color="mediumseagreen")
-            ax.set_title("Feature Importance (Process-Aware)")
+            st.session_state.pareto_enh.head(15).plot(kind="bar", ax=ax, color="mediumseagreen")
+            ax.set_title("Predicted Pareto (Enhanced)")
             st.pyplot(fig)
 
-        st.markdown("### 🧩 Process–Defect Mapping (Enhanced Insight)")
-        mapping_data = []
+        st.markdown("### 🧩 Process–Defect Mapping Table")
+        mapping = []
         for defect in defect_cols:
-            linked_procs = [proc for proc, dcols in process_groups.items() if defect in dcols]
-            if linked_procs:
-                proc_means = df[linked_procs].mean().mean()
-                mapping_data.append({
+            linked = [p for p, ds in process_groups.items() if defect in ds]
+            if linked:
+                avg_idx = df[linked].mean().mean()
+                mapping.append({
                     "Defect": defect,
-                    "Associated Processes": ", ".join(linked_procs),
-                    "Avg Process Index": round(proc_means, 3),
+                    "Associated Processes": ", ".join(linked),
+                    "Avg Process Index": round(avg_idx, 3)
                 })
-        st.dataframe(pd.DataFrame(mapping_data))
-        st.write("This mapping reveals how multivariate process interactions contribute to recurring defect patterns, "
-                 "supporting Campbell (2003) and DOE Best Practice (2004) findings.")
+        st.dataframe(pd.DataFrame(mapping))
