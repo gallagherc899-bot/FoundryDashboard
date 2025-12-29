@@ -1,6 +1,6 @@
 # ================================================================
 # 🏭 Aluminum Foundry Scrap Analytics Dashboard
-# Final Doctoral Edition — Corrected Predicted Pareto + MTTS
+# Final Doctoral Edition — Compact Pareto Layout (Side-by-Side)
 # Author: [Your Name], 2025-12-29
 # ================================================================
 
@@ -78,7 +78,7 @@ def calculate_mtts(scrap_pred_percent):
 
 def predicted_pareto(df, model, feature_list, order_qty=100):
     """
-    Recreate foundry-style Predicted Pareto:
+    Weighted Predicted Pareto:
     Expected Defects = Order Qty × Feature Rate × Predicted Scrap Probability
     """
     preds = model.predict_proba(df[feature_list])[:, 1]
@@ -89,8 +89,7 @@ def predicted_pareto(df, model, feature_list, order_qty=100):
     for col in feature_list:
         expected_defects[col] = (order_qty * df_temp[col] * df_temp["Pred_Prob"]).sum()
 
-    pareto_pred = pd.Series(expected_defects).sort_values(ascending=False)
-    return pareto_pred
+    return pd.Series(expected_defects).sort_values(ascending=False)
 
 # ================================================================
 # 5️⃣ LAYOUT
@@ -123,30 +122,36 @@ with tabs[0]:
         loss = expected_scrap * st.session_state.Cost
         mtts = calculate_mtts(scrap_pred)
 
-        # Display metrics
         st.subheader(f"Results for Part ID: {st.session_state.PartID}")
-        st.metric("Predicted Scrap (%)", f"{scrap_pred:.2f}%")
-        st.metric("Expected Scrap Count", f"{expected_scrap:.0f}")
-        st.metric("Expected Loss ($)", f"${loss:,.2f}")
-        st.metric("Mean Time to Scrap (MTTS)", f"{mtts}")
+        colA, colB, colC, colD = st.columns(4)
+        colA.metric("Predicted Scrap (%)", f"{scrap_pred:.2f}%")
+        colB.metric("Expected Scrap Count", f"{expected_scrap:.0f}")
+        colC.metric("Expected Loss ($)", f"${loss:,.2f}")
+        colD.metric("Mean Time to Scrap (MTTS)", f"{mtts}")
 
-        # Historical Pareto
-        st.subheader("Historical Scrap Pareto (Baseline)")
-        pareto_hist = df[defect_cols].mean().sort_values(ascending=False)
-        fig, ax = plt.subplots(figsize=(4, 2))
-        pareto_hist.plot(kind="bar", ax=ax, color="steelblue")
-        ax.set_title("Historical Pareto — Observed Defect Rates")
-        ax.set_ylabel("Mean Rate (%)")
-        st.pyplot(fig)
+        # Side-by-Side Pareto Layout
+        col1, col2 = st.columns(2)
 
-        # Predicted Pareto (Weighted Expected Defects)
-        st.subheader("Predicted Pareto Scrap (Baseline Model)")
-        pareto_pred = predicted_pareto(df, rf_base, defect_cols, st.session_state.OrderQty)
-        fig, ax = plt.subplots(figsize=(4, 2))
-        pareto_pred.head(15).plot(kind="bar", ax=ax, color="skyblue")
-        ax.set_title("Predicted Pareto — Weighted by Expected Defects")
-        ax.set_ylabel("Expected Defect Count")
-        st.pyplot(fig)
+        with col1:
+            st.subheader("Historical Pareto (Observed)")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            pareto_hist = df[defect_cols].mean().sort_values(ascending=False)
+            pareto_hist.plot(kind="bar", ax=ax, color="steelblue")
+            ax.set_title("Observed Defect Rates", fontsize=10)
+            ax.set_ylabel("Mean Rate (%)")
+            ax.tick_params(axis="x", labelrotation=90, labelsize=8)
+            st.pyplot(fig)
+
+        with col2:
+            st.subheader("Predicted Pareto (Baseline Model)")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            pareto_pred = predicted_pareto(df, rf_base, defect_cols, st.session_state.OrderQty)
+            pareto_pred.head(15).plot(kind="bar", ax=ax, color="skyblue")
+            ax.set_title("Weighted Expected Defects", fontsize=10)
+            ax.set_ylabel("Expected Count")
+            ax.tick_params(axis="x", labelrotation=90, labelsize=8)
+            st.pyplot(fig)
+
     else:
         st.info("👈 Enter inputs and click **Predict Scrap Performance** to run analysis.")
 
@@ -171,27 +176,34 @@ with tabs[1]:
     mtts_base = calculate_mtts(scrap_base)
     mtts_enh = calculate_mtts(scrap_enh)
 
-    st.metric("Baseline MTTS", f"{mtts_base}")
-    st.metric("Enhanced MTTS", f"{mtts_enh}")
+    col1, col2 = st.columns(2)
+    col1.metric("Baseline MTTS", f"{mtts_base}")
+    col2.metric("Enhanced MTTS", f"{mtts_enh}")
 
     st.markdown("""
     *Interpretation:*  
     The enhanced model increases predictive accuracy and extends MTTS,
     aligning with Campbell (2003) and DOE (2004) findings that coupled process variation
-    drives recurring defect clusters (the 'vital few').
+    drives recurring defect clusters (the “vital few”).
     """)
 
-    # Comparative Pareto
-    st.subheader("Model-Weighted Predicted Pareto Comparison")
-    pareto_base = predicted_pareto(df, rf_base, defect_cols, st.session_state.OrderQty)
-    pareto_enh = predicted_pareto(df, rf_enh, defect_cols + list(process_groups.keys()), st.session_state.OrderQty)
-
-    comp_df = pd.DataFrame({
-        "Baseline": pareto_base.head(10),
-        "Enhanced": pareto_enh.head(10)
-    }).fillna(0)
-
-    st.bar_chart(comp_df)
+    colA, colB = st.columns(2)
+    with colA:
+        st.subheader("Baseline Predicted Pareto")
+        fig, ax = plt.subplots(figsize=(5, 3))
+        pareto_base = predicted_pareto(df, rf_base, defect_cols, st.session_state.OrderQty)
+        pareto_base.head(15).plot(kind="bar", ax=ax, color="skyblue")
+        ax.set_title("Baseline Weighted Defects", fontsize=10)
+        ax.tick_params(axis="x", labelrotation=90, labelsize=8)
+        st.pyplot(fig)
+    with colB:
+        st.subheader("Enhanced Predicted Pareto")
+        fig, ax = plt.subplots(figsize=(5, 3))
+        pareto_enh = predicted_pareto(df, rf_enh, defect_cols + list(process_groups.keys()), st.session_state.OrderQty)
+        pareto_enh.head(15).plot(kind="bar", ax=ax, color="darkgreen")
+        ax.set_title("Process-Aware Weighted Defects", fontsize=10)
+        ax.tick_params(axis="x", labelrotation=90, labelsize=8)
+        st.pyplot(fig)
 
 # ================================================================
 # 🔹 TAB 3: MANAGER ENHANCED DASHBOARD (PROCESS-AWARE)
@@ -205,21 +217,31 @@ with tabs[2]:
         loss_enh = expected_scrap_enh * st.session_state.Cost
         mtts_enh = calculate_mtts(scrap_pred_enh)
 
-        st.metric("Predicted Scrap (%)", f"{scrap_pred_enh:.2f}%")
-        st.metric("Expected Scrap Count", f"{expected_scrap_enh:.0f}")
-        st.metric("Expected Loss ($)", f"${loss_enh:,.2f}")
-        st.metric("Mean Time to Scrap (MTTS)", f"{mtts_enh}")
+        colA, colB, colC, colD = st.columns(4)
+        colA.metric("Predicted Scrap (%)", f"{scrap_pred_enh:.2f}%")
+        colB.metric("Expected Scrap Count", f"{expected_scrap_enh:.0f}")
+        colC.metric("Expected Loss ($)", f"${loss_enh:,.2f}")
+        colD.metric("Mean Time to Scrap (MTTS)", f"{mtts_enh}")
 
-        # Enhanced Predicted Pareto
-        st.subheader("Predicted Pareto Scrap (Enhanced Model)")
-        pareto_enh = predicted_pareto(df, rf_enh, defect_cols + list(process_groups.keys()), st.session_state.OrderQty)
-        fig, ax = plt.subplots(figsize=(4, 2))
-        pareto_enh.head(15).plot(kind="bar", ax=ax, color="darkgreen")
-        ax.set_title("Enhanced Predicted Pareto — Multivariate Process Influence")
-        ax.set_ylabel("Expected Defect Count")
-        st.pyplot(fig)
-
+        # Side-by-side Paretos for Enhanced Model
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Historical Pareto (Observed)")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            pareto_hist = df[defect_cols].mean().sort_values(ascending=False)
+            pareto_hist.plot(kind="bar", ax=ax, color="steelblue")
+            ax.set_title("Observed Defect Rates", fontsize=10)
+            ax.tick_params(axis="x", labelrotation=90, labelsize=8)
+            st.pyplot(fig)
+        with col2:
+            st.subheader("Enhanced Predicted Pareto")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            pareto_enh = predicted_pareto(df, rf_enh, defect_cols + list(process_groups.keys()), st.session_state.OrderQty)
+            pareto_enh.head(15).plot(kind="bar", ax=ax, color="darkgreen")
+            ax.set_title("Multivariate Process Influence", fontsize=10)
+            ax.tick_params(axis="x", labelrotation=90, labelsize=8)
+            st.pyplot(fig)
     else:
         st.info("👈 Click **Predict (Enhanced Model)** to see process-aware predictions.")
 
-st.success("✅ Dashboard ready — MTTS & Pareto logic now matches original Foundry Dashboard.")
+st.success("✅ Dashboard ready — MTTS, weighted Pareto, and compact visuals now match original Foundry logic.")
