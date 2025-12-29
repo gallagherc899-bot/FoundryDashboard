@@ -9,6 +9,8 @@
 # performance using SPC principles and a multivariate machine learning
 # approach integrating process-defect relationships.
 # ================================================================
+st.set_page_config("Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
+
 
 import streamlit as st
 import pandas as pd
@@ -129,7 +131,7 @@ def train_and_evaluate(df, threshold, use_meta=False):
 # ------------------------------------------------
 # Streamlit Dashboard UI
 # ------------------------------------------------
-st.set_page_config("Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
+
 st.title("🏭 Aluminum Foundry Scrap Analytics Dashboard")
 st.markdown("""
 This dashboard integrates Statistical Process Control (SPC) with a multivariate Machine Learning model 
