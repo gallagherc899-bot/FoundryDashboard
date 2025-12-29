@@ -1,9 +1,9 @@
 # ================================================================
-# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v3)
+# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v4)
 # ================================================================
-# Identical UI to "Working Dashboard 12.28.25"
-# Internally enhanced with Campbell 9-Process correlations.
-# Includes context-aware feedback for thresholds above average scrap%.
+# Identical UI to original dashboard
+# Enhanced internally with Campbell 9-Process logic
+# Adds part-specific average scrap% and clear manager guidance
 # ================================================================
 
 import streamlit as st
@@ -91,13 +91,13 @@ def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
         )
 
 # ================================================================
-# 4️⃣ Model Training & Evaluation (Enhanced with Manager Feedback)
+# 4️⃣ Model Training & Evaluation (Part-Specific Averages)
 # ================================================================
-def train_and_evaluate(df, threshold):
+def train_and_evaluate(df_part, threshold):
     results = []
     features = defect_cols + process_indices
 
-    for train, val, test in rolling_splits(df):
+    for train, val, test in rolling_splits(df_part):
         for d in [train, val, test]:
             d["Label"] = (d["scrap_percent"] > threshold).astype(int)
 
@@ -105,9 +105,9 @@ def train_and_evaluate(df, threshold):
         X_val, y_val     = val[features], val["Label"]
         X_test, y_test   = test[features], test["Label"]
 
-        # Context-aware check for single-class scenario
+        # Context-aware check for single-class data
         if len(np.unique(y_train)) < 2:
-            avg_scrap = df["scrap_percent"].mean()
+            avg_scrap = df_part["scrap_percent"].mean()
             msg = (
                 f"ℹ️ The average scrap% for this part is **{avg_scrap:.2f}%**.  \n"
                 f"At your current threshold of **{threshold:.2f}%**, "
@@ -202,7 +202,8 @@ if predict:
                 "pareto_pred": pareto_pred,
                 "scrap_pred": scrap_pred,
                 "loss": loss,
-                "mtts": mtts
+                "mtts": mtts,
+                "df_part": df_part
             })
             st.success("✅ Prediction Complete!")
 
@@ -212,11 +213,13 @@ if predict:
 with tab1:
     st.header("📈 Scrap Risk & Pareto Dashboard")
     if "results" in st.session_state:
+        df_part = st.session_state.df_part
+        hist_scrap = df_part["scrap_percent"].mean()
+
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Predicted Scrap Risk", f"{st.session_state.scrap_pred:.2f}%")
         col2.metric("Expected Scrap Cost", f"${st.session_state.loss:,.2f}")
         col3.metric("MTTS (days)", f"{st.session_state.mtts:.1f}")
-        hist_scrap = df_part["scrap_percent"].mean()
         col4.metric("Historical Mean Scrap%", f"{hist_scrap:.2f}%")
 
         colA, colB = st.columns(2)
@@ -249,4 +252,4 @@ with tab2:
         ax.set_ylabel("Score")
         st.pyplot(fig)
 
-st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Context-Aware v3)")
+st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Part-Specific Context v4)")
