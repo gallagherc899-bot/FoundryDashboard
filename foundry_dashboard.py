@@ -1,3 +1,11 @@
+import streamlit as st
+
+# ✅ Page configuration (must be first Streamlit command)
+st.set_page_config(
+    page_title="Aluminum Foundry Scrap Analytics Dashboard",
+    layout="wide"
+)
+
 # ================================================================
 # 🧠 Aluminum Foundry Scrap Analytics Dashboard (Doctoral Version)
 # ================================================================
@@ -5,10 +13,6 @@
 # Based on Campbell (2003), Juran (1999), Taguchi (2004), AFS (2015)
 # ================================================================
 
-# ------------------------------------------------
-# ✅ Correct import order and Streamlit config
-# ------------------------------------------------
-import streamlit as st  # ✅ must come first
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,9 +24,6 @@ from sklearn.metrics import (
     f1_score, brier_score_loss
 )
 from tqdm import tqdm
-
-# ✅ must come immediately after imports
-st.set_page_config(page_title="Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
 
 # ------------------------------------------------
 # Load and prepare data
@@ -151,7 +152,7 @@ tab1, tab2, tab3 = st.tabs(["📈 Manager Dashboard", "📊 Research Comparison"
 # Run Prediction
 # ------------------------------------------------
 if predict:
-    with st.spinner("Running full rolling-window training... please wait (~1 min)..."):
+    with st.spinner("Running rolling-window training... please wait (~1 min)..."):
         df_part = df[df["Part_ID"].astype(str).str.contains(str(part_id), case=False, na=False)]
         if df_part.empty:
             df_part = df.copy()
@@ -171,10 +172,8 @@ if predict:
 
         expected_scrap_base = order_qty * (scrap_pred_base / 100)
         expected_scrap_enh  = order_qty * (scrap_pred_enh / 100)
-
         loss_base = expected_scrap_base * cost
         loss_enh  = expected_scrap_enh * cost
-
         mtts_base = (len(df_part) / (expected_scrap_base + 1)) * 7
         mtts_enh  = (len(df_part) / (expected_scrap_enh + 1)) * 7
 
