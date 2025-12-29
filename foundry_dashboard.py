@@ -8,17 +8,20 @@
 # ------------------------------------------------
 # ✅ Correct import order and Streamlit config
 # ------------------------------------------------
-import streamlit as st
+import streamlit as st  # ✅ must come first
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, brier_score_loss
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score,
+    f1_score, brier_score_loss
+)
 from tqdm import tqdm
 
-# ✅ must be placed immediately after imports
+# ✅ must come immediately after imports
 st.set_page_config(page_title="Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
 
 # ------------------------------------------------
@@ -56,7 +59,7 @@ for name, cols in process_groups.items():
     df[name] = df[present].mean(axis=1) if present else 0.0
 
 # ------------------------------------------------
-# Rolling 6–2–1 split
+# Rolling 6–2–1 split generator
 # ------------------------------------------------
 def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
     weeks = sorted(df["Week_Ending"].unique())
@@ -128,7 +131,7 @@ st.title("🏭 Aluminum Foundry Scrap Analytics Dashboard")
 st.markdown("""
 This dashboard integrates Statistical Process Control (SPC) and Machine Learning (Random Forest)
 to predict and analyze aluminum casting defects.  
-It models how multivariate process interactions influence scrap outcomes (Campbell, 2003).
+It models how **multivariate process interactions** influence scrap outcomes (Campbell, 2003).
 """)
 
 # Sidebar Inputs
