@@ -11,6 +11,8 @@
 # ------------------------------------------------
 # Inline comments reference SPC, Campbell (2003), Juran (1999), DOE (2004)
 # ================================================================
+import streamlit as st
+st.set_page_config(page_title="Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
 
 import streamlit as st
 import pandas as pd
