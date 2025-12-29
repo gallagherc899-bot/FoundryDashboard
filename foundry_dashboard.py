@@ -101,7 +101,7 @@ tabs = st.tabs([
 ])
 
 # ================================================================
-# 🔹 TAB 1: MANAGER DASHBOARD (Baseline)
+# 🔹 TAB 1: MANAGER DASHBOARD (Baseline) — With Predict Button
 # ================================================================
 with tabs[0]:
     st.header("Manager Dashboard — Baseline Model")
@@ -114,23 +114,30 @@ with tabs[0]:
     st.session_state.Cost = st.sidebar.number_input("Cost per Part ($)", min_value=0.01, value=25.0)
     st.session_state.Threshold = st.sidebar.slider("Scrap Threshold (%)", 0.0, 5.0, 2.5, 0.1)
 
-    # Baseline prediction (average probability)
-    scrap_pred = rf_base.predict_proba(df[defect_cols])[:, 1].mean() * 100
-    expected_scrap = st.session_state.OrderQty * (scrap_pred / 100)
-    loss = expected_scrap * st.session_state.Cost
+    # Add Predict Button
+    if st.sidebar.button("🔮 Predict Scrap Performance"):
+        # Baseline prediction (average probability)
+        scrap_pred = rf_base.predict_proba(df[defect_cols])[:, 1].mean() * 100
+        expected_scrap = st.session_state.OrderQty * (scrap_pred / 100)
+        loss = expected_scrap * st.session_state.Cost
 
-    st.metric("Predicted Scrap (%)", f"{scrap_pred:.2f}%")
-    st.metric("Expected Scrap Count", f"{expected_scrap:.0f}")
-    st.metric("Expected Loss ($)", f"${loss:,.2f}")
+        # Show output metrics
+        st.subheader(f"Results for Part ID: {st.session_state.PartID}")
+        st.metric("Predicted Scrap (%)", f"{scrap_pred:.2f}%")
+        st.metric("Expected Scrap Count", f"{expected_scrap:.0f}")
+        st.metric("Expected Loss ($)", f"${loss:,.2f}")
 
-    # Pareto Chart
-    st.subheader("Historical Scrap Pareto (Baseline)")
-    pareto = df[defect_cols].mean().sort_values(ascending=False)
-    fig, ax = plt.subplots(figsize=(8, 4))
-    pareto.plot(kind="bar", ax=ax, color="steelblue")
-    ax.set_title("Pareto of Scrap Defects — Baseline")
-    ax.set_ylabel("Mean Scrap Rate (%)")
-    st.pyplot(fig)
+        # Pareto Chart
+        st.subheader("Historical Scrap Pareto (Baseline)")
+        pareto = df[defect_cols].mean().sort_values(ascending=False)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        pareto.plot(kind="bar", ax=ax, color="steelblue")
+        ax.set_title("Pareto of Scrap Defects — Baseline")
+        ax.set_ylabel("Mean Scrap Rate (%)")
+        st.pyplot(fig)
+    else:
+        st.info("👈 Enter production details and click **Predict Scrap Performance** to run the analysis.")
+
 
 # ================================================================
 # 🔹 TAB 2: RESEARCH COMPARISON
