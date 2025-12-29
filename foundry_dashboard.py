@@ -1,9 +1,9 @@
 # ================================================================
-# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic)
+# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v2)
 # ================================================================
 # Identical UI to "Working Dashboard 12.28.25"
 # Internally enhanced with Campbell 9-Process correlations.
-# Streamlit page configuration removed for simplicity and stability.
+# Includes defensive fix for single-class thresholds.
 # ================================================================
 
 import streamlit as st
@@ -63,8 +63,6 @@ df, defect_cols = load_data()
 # ================================================================
 # 2️⃣ Campbell Process Index Calculation (ENHANCED LOGIC)
 # ================================================================
-# Each process index = mean of related defect rates that exist in your dataset.
-
 process_mapping = {
     "Sand_System_Index": ["sand_rate", "gas_porosity_rate", "runout_rate"],
     "Core_Making_Index": ["core_rate", "crush_rate", "missrun_rate"],
@@ -78,10 +76,10 @@ process_mapping = {
                         "outside_process_scrap_rate", "zyglo_rate"]
 }
 
-# Compute only for existing defect columns
+# Compute indices if corresponding defect columns exist
 for proc, cols in process_mapping.items():
-    available = [c for c in cols if c in df.columns]
-    df[proc] = df[available].mean(axis=1) if available else 0.0
+    existing = [c for c in cols if c in df.columns]
+    df[proc] = df[existing].mean(axis=1) if existing else 0.0
 
 process_indices = list(process_mapping.keys())
 
@@ -99,19 +97,25 @@ def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
         )
 
 # ================================================================
-# 4️⃣ Model Training Function (Enhanced Feature Set)
+# 4️⃣ Model Training & Evaluation (with IndexError Fix)
 # ================================================================
 def train_and_evaluate(df, threshold):
     results = []
-    features = defect_cols + process_indices  # add process indices silently
+    features = defect_cols + process_indices  # include both defect + process features
 
     for train, val, test in rolling_splits(df):
+        # Apply label threshold
         for d in [train, val, test]:
             d["Label"] = (d["scrap_percent"] > threshold).astype(int)
 
         X_train, y_train = train[features], train["Label"]
         X_val, y_val     = val[features], val["Label"]
         X_test, y_test   = test[features], test["Label"]
+
+        # Defensive: skip if y_train has only one class
+        if len(np.unique(y_train)) < 2:
+            st.warning("⚠️ Training set contains only one class at this threshold. Try lowering Scrap%.")
+            return pd.DataFrame(), None
 
         rf = RandomForestClassifier(
             n_estimators=180,
@@ -122,7 +126,7 @@ def train_and_evaluate(df, threshold):
         )
         rf.fit(X_train, y_train)
 
-        # Calibration (probabilistic smoothing)
+        # Calibration for smoother probability prediction
         try:
             cal = CalibratedClassifierCV(rf, method="sigmoid", cv=3)
             cal.fit(X_val, y_val)
@@ -130,8 +134,15 @@ def train_and_evaluate(df, threshold):
         except ValueError:
             model = rf
 
-        probs = model.predict_proba(X_test)[:, 1]
+        # Fix: handle single-class predict_proba outputs
+        probs = model.predict_proba(X_test)
+        if probs.shape[1] == 1:
+            probs = np.zeros(len(X_test))
+        else:
+            probs = probs[:, 1]
+
         preds = (probs > 0.5).astype(int)
+
         results.append({
             "accuracy": accuracy_score(y_test, preds),
             "precision": precision_score(y_test, preds, zero_division=0),
@@ -142,7 +153,7 @@ def train_and_evaluate(df, threshold):
     return pd.DataFrame(results), rf
 
 # ================================================================
-# 5️⃣ Streamlit UI (identical to original)
+# 5️⃣ Streamlit UI (Identical to Original)
 # ================================================================
 st.title("🏭 Aluminum Foundry Scrap Analytics Dashboard")
 
@@ -169,24 +180,30 @@ if predict:
 
         results, model = train_and_evaluate(df_part, threshold)
 
-        # Predict mean scrap risk
-        scrap_pred = model.predict_proba(df_part[defect_cols + process_indices])[:, 1].mean() * 100
-        expected_scrap = order_qty * (scrap_pred / 100)
-        loss = expected_scrap * cost
-        mtts = (len(df_part) / (expected_scrap + 1)) * 7
+        if model is not None and not results.empty:
+            scrap_pred = model.predict_proba(df_part[defect_cols + process_indices])
+            if scrap_pred.shape[1] == 1:
+                scrap_pred = np.zeros(len(df_part))
+            else:
+                scrap_pred = scrap_pred[:, 1]
 
-        pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
-        pareto_pred = pd.Series(model.feature_importances_, index=defect_cols + process_indices).sort_values(ascending=False)
+            scrap_pred = scrap_pred.mean() * 100
+            expected_scrap = order_qty * (scrap_pred / 100)
+            loss = expected_scrap * cost
+            mtts = (len(df_part) / (expected_scrap + 1)) * 7
 
-        st.session_state.update({
-            "results": results,
-            "pareto_hist": pareto_hist,
-            "pareto_pred": pareto_pred,
-            "scrap_pred": scrap_pred,
-            "loss": loss,
-            "mtts": mtts
-        })
-    st.success("✅ Prediction Complete!")
+            pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
+            pareto_pred = pd.Series(model.feature_importances_, index=defect_cols + process_indices).sort_values(ascending=False)
+
+            st.session_state.update({
+                "results": results,
+                "pareto_hist": pareto_hist,
+                "pareto_pred": pareto_pred,
+                "scrap_pred": scrap_pred,
+                "loss": loss,
+                "mtts": mtts
+            })
+            st.success("✅ Prediction Complete!")
 
 # ================================================================
 # 7️⃣ Dashboard Tab
@@ -229,4 +246,4 @@ with tab2:
         ax.set_ylabel("Score")
         st.pyplot(fig)
 
-st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Invisible in UI)")
+st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Stable v2)")
