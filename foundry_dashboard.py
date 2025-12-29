@@ -131,16 +131,24 @@ with tabs[0]:
         ax.set_ylabel("Mean Scrap Rate (%)")
         st.pyplot(fig)
 
-        # Predicted Pareto
-        st.subheader("Predicted Pareto Scrap (Baseline Model)")
-        pareto_pred = predicted_pareto(df, rf_base, defect_cols)
-        fig, ax = plt.subplots(figsize=(8, 4))
-        pareto_pred.head(15).plot(kind="bar", ax=ax, color="skyblue")
-        ax.set_title("Predicted Pareto — Baseline Model")
-        ax.set_ylabel("Predicted Mean (%)")
-        st.pyplot(fig)
-    else:
-        st.info("👈 Enter production details and click **Predict Scrap Performance** to run the analysis.")
+         # Predicted Pareto
+
+        def predicted_pareto(df, model, feature_list):
+            """Generate a model-weighted predicted pareto using feature correlation with predicted scrap."""
+            preds = model.predict_proba(df[feature_list])[:, 1]
+            df_temp = df.copy()
+            df_temp["Predicted_Scrap_Prob"] = preds
+
+            influences = {}
+            for f in feature_list:
+            corr = df_temp[[f, "Predicted_Scrap_Prob"]].corr().iloc[0, 1]
+            influences[f] = corr * df_temp[f].mean()
+
+            pareto_pred = pd.Series(influences).dropna().sort_values(ascending=False)
+            return pareto_pred
+
+        
+      
 
 # ================================================================
 # 🔹 TAB 2: RESEARCH COMPARISON (BASELINE VS ENHANCED)
