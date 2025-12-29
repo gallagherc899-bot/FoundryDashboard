@@ -1,12 +1,3 @@
-# ================================================================
-# 🏭 Aluminum Foundry Scrap Analytics Dashboard — v8.1 (ML-PHM Enhanced)
-# ================================================================
-# ✅ Original UI preserved (SPC diagnostic + ML predictive)
-# ✅ Campbell 9-process mapping (authoritative outline)
-# ✅ ML-PHM interpretive layer: defect–process influence table + insights
-# ✅ v8.1 adds data sufficiency check + stability fix for small parts
-# ================================================================
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -19,13 +10,16 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ================================================================
-# 1️⃣ Load data and prepare defect features
+# 🏭 Aluminum Foundry Scrap Analytics Dashboard — v8.2 (ML-PHM Enhanced)
 # ================================================================
+# ✅ No Streamlit title or set_page_config (to avoid order errors)
+# ✅ Keeps ML-PHM interpretive layer + Campbell logic + stability fix
+# ================================================================
+
 @st.cache_data
 def load_data():
     df = pd.read_csv("anonymized_parts.csv")
 
-    # Standardize column names (lowercase, underscores)
     df.columns = (
         df.columns.str.strip()
         .str.replace(r"[^\\w\\s]", "", regex=True)
@@ -43,25 +37,17 @@ def load_data():
     }
     df.rename(columns=rename_map, inplace=True)
 
-    # Ensure correct data types
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0.0)
     df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce").fillna(0.0)
 
-    # Drop rows without valid week_ending
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
-
-    # Identify all defect columns
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
 
     return df, defect_cols
 
-
 df, defect_cols = load_data()
 
-# ================================================================
-# 2️⃣ Campbell 9-Process Mapping (Authoritative version)
-# ================================================================
 campbell_mapping = {
     "Sand System and Preparation": ["sand_rate", "dirty_pattern_rate", "crush_rate", "runout_rate", "gas_porosity_rate"],
     "Core Making": ["core_rate", "gas_porosity_rate", "shrink_porosity_rate", "crush_rate"],
@@ -74,9 +60,6 @@ campbell_mapping = {
     "Inspection and Finishing": ["failed_zyglo_rate", "zyglo_rate", "outside_process_scrap_rate"],
 }
 
-# ================================================================
-# 3️⃣ Rolling training-validation-test split (6–2–1 weeks)
-# ================================================================
 def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
     weeks = sorted(df["week_ending"].unique())
     total = len(weeks) - (weeks_train + weeks_val + weeks_test) + 1
@@ -87,18 +70,13 @@ def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
             df[df["week_ending"].isin(weeks[i+weeks_train+weeks_val:i+weeks_train+weeks_val+weeks_test])].copy(),
         )
 
-# ================================================================
-# 4️⃣ Train model & evaluate with context awareness (v8.1 stability fix)
-# ================================================================
 def train_and_evaluate(df_part, threshold):
     features = defect_cols
 
-    # --- Global class balance check ---
     y_global = (df_part["scrap_percent"] > threshold).astype(int)
     pos = y_global.sum()
     neg = len(y_global) - pos
     pct_above = 100 * pos / len(y_global)
-    pct_below = 100 * neg / len(y_global)
     avg_scrap = df_part["scrap_percent"].mean()
 
     if pos == 0 or neg == 0:
@@ -152,7 +130,6 @@ def train_and_evaluate(df_part, threshold):
             }
         )
 
-    # --- Stability fix: handle small dataset or missing windows ---
     if len(results) == 0 or rf is None:
         st.warning(
             "⚠️ Not enough historical data to perform rolling validation for this Part ID. "
@@ -161,11 +138,6 @@ def train_and_evaluate(df_part, threshold):
         return pd.DataFrame(), None
 
     return pd.DataFrame(results), rf
-
-# ================================================================
-# 5️⃣ Streamlit UI
-# ================================================================
-st.title("🏭 Aluminum Foundry Scrap Analytics Dashboard")
 
 with st.sidebar:
     st.header("🔧 Manager Input Controls")
@@ -176,7 +148,6 @@ with st.sidebar:
     threshold = st.slider("Scrap% Threshold", 0.0, 5.0, 2.5, 0.5)
     predict = st.button("🔮 Predict")
 
-    # --- Data sufficiency check ---
     if part_id:
         df_check = df[df["part_id"].astype(str).str.lower() == str(part_id).lower()]
         weeks = df_check["week_ending"].nunique()
@@ -187,9 +158,6 @@ with st.sidebar:
 
 tab1, tab2 = st.tabs(["📈 Dashboard", "📊 Validation (6–2–1)"])
 
-# ================================================================
-# 6️⃣ Prediction + ML-PHM Analysis
-# ================================================================
 if predict:
     with st.spinner("⏳ Training enhanced model..."):
         if part_id:
@@ -214,7 +182,6 @@ if predict:
             pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
             pareto_pred = pd.Series(model.feature_importances_, index=defect_cols).sort_values(ascending=False)
 
-            # --- Process influence calculation ---
             process_influence = {}
             for process, defects in campbell_mapping.items():
                 valid = [d for d in defects if d in pareto_pred.index]
@@ -225,7 +192,6 @@ if predict:
             process_df["Influence_%"] = (process_df["Importance"] / process_df["Importance"].sum()) * 100
             process_df = process_df.sort_values("Influence_%", ascending=False)
 
-            # --- SPC vs ML alignment ---
             spc_top = pareto_hist.head(3).index.tolist()
             ml_top_process = process_df.head(3).index.tolist()
             overlap = set()
@@ -237,14 +203,14 @@ if predict:
 
             if alignment >= 0.5:
                 rec_text = (
-                    f"🟢 ML-PHM confirms SPC insight — {', '.join(ml_top_process[:2])} are consistent drivers.\\n"
+                    f"🟢 ML-PHM confirms SPC insight — {', '.join(ml_top_process[:2])} are consistent drivers.\n"
                     f"Focus on reinforcing best practices and monitoring in these processes."
                 )
             else:
                 rec_text = (
-                    f"⚠️ ML-PHM detects emerging or counter-intuitive process trends.\\n"
-                    f"SPC may emphasize {', '.join(list(overlap)[:2]) if overlap else 'different processes'},\\n"
-                    f"but ML indicates {', '.join(ml_top_process[:2])} as rising contributors.\\n"
+                    f"⚠️ ML-PHM detects emerging or counter-intuitive process trends.\n"
+                    f"SPC may emphasize {', '.join(list(overlap)[:2]) if overlap else 'different processes'},\n"
+                    f"but ML indicates {', '.join(ml_top_process[:2])} as rising contributors.\n"
                     f"Prioritize investigation and real-time monitoring in these areas."
                 )
 
@@ -261,11 +227,7 @@ if predict:
             })
             st.success("✅ Prediction and ML-PHM Analysis Complete!")
 
-# ================================================================
-# 7️⃣ Dashboard Tab
-# ================================================================
 with tab1:
-    st.header("📈 Scrap Risk & Pareto Dashboard")
     if "results" in st.session_state:
         df_part = st.session_state.df_part
         hist_scrap = df_part["scrap_percent"].mean()
@@ -294,11 +256,7 @@ with tab1:
         st.dataframe(st.session_state.process_df.style.format({"Influence_%": "{:.2f}"}))
         st.info(st.session_state.rec_text)
 
-# ================================================================
-# 8️⃣ Validation Tab
-# ================================================================
 with tab2:
-    st.header("📊 Rolling 6–2–1 Validation Results")
     if "results" in st.session_state:
         val_df = st.session_state.results
         st.dataframe(val_df.describe().T.style.format("{:.3f}"))
@@ -310,4 +268,4 @@ with tab2:
         ax.set_ylabel("Score")
         st.pyplot(fig)
 
-st.caption("© 2025 Foundry Analytics | Enhanced Campbell Logic (ML-PHM Framework v8.1)")
+st.caption("© 2025 Foundry Analytics | Enhanced Campbell Logic (ML-PHM Framework v8.2)")
