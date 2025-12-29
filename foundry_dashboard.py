@@ -133,7 +133,7 @@ with tabs[0]:
         # Historical Pareto
         st.subheader("Historical Scrap Pareto (Baseline)")
         pareto_hist = df[defect_cols].mean().sort_values(ascending=False)
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=(4, 2))
         pareto_hist.plot(kind="bar", ax=ax, color="steelblue")
         ax.set_title("Historical Pareto — Observed Defect Rates")
         ax.set_ylabel("Mean Rate (%)")
@@ -142,7 +142,7 @@ with tabs[0]:
         # Predicted Pareto (Weighted Expected Defects)
         st.subheader("Predicted Pareto Scrap (Baseline Model)")
         pareto_pred = predicted_pareto(df, rf_base, defect_cols, st.session_state.OrderQty)
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=(4, 2))
         pareto_pred.head(15).plot(kind="bar", ax=ax, color="skyblue")
         ax.set_title("Predicted Pareto — Weighted by Expected Defects")
         ax.set_ylabel("Expected Defect Count")
@@ -213,7 +213,7 @@ with tabs[2]:
         # Enhanced Predicted Pareto
         st.subheader("Predicted Pareto Scrap (Enhanced Model)")
         pareto_enh = predicted_pareto(df, rf_enh, defect_cols + list(process_groups.keys()), st.session_state.OrderQty)
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=(4, 2))
         pareto_enh.head(15).plot(kind="bar", ax=ax, color="darkgreen")
         ax.set_title("Enhanced Predicted Pareto — Multivariate Process Influence")
         ax.set_ylabel("Expected Defect Count")
