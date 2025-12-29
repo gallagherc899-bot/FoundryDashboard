@@ -7,6 +7,14 @@ matplotlib
 imbalanced-learn
 shap
 plotly>=5.0.0
+streamlit==1.39.0
+pandas==2.2.3
+numpy==1.26.4
+matplotlib==3.9.2
+seaborn==0.13.2
+scikit-learn==1.5.2
+shap==0.46.0
+tqdm==4.66.4
 
 
 
