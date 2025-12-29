@@ -1,7 +1,7 @@
 # ================================================================
-# 🏭 Foundry Scrap Prediction Dashboard — Final Research Version
+# 🏭 Foundry Scrap Prediction Dashboard — Baseline + Enhanced
 # Author: [Your Name]
-# Based on: Campbell (2003), Juran (1999), Taguchi (2004)
+# Based on Campbell (2003), Juran (1999), Taguchi (2004)
 # Date: 2025-12-29
 # ================================================================
 
@@ -17,7 +17,7 @@ from sklearn.metrics import (
 )
 
 # ------------------------------------------------------------
-# 0️⃣ Environment setup
+# 0️⃣ Setup
 # ------------------------------------------------------------
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message="`sklearn.utils.parallel.delayed`")
@@ -32,48 +32,44 @@ st.set_page_config(
 # ------------------------------------------------------------
 # 1️⃣ Dashboard Header
 # ------------------------------------------------------------
-st.title("🏭 Foundry Scrap Prediction Dashboard")
+st.title("🏭 Foundry Scrap Prediction Dashboard — Baseline vs Enhanced")
 st.markdown("""
 This dashboard integrates **Statistical Process Control (SPC)** concepts with  
 **Campbell’s (2003)** multivariate process–defect relationships to model and predict  
-scrap events in aluminum greensand foundries.
+scrap events in aluminum greensand foundries.  
+Compare the traditional *baseline defect-only model* to the *process-aware enhanced model*  
+and analyze how predicted defect priorities shift in the Pareto analysis.
 """)
 
 # ------------------------------------------------------------
-# 2️⃣ File Upload and Preprocessing
+# 2️⃣ File Upload
 # ------------------------------------------------------------
 uploaded = st.file_uploader("📂 Upload your Foundry Dataset (CSV)", type=["csv"])
 
 if uploaded is not None:
     df = pd.read_csv(uploaded)
-
-    # Clean and standardize column names
     df.columns = (
         df.columns.str.strip()
         .str.replace(r"[^\w\s]", "_", regex=True)
         .str.replace(r"\s+", "_", regex=True)
     )
 
-    # Ensure date format
     if "Week_Ending" in df.columns:
         df["Week_Ending"] = pd.to_datetime(df["Week_Ending"], errors="coerce")
         df = df.sort_values("Week_Ending").dropna(subset=["Week_Ending"])
     df = df.fillna(0)
 
-    # Normalize part ID naming
     if "Part_ID" in df.columns:
         df["Part_ID"] = df["Part_ID"].replace({"nan": "unknown", "": "unknown"})
 
-    # Identify all defect rate columns
     defect_cols = [c for c in df.columns if c.lower().endswith("rate")]
     st.success(f"✅ Dataset Loaded: {len(df)} records, {len(defect_cols)} defect rate columns detected.")
-
 else:
     st.warning("⬆️ Please upload a dataset to continue.")
     st.stop()
 
 # ------------------------------------------------------------
-# 3️⃣ Define Campbell Process Meta-Feature Groups
+# 3️⃣ Campbell Process Groups
 # ------------------------------------------------------------
 process_groups = {
     "Sand_System_Index": ["Sand_Rate", "Gas_Porosity_Rate", "Runout_Rate"],
@@ -88,20 +84,38 @@ for name, cols in process_groups.items():
     present = [c for c in cols if c in df.columns]
     df[name] = df[present].mean(axis=1) if present else 0.0
 
-st.markdown("### 🔧 Campbell Process Indices Generated")
-st.write(list(process_groups.keys()))
+process_cols = list(process_groups.keys())
 
 # ------------------------------------------------------------
 # 4️⃣ Sidebar Controls
 # ------------------------------------------------------------
 st.sidebar.header("⚙️ Model Configuration")
 threshold = st.sidebar.slider("Scrap % Threshold", 0.0, 5.0, 2.5, 0.5)
-compare_models = st.sidebar.checkbox("Compare Baseline vs. Enhanced", value=True)
+show_pareto = st.sidebar.checkbox("Show Pareto Comparison", value=True)
 
 # ------------------------------------------------------------
-# 5️⃣ Model Evaluation Function
+# 5️⃣ Train Models (Baseline & Enhanced)
 # ------------------------------------------------------------
-def evaluate_model(df, model, X_cols, threshold):
+y = (df["Scrap_"] > threshold).astype(int)
+
+# Baseline Model
+X_base = df[defect_cols]
+rf_base = RandomForestClassifier(
+    n_estimators=180, min_samples_leaf=2, class_weight="balanced", random_state=42, n_jobs=-1
+)
+rf_base.fit(X_base, y)
+
+# Enhanced Model
+X_enh = df[defect_cols + process_cols]
+rf_enh = RandomForestClassifier(
+    n_estimators=180, min_samples_leaf=2, class_weight="balanced", random_state=42, n_jobs=-1
+)
+rf_enh.fit(X_enh, y)
+
+# ------------------------------------------------------------
+# 6️⃣ Evaluate Models
+# ------------------------------------------------------------
+def evaluate_model(df, model, X_cols):
     y_true = (df["Scrap_"] > threshold).astype(int)
     probs = model.predict_proba(df[X_cols])[:, 1]
     preds = (probs > 0.5).astype(int)
@@ -113,55 +127,65 @@ def evaluate_model(df, model, X_cols, threshold):
         "Brier": brier_score_loss(y_true, probs)
     }
 
-# ------------------------------------------------------------
-# 6️⃣ Train Models (Baseline and Enhanced)
-# ------------------------------------------------------------
-st.subheader("🧠 Model Training and Evaluation")
+results = pd.DataFrame([
+    evaluate_model(df, rf_base, defect_cols),
+    evaluate_model(df, rf_enh, defect_cols + process_cols)
+], index=["Baseline", "Enhanced"])
 
-y = (df["Scrap_"] > threshold).astype(int)
-process_cols = [c for c in df.columns if c.endswith("_Index")]
-
-# Baseline Model (Defect Rates Only)
-X_base = df[defect_cols]
-rf_base = RandomForestClassifier(
-    n_estimators=180, min_samples_leaf=2, class_weight="balanced", random_state=42, n_jobs=-1
-)
-rf_base.fit(X_base, y)
-base_results = evaluate_model(df, rf_base, defect_cols, threshold)
-
-# Enhanced Model (Defects + Process Indices)
-X_enh = df[defect_cols + process_cols]
-rf_enh = RandomForestClassifier(
-    n_estimators=180, min_samples_leaf=2, class_weight="balanced", random_state=42, n_jobs=-1
-)
-rf_enh.fit(X_enh, y)
-enh_results = evaluate_model(df, rf_enh, defect_cols + process_cols, threshold)
+st.subheader("📈 Model Performance Comparison")
+st.dataframe(results.style.highlight_max(axis=0, color="lightgreen"))
 
 # ------------------------------------------------------------
-# 7️⃣ Display Model Comparison
+# 7️⃣ Pareto Comparison
 # ------------------------------------------------------------
-if compare_models:
-    st.markdown("### 📊 Baseline vs. Enhanced Model Comparison")
+if show_pareto:
+    st.subheader("📊 Baseline vs Enhanced Predicted Pareto")
 
-    results_df = pd.DataFrame([base_results, enh_results], index=["Baseline", "Enhanced"])
-    st.dataframe(results_df.style.highlight_max(axis=0, color="lightgreen"))
+    df["Baseline_Prob"] = rf_base.predict_proba(df[defect_cols])[:, 1]
+    df["Enhanced_Prob"] = rf_enh.predict_proba(df[defect_cols + process_cols])[:, 1]
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    results_df.plot(kind="bar", ax=ax, color=["#a6cee3", "#1f78b4"])
-    plt.title("Model Performance Comparison (Baseline vs. Enhanced)")
-    plt.ylabel("Metric Value")
+    def pareto_data(prob_col, label):
+        defect_contrib = df[defect_cols].multiply(df[prob_col], axis=0).mean().sort_values(ascending=False)
+        pareto = defect_contrib.reset_index()
+        pareto.columns = ["Defect", "Weighted_Impact"]
+        pareto["Model"] = label
+        return pareto
+
+    pareto_base = pareto_data("Baseline_Prob", "Baseline")
+    pareto_enh = pareto_data("Enhanced_Prob", "Enhanced")
+    combined_pareto = pd.concat([pareto_base, pareto_enh])
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.barplot(
+        data=combined_pareto,
+        x="Weighted_Impact", y="Defect", hue="Model",
+        palette=["#66c2a5", "#fc8d62"], ax=ax
+    )
+    plt.title("Baseline vs Enhanced Predicted Pareto Comparison")
+    plt.xlabel("Predicted Weighted Scrap Impact")
+    plt.ylabel("Defect Type")
+    plt.legend(title="Model")
     plt.grid(alpha=0.3)
     st.pyplot(fig)
 
+    # Delta Comparison Table
+    comparison = (
+        pareto_enh.set_index("Defect")["Weighted_Impact"]
+        .subtract(pareto_base.set_index("Defect")["Weighted_Impact"], fill_value=0)
+        .sort_values(ascending=False)
+        .reset_index()
+    )
+    comparison.columns = ["Defect", "Change_in_Impact"]
+
+    st.markdown("### 🔄 Change in Defect Impact (Enhanced − Baseline)")
+    st.dataframe(comparison.style.background_gradient(cmap="coolwarm", axis=0))
+
     st.info("""
-    ✅ The **Enhanced Model** integrates process-level meta-features based on Campbell (2003),  
-    improving F1 and calibration performance.  
-    This demonstrates that incorporating **multivariate process–defect interactions** enhances prediction  
-    compared to univariate SPC-style monitoring.
+    This analysis compares predicted defect contributions between models.
+    Defects with **positive ΔImpact** are those whose likelihood is better explained  
+    by **multivariate process interactions**, while negative changes indicate defects  
+    dominated by **single-process variation** (SPC-suitable).
     """)
-else:
-    st.markdown("### 🔍 Enhanced Model Results (Process-Aware Only)")
-    st.json(enh_results)
 
 # ------------------------------------------------------------
 # 8️⃣ Feature Importances
@@ -178,4 +202,4 @@ plt.tight_layout()
 st.pyplot(fig)
 
 st.caption("Model trained using RandomForest (180 estimators, class_weight='balanced').")
-st.caption("All process indices computed per Campbell (2003), *Castings Practice: The Ten Rules of Castings.*")
+st.caption("Process indices computed per Campbell (2003), *Castings Practice: The Ten Rules of Castings.*")
