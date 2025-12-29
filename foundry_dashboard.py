@@ -1,9 +1,10 @@
 # ================================================================
-# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v5)
+# 🏭 Aluminum Foundry Scrap Analytics Dashboard (Enhanced Logic v6)
 # ================================================================
-# UI identical to your original dashboard
-# Internal logic enhanced with Campbell 9-Process indices
-# Includes per-Part scrap% context and natural language feedback
+# ✅ UI identical to the original
+# ✅ Campbell 9-Process predictive enhancement
+# ✅ Per-Part accuracy, exact matching via "Part ID"
+# ✅ Human-readable contextual guidance
 # ================================================================
 
 import streamlit as st
@@ -24,6 +25,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 def load_data():
     df = pd.read_csv("anonymized_parts.csv")
 
+    # Clean column names
     df.columns = (
         df.columns.str.strip()
         .str.replace(r"[^\w\s]", "", regex=True)
@@ -31,23 +33,29 @@ def load_data():
         .str.lower()
     )
 
+    # --- Rename columns (use only Part ID as main identifier) ---
     rename_map = {
-        "work_order": "part_id",
-        "work_order_#": "part_id",
+        "part_id": "part_id",  # safe redundancy
+        "partid": "part_id",
+        "part_id_": "part_id",
+        "work_order": "work_order",
+        "work_order_#": "work_order",
+        "order_quantity": "order_quantity",
         "scrap%": "scrap_percent",
         "scrap": "scrap_percent",
         "scrap_percent": "scrap_percent",
-        "order_quantity": "order_quantity",
         "week_ending": "week_ending",
     }
     df.rename(columns=rename_map, inplace=True)
 
+    # --- Data cleaning ---
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0.0)
     df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce").fillna(0.0)
 
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
+
     return df, defect_cols
 
 
@@ -76,7 +84,7 @@ for proc, cols in process_mapping.items():
 process_indices = list(process_mapping.keys())
 
 # ================================================================
-# 3️⃣ Rolling 6-2-1 Split
+# 3️⃣ Rolling 6–2–1 Split
 # ================================================================
 def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
     weeks = sorted(df["week_ending"].unique())
@@ -90,7 +98,7 @@ def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
         )
 
 # ================================================================
-# 4️⃣ Train & Evaluate (part-aware)
+# 4️⃣ Train & Evaluate
 # ================================================================
 def train_and_evaluate(df_part, threshold):
     results = []
@@ -101,19 +109,16 @@ def train_and_evaluate(df_part, threshold):
             d["Label"] = (d["scrap_percent"] > threshold).astype(int)
 
         X_train, y_train = train[features], train["Label"]
-        X_val, y_val     = val[features], val["Label"]
-        X_test, y_test   = test[features], test["Label"]
+        X_val, y_val = val[features], val["Label"]
+        X_test, y_test = test[features], test["Label"]
 
-        # --- Handle single-class case with contextual message ---
+        # --- Handle single-class cases gracefully ---
         if len(np.unique(y_train)) < 2:
-            if "part_id" in df_part.columns and df_part["part_id"].nunique() == 1:
-                avg_scrap = df_part["scrap_percent"].mean()
-            else:
-                avg_scrap = df_part.groupby("part_id")["scrap_percent"].mean().mean()
-
+            avg_scrap = df_part["scrap_percent"].mean()
             msg = (
                 f"ℹ️ The average scrap% for this part is **{avg_scrap:.2f}%**.  \n"
-                f"At your current threshold of **{threshold:.2f}%**, the model finds all runs already below this level — "
+                f"At your current threshold of **{threshold:.2f}%**, "
+                f"the model finds all runs already below this level — "
                 f"so you’re effectively at **100% yield** for that target.  \n\n"
                 f"➡️ To reduce scrap below the current average of {avg_scrap:.2f}%, "
                 f"try selecting a **lower threshold**."
@@ -122,8 +127,11 @@ def train_and_evaluate(df_part, threshold):
             return pd.DataFrame(), None
 
         rf = RandomForestClassifier(
-            n_estimators=180, min_samples_leaf=2,
-            class_weight="balanced", random_state=42, n_jobs=-1
+            n_estimators=180,
+            min_samples_leaf=2,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1
         )
         rf.fit(X_train, y_train)
 
@@ -155,7 +163,7 @@ st.title("🏭 Aluminum Foundry Scrap Analytics Dashboard")
 
 with st.sidebar:
     st.header("🔧 Manager Input Controls")
-    part_id = st.text_input("Enter Part ID")
+    part_id = st.text_input("Enter Part ID (matches 'Part ID' column exactly)")
     order_qty = st.number_input("Order Quantity", min_value=1, value=100)
     weight = st.number_input("Piece Weight (lbs)", min_value=0.0, value=10.0)
     cost = st.number_input("Cost per Part ($)", min_value=0.0, value=50.0)
@@ -170,7 +178,12 @@ tab1, tab2 = st.tabs(["📈 Dashboard", "📊 Validation (6–2–1)"])
 # ================================================================
 if predict:
     with st.spinner("⏳ Training enhanced predictive model..."):
-        df_part = df.copy() if not part_id else df[df["part_id"].astype(str).str.contains(str(part_id), case=False, na=False)]
+        # --- Exact match on Part ID ---
+        if part_id:
+            df_part = df[df["part_id"].astype(str).str.strip().str.lower() == str(part_id).strip().lower()]
+        else:
+            df_part = df.copy()
+
         if df_part.empty:
             st.warning(f"No data found for Part ID '{part_id}'. Using full dataset.")
             df_part = df.copy()
@@ -189,8 +202,9 @@ if predict:
             pareto_pred = pd.Series(model.feature_importances_, index=defect_cols + process_indices).sort_values(ascending=False)
 
             st.session_state.update({
-                "results": results, "pareto_hist": pareto_hist, "pareto_pred": pareto_pred,
-                "scrap_pred": scrap_pred, "loss": loss, "mtts": mtts, "df_part": df_part
+                "results": results, "pareto_hist": pareto_hist,
+                "pareto_pred": pareto_pred, "scrap_pred": scrap_pred,
+                "loss": loss, "mtts": mtts, "df_part": df_part
             })
             st.success("✅ Prediction Complete!")
 
@@ -239,4 +253,4 @@ with tab2:
         ax.set_ylabel("Score")
         st.pyplot(fig)
 
-st.caption("© 2025 Foundry Analytics | Internal Enhanced Logic (Part-Specific Context v5)")
+st.caption("© 2025 Foundry Analytics | Enhanced Logic (Exact-Match v6)")
