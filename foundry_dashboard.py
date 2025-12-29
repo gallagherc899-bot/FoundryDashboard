@@ -5,6 +5,9 @@
 # Based on Campbell (2003), Juran (1999), Taguchi (2004), AFS (2015)
 # ================================================================
 
+# ------------------------------------------------
+# ✅ Correct import order and Streamlit config
+# ------------------------------------------------
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -15,9 +18,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, brier_score_loss
 from tqdm import tqdm
 
-# ------------------------------------------------
-# ✅ Page Config — must come before any Streamlit UI call
-# ------------------------------------------------
+# ✅ must be placed immediately after imports
 st.set_page_config(page_title="Aluminum Foundry Scrap Analytics Dashboard", layout="wide")
 
 # ------------------------------------------------
@@ -50,7 +51,6 @@ process_groups = {
     "Finishing_Index": ["Over_Grind_Rate", "Bent_Rate", "Gouged_Rate", "Shift_Rate"],
 }
 
-# Add meta-features
 for name, cols in process_groups.items():
     present = [c for c in cols if c in df.columns]
     df[name] = df[present].mean(axis=1) if present else 0.0
@@ -126,9 +126,9 @@ def train_and_evaluate(df, threshold, use_meta=False):
 # ------------------------------------------------
 st.title("🏭 Aluminum Foundry Scrap Analytics Dashboard")
 st.markdown("""
-This dashboard integrates Statistical Process Control (SPC) with Machine Learning (Random Forest)
+This dashboard integrates Statistical Process Control (SPC) and Machine Learning (Random Forest)
 to predict and analyze aluminum casting defects.  
-It demonstrates how multivariate process relationships (Campbell, 2003) influence scrap generation.
+It models how multivariate process interactions influence scrap outcomes (Campbell, 2003).
 """)
 
 # Sidebar Inputs
@@ -148,14 +148,14 @@ tab1, tab2, tab3 = st.tabs(["📈 Manager Dashboard", "📊 Research Comparison"
 # Run Prediction
 # ------------------------------------------------
 if predict:
-    with st.spinner("Training models and computing predictions..."):
+    with st.spinner("Running full rolling-window training... please wait (~1 min)..."):
         df_part = df[df["Part_ID"].astype(str).str.contains(str(part_id), case=False, na=False)]
         if df_part.empty:
             df_part = df.copy()
             st.warning(f"No records found for Part ID '{part_id}'. Using full dataset instead.")
 
         base_res = train_and_evaluate(df_part, threshold, use_meta=False)
-        enh_res = train_and_evaluate(df_part, threshold, use_meta=True)
+        enh_res  = train_and_evaluate(df_part, threshold, use_meta=True)
 
         df_part["Label"] = (df_part["Scrap_"] > threshold).astype(int)
         rf_base = RandomForestClassifier(n_estimators=180, min_samples_leaf=2, class_weight="balanced", random_state=42)
@@ -172,8 +172,7 @@ if predict:
         loss_base = expected_scrap_base * cost
         loss_enh  = expected_scrap_enh * cost
 
-        # MTTS (Mean Time To Scrap)
-        mtts_base = (len(df_part) / (expected_scrap_base + 1)) * 7  # weekly data → approx days
+        mtts_base = (len(df_part) / (expected_scrap_base + 1)) * 7
         mtts_enh  = (len(df_part) / (expected_scrap_enh + 1)) * 7
 
         pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
