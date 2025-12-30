@@ -1,6 +1,6 @@
 # ============================================================
 # 🏭 Foundry Scrap Risk Dashboard
-# Dynamic 6–2–1 retraining + iterative expansion + calibration-safe feature importances (final verified)
+# Dynamic 6–2–1 retraining + similarity expansion + calibration-safe feature importances
 # ============================================================
 
 import warnings
@@ -27,32 +27,27 @@ MIN_SAMPLES_LEAF = 2
 # ✅ Safe Feature Importances (Universal)
 # ============================================================
 def safe_feature_importances(model):
-    """
-    Extracts feature importances safely from any model, including calibrated wrappers or ensembles.
-    """
+    """Extracts feature importances safely from any model type."""
     try:
-        # Case 1: Direct RandomForest or similar
+        # Direct RandomForest case
         if hasattr(model, "feature_importances_"):
             return model.feature_importances_
 
-        # Case 2: CalibratedClassifierCV wrapper
+        # CalibratedClassifierCV wrapper
         if hasattr(model, "base_estimator"):
             base = model.base_estimator
-            # Some calibrators hold a list of base models
             if isinstance(base, list):
                 base = base[0]
             if hasattr(base, "feature_importances_"):
                 return base.feature_importances_
 
-        # Case 3: Ensemble list (rare)
+        # Ensemble list (rare)
         if hasattr(model, "estimators_") and len(model.estimators_) > 0:
             est = model.estimators_[0]
             if hasattr(est, "feature_importances_"):
                 return est.feature_importances_
-
     except Exception:
         pass
-
     return np.zeros(1)
 
 # ============================================================
