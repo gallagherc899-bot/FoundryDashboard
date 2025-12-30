@@ -154,7 +154,8 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     
     # Clean part_id
     if "part_id" in df.columns:
-        df["part_id"] = df["part_id"].astype(str).replace({"nan": "Unknown", "": "Unknown"}).str.strip()
+        df["part_id"] = df["part_id"].astype(str).str.strip()
+        df["part_id"] = df["part_id"].replace({"nan": "Unknown", "": "Unknown", "None": "Unknown"})
 
     st.info(f"✅ Loaded {len(df):,} rows, {len(defect_cols)} defect rate columns")
     return df
