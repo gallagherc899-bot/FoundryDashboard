@@ -1,5 +1,5 @@
 # ============================================================
-# 🏭 Foundry Scrap Risk Dashboard (Dynamic Auto 6–2–1 with Auto-Expansion Fallback)
+# 🏭 Foundry Scrap Risk Dashboard (Dynamic Auto 6–2–1 + Auto-Expansion Fallback)
 # ============================================================
 
 import warnings
@@ -12,7 +12,6 @@ import pandas as pd
 import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 # -------------------------------
 # Streamlit setup
@@ -21,7 +20,6 @@ st.set_page_config(page_title="Foundry Scrap Risk Dashboard", layout="wide")
 
 RANDOM_STATE = 42
 DEFAULT_ESTIMATORS = 180
-DEFAULT_THRESHOLD = 6.5
 MIN_SAMPLES_LEAF = 2
 
 # ============================================================
@@ -31,9 +29,11 @@ MIN_SAMPLES_LEAF = 2
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
 
+    # Flatten MultiIndex if exists
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ["_".join([str(x) for x in col if str(x) != "None"]).strip() for col in df.columns.values]
 
+    # Clean headers
     df.columns = (
         pd.Index(df.columns)
         .str.strip()
@@ -43,18 +43,18 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         .str.lower()
     )
 
+    # Drop disallowed columns
     forbidden_cols = [c for c in df.columns if "work_order" in c]
     if forbidden_cols:
         df.drop(columns=forbidden_cols, inplace=True, errors="ignore")
         st.warning(f"⚠ Dropped disallowed columns: {forbidden_cols}")
 
+    # Rename relevant columns
     rename_map = {
         "order_quantity": "order_quantity",
         "pieces_scrapped": "pieces_scrapped",
         "total_scrap_weight_lbs": "total_scrap_weight_lbs",
         "scrap_percent": "scrap_percent",
-        "scrap": "scrap_percent",
-        "scrap_": "scrap_percent",
         "sellable": "sellable",
         "heats": "heats",
         "week_ending": "week_ending",
@@ -63,6 +63,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     }
     df.rename(columns=rename_map, inplace=True)
 
+    # Ensure part_id column
     if "part_id" not in df.columns:
         for c in df.columns:
             if "part" in c and "id" in c:
@@ -72,22 +73,17 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         st.error("❌ No 'Part ID' column found — please add one to your CSV.")
         st.stop()
 
-    if (df.columns == "part_id").sum() > 1:
-        first_idx = np.where(df.columns == "part_id")[0][0]
-        keep_mask = np.ones(len(df.columns), dtype=bool)
-        dup_idx = np.where(df.columns == "part_id")[0][1:]
-        keep_mask[dup_idx] = False
-        df = df.loc[:, keep_mask]
-        st.warning("⚠ Multiple 'Part ID' columns detected — keeping the first.")
-
+    # Flatten part_id if multi-column
     if isinstance(df["part_id"], pd.DataFrame):
         df["part_id"] = df["part_id"].iloc[:, 0]
     df["part_id"] = df["part_id"].astype(str).replace({"nan": "unknown", "": "unknown"}).str.strip()
 
+    # Numeric conversions
     num_cols = [c for c in df.columns if c.endswith("_rate") or "scrap" in c or "weight" in c or "quantity" in c]
     for c in num_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
+    # Parse dates
     if "week_ending" in df.columns:
         df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
         df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
@@ -119,13 +115,26 @@ def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, def
     return s
 
 def make_xy(df, thr_label, use_rate_cols):
+    # 🔧 FIX: Ensure numeric comparison for scrap_percent
+    df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0)
+
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
     if use_rate_cols:
         feats += [c for c in df.columns if c.endswith("_rate")]
     for f in feats:
         if f not in df.columns:
             df[f] = 0.0
+
     y = (df["scrap_percent"] > thr_label).astype(int)
+
+    # Guardrail: Stop if all samples are one class
+    if y.nunique() < 2:
+        st.warning(
+            f"⚠ Not enough label diversity after applying scrap threshold {thr_label}%. "
+            f"All samples are of one class — model cannot learn risk under this threshold."
+        )
+        st.stop()
+
     X = df[feats]
     return X, y, feats
 
@@ -137,21 +146,12 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
         random_state=RANDOM_STATE,
         n_jobs=-1,
     ).fit(X_train, y_train)
+
     pos = int(y_calib.sum())
     if pos == 0 or pos == len(y_calib):
         return rf, rf, "uncalibrated"
     cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
     return rf, cal, "calibrated (sigmoid, cv=3)"
-
-def get_feature_importances(model):
-    try:
-        if hasattr(model, "feature_importances_"):
-            return model.feature_importances_
-        elif hasattr(model, "base_estimator") and hasattr(model.base_estimator, "feature_importances_"):
-            return model.base_estimator.feature_importances_
-    except Exception:
-        pass
-    return np.zeros(1)
 
 # ============================================================
 # Dynamic part-based data expansion
@@ -197,7 +197,7 @@ st.sidebar.header("📂 Data Source")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
 
 st.sidebar.header("⚙️ Model Controls")
-thr_label = st.sidebar.slider("Scrap % threshold (Label & MTTF)", 1.0, 15.0, DEFAULT_THRESHOLD, 0.5)
+thr_label = st.sidebar.slider("Scrap % threshold (Label & MTTF)", 1.0, 15.0, 6.5, 0.5)
 use_rate_cols = st.sidebar.checkbox("Include *_rate process features", True)
 n_est = st.sidebar.slider("Number of trees (n_estimators)", 50, 300, DEFAULT_ESTIMATORS, 10)
 
