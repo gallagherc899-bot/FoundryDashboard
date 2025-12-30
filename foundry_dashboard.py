@@ -555,7 +555,7 @@ with tab1:
             # ================================================================
             st.markdown("### 🔬 Detailed Defect Analysis")
             
-            defect_cols = [c for c in df.columns if c.endswith("_rate")]
+            defect_cols = [c for c in df_full.columns if c.endswith("_rate")]
             
             if len(defect_cols) > 0:
                 # Get historical baseline for this part (or similar parts)
