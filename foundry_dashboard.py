@@ -228,7 +228,70 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
 
 
 # ================================================================
-# PROCESS DIAGNOSIS FUNCTIONS
+# DYNAMIC PART-SPECIFIC DATA PREPARATION
+# ================================================================
+def prepare_part_specific_data(df_full: pd.DataFrame, target_part: str, 
+                                piece_weight: float, thr_label: float, 
+                                min_samples: int = 30):
+    """
+    Prepare part-specific dataset with similarity-based expansion.
+    Ensures label diversity for training.
+    """
+    st.info(f"🔍 Preparing data for Part {target_part}...")
+    
+    # Start with exact part matches
+    df_part = df_full[df_full["part_id"] == target_part].copy()
+    
+    # If we don't have enough samples, expand by similarity
+    if len(df_part) < min_samples:
+        st.info(f"⚠️ Only {len(df_part)} samples for Part {target_part}. Expanding search...")
+        
+        # Find similar parts by weight
+        weight_tolerance = 0.1  # Start with ±10%
+        max_tolerance = 0.5     # Max ±50%
+        
+        while len(df_part) < min_samples and weight_tolerance <= max_tolerance:
+            lower = piece_weight * (1 - weight_tolerance)
+            upper = piece_weight * (1 + weight_tolerance)
+            
+            df_similar = df_full[
+                (df_full["piece_weight_lbs"] >= lower) & 
+                (df_full["piece_weight_lbs"] <= upper)
+            ].copy()
+            
+            df_part = df_similar.copy()
+            weight_tolerance += 0.1
+        
+        st.info(f"✅ Found {len(df_part)} similar samples (±{(weight_tolerance-0.1)*100:.0f}% weight tolerance)")
+    
+    # Check label diversity
+    df_part["temp_label"] = (df_part["scrap_percent"] > thr_label).astype(int)
+    label_counts = df_part["temp_label"].value_counts()
+    
+    if len(label_counts) < 2 or label_counts.min() < MIN_SAMPLES_PER_CLASS:
+        st.warning(f"⚠️ Insufficient label diversity. Expanding to broader dataset...")
+        # Use much broader weight range
+        lower = piece_weight * 0.5
+        upper = piece_weight * 1.5
+        df_part = df_full[
+            (df_full["piece_weight_lbs"] >= lower) & 
+            (df_full["piece_weight_lbs"] <= upper)
+        ].copy()
+        df_part["temp_label"] = (df_part["scrap_percent"] > thr_label).astype(int)
+        label_counts = df_part["temp_label"].value_counts()
+        
+        if len(label_counts) < 2 or label_counts.min() < MIN_SAMPLES_PER_CLASS:
+            st.error("❌ Cannot find sufficient label diversity even with broad search.")
+            return None
+    
+    df_part = df_part.drop(columns=["temp_label"])
+    
+    st.success(f"✅ Dataset prepared: {len(df_part)} samples, Labels: {label_counts.to_dict()}")
+    return df_part
+
+
+# ================================================================
+# PROCESS ROOT CAUSE DIAGNOSIS
 # ================================================================
 def calculate_process_indices(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate Campbell process indices from defect rates"""
@@ -346,28 +409,29 @@ if not os.path.exists(csv_path):
     st.stop()
 
 # -------------------------------
-# Data preparation
+# Load base dataset (for validation tab only)
 # -------------------------------
-df = load_and_clean(csv_path)
-df = calculate_process_indices(df)
+df_base = load_and_clean(csv_path)
+df_base = calculate_process_indices(df_base)
 
-df_train, df_calib, df_test = time_split(df)
+# Split for validation metrics
+df_train_base, df_calib_base, df_test_base = time_split(df_base)
 
-mtbf_train = compute_mtbf_on_train(df_train, thr_label)
-part_freq_train = df_train["part_id"].value_counts(normalize=True)
+# Train base model for validation tab
+mtbf_train_base = compute_mtbf_on_train(df_train_base, thr_label)
+part_freq_train_base = df_train_base["part_id"].value_counts(normalize=True)
+default_mtbf_base = float(mtbf_train_base["mttf_scrap"].median()) if len(mtbf_train_base) else 1.0
+default_freq_base = float(part_freq_train_base.median()) if len(part_freq_train_base) else 0.0
 
-default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
-default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
+df_train_base = attach_train_features(df_train_base, mtbf_train_base, part_freq_train_base, default_mtbf_base, default_freq_base)
+df_calib_base = attach_train_features(df_calib_base, mtbf_train_base, part_freq_train_base, default_mtbf_base, default_freq_base)
+df_test_base = attach_train_features(df_test_base, mtbf_train_base, part_freq_train_base, default_mtbf_base, default_freq_base)
 
-df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
-df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
-df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
+X_train_base, y_train_base, feats_base = make_xy(df_train_base, thr_label, use_rate_cols)
+X_calib_base, y_calib_base, _ = make_xy(df_calib_base, thr_label, use_rate_cols)
+rf_base, cal_model_base, method_base = train_and_calibrate(X_train_base, y_train_base, X_calib_base, y_calib_base, n_est)
 
-X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
-X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
-rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
-
-st.success(f"✅ Model trained: {method}, {len(X_train)} samples")
+st.success(f"✅ Base model loaded: {method_base}, {len(X_train_base)} samples")
 
 # -------------------------------
 # TABS
@@ -389,6 +453,73 @@ with tab1:
 
     if st.button("🎯 Predict Risk & Diagnose Process"):
         try:
+            # 🔥 CLEAR ALL CACHES FOR FRESH TRAINING
+            st.cache_data.clear()
+            
+            st.info("🔄 Retraining model with part-specific dataset...")
+            
+            # Reload full dataset
+            df_full = load_and_clean(csv_path)
+            df_full = calculate_process_indices(df_full)
+            
+            # Prepare part-specific dataset
+            df_part = prepare_part_specific_data(
+                df_full, 
+                part_id_input, 
+                piece_weight, 
+                thr_label, 
+                min_samples=30
+            )
+            
+            if df_part is None:
+                st.error("❌ Cannot proceed with prediction - insufficient data diversity")
+                st.stop()
+            
+            # Time-based split
+            df_train, df_calib, df_test = time_split(df_part)
+            
+            # Check each split has both labels
+            for split_name, split_df in [("train", df_train), ("calib", df_calib)]:
+                split_labels = (split_df["scrap_percent"] > thr_label).astype(int)
+                if split_labels.nunique() < 2:
+                    st.warning(f"⚠️ {split_name} split lacks diversity. Using stratified split...")
+                    from sklearn.model_selection import train_test_split
+                    y_stratify = (df_part["scrap_percent"] > thr_label).astype(int)
+                    train_temp, test_temp = train_test_split(
+                        df_part, test_size=0.4, stratify=y_stratify, random_state=RANDOM_STATE
+                    )
+                    calib_temp, test_temp = train_test_split(
+                        test_temp, test_size=0.5, stratify=(test_temp["scrap_percent"] > thr_label).astype(int),
+                        random_state=RANDOM_STATE
+                    )
+                    df_train, df_calib, df_test = train_temp, calib_temp, test_temp
+                    break
+            
+            # Feature engineering
+            mtbf_train = compute_mtbf_on_train(df_train, thr_label)
+            part_freq_train = df_train["part_id"].value_counts(normalize=True)
+            default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
+            default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
+            
+            df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
+            df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
+            df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
+            
+            # Train part-specific model
+            X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
+            X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
+            
+            if y_train.nunique() < 2:
+                st.error("❌ Training set has only one class after feature engineering")
+                st.stop()
+            
+            rf_part, cal_model_part, method_part = train_and_calibrate(
+                X_train, y_train, X_calib, y_calib, n_est
+            )
+            
+            st.success(f"✅ Part-specific model trained: {method_part}, {len(X_train)} samples")
+            st.info(f"📊 Training labels: Scrap=1: {y_train.sum()}, Scrap=0: {(y_train==0).sum()}")
+            
             # Prepare input
             input_df = pd.DataFrame(
                 [[part_id_input, order_qty, piece_weight, default_mtbf, default_freq]],
@@ -402,7 +533,7 @@ with tab1:
             X_input = X_input[feats]
 
             # Make prediction
-            prob = float(cal_model.predict_proba(X_input)[0, 1])
+            prob = float(cal_model_part.predict_proba(X_input)[0, 1])
             adj_prob = np.clip(prob, 0.0, 1.0)
             exp_scrap = order_qty * adj_prob
             exp_loss = exp_scrap * cost_per_part
@@ -434,7 +565,7 @@ with tab1:
                 ]
                 
                 if len(similar_parts) < 10:
-                    similar_parts = df_train  # Fallback to all data
+                    similar_parts = df_train  # Fallback to all training data
                 
                 # Calculate defect predictions
                 defect_predictions = []
@@ -587,8 +718,8 @@ with tab2:
     st.header("📏 Model Validation (6-2-1 Split)")
     
     try:
-        X_test, y_test, _ = make_xy(df_test, thr_label, use_rate_cols)
-        preds = cal_model.predict_proba(X_test)[:, 1]
+        X_test, y_test, _ = make_xy(df_test_base, thr_label, use_rate_cols)
+        preds = cal_model_base.predict_proba(X_test)[:, 1]
         pred_binary = (preds > 0.5).astype(int)
         
         # Metrics
@@ -612,28 +743,31 @@ with tab2:
         
         # Feature importances
         st.markdown("### 🔍 Feature Importances")
-        if hasattr(cal_model, "base_estimator"):
-            base = cal_model.base_estimator
-            if isinstance(base, list):
-                importances = base[0].feature_importances_
+        try:
+            if hasattr(cal_model_base, "base_estimator"):
+                base = cal_model_base.base_estimator
+                if isinstance(base, list):
+                    importances = base[0].feature_importances_
+                else:
+                    importances = base.feature_importances_
             else:
-                importances = base.feature_importances_
-        else:
-            importances = cal_model.feature_importances_
-        
-        feat_imp = pd.DataFrame({
-            "Feature": feats,
-            "Importance": importances
-        }).sort_values("Importance", ascending=False).head(15)
-        
-        fig_imp = px.bar(
-            feat_imp,
-            x="Importance",
-            y="Feature",
-            orientation='h',
-            title="Top 15 Features"
-        )
-        st.plotly_chart(fig_imp, use_container_width=True)
+                importances = cal_model_base.feature_importances_
+            
+            feat_imp = pd.DataFrame({
+                "Feature": feats_base,
+                "Importance": importances
+            }).sort_values("Importance", ascending=False).head(15)
+            
+            fig_imp = px.bar(
+                feat_imp,
+                x="Importance",
+                y="Feature",
+                orientation='h',
+                title="Top 15 Features"
+            )
+            st.plotly_chart(fig_imp, use_container_width=True)
+        except Exception as e:
+            st.warning(f"⚠️ Could not extract feature importances: {e}")
         
     except Exception as e:
         st.warning(f"⚠️ Validation failed: {e}")
