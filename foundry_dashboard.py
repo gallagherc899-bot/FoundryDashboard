@@ -249,17 +249,20 @@ def diagnose_root_causes(defect_predictions: pd.DataFrame) -> pd.DataFrame:
     Map predicted defects to their root cause processes.
     Returns a ranked list of processes by contribution.
     """
+    if defect_predictions.empty:
+        return pd.DataFrame(columns=["Process", "Contribution (%)", "Description"])
+    
     process_scores = {}
     
     for _, row in defect_predictions.iterrows():
-        defect = row["Defect"]
-        likelihood = row["Predicted Rate (%)"]
+        defect = row.get("Defect_Code", "")
+        likelihood = row.get("Predicted Rate (%)", 0.0)
         
         # Find which processes could cause this defect
         if defect in DEFECT_TO_PROCESS:
             processes = DEFECT_TO_PROCESS[defect]
             # Distribute the defect likelihood across responsible processes
-            contribution = likelihood / len(processes)
+            contribution = likelihood / len(processes) if len(processes) > 0 else 0.0
             
             for process in processes:
                 if process not in process_scores:
@@ -267,14 +270,20 @@ def diagnose_root_causes(defect_predictions: pd.DataFrame) -> pd.DataFrame:
                 process_scores[process] += contribution
     
     # Convert to DataFrame and sort
+    if not process_scores:
+        return pd.DataFrame(columns=["Process", "Contribution (%)", "Description"])
+    
     diagnosis = pd.DataFrame([
         {
             "Process": process,
             "Contribution (%)": score,
-            "Description": PROCESS_DEFECT_MAP[process]["description"]
+            "Description": PROCESS_DEFECT_MAP.get(process, {}).get("description", "")
         }
         for process, score in process_scores.items()
-    ]).sort_values("Contribution (%)", ascending=False)
+    ])
+    
+    if not diagnosis.empty:
+        diagnosis = diagnosis.sort_values("Contribution (%)", ascending=False)
     
     return diagnosis
 
