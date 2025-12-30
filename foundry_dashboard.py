@@ -1,7 +1,6 @@
 # ============================================================
 # 🏭 Foundry Scrap Risk Dashboard
-# Dynamic 6–2–1 retraining + iterative similarity expansion +
-# calibration-safe feature importances + full cache reset per Predict
+# Dynamic 6–2–1 retraining + similarity expansion + calibration-safe feature importances
 # ============================================================
 
 import warnings
