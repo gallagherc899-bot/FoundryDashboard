@@ -1,5 +1,5 @@
 # ============================================================
-# 🏭 Foundry Scrap Risk Dashboard (Full Auto 6–2–1)
+# 🏭 Foundry Scrap Risk Dashboard (Dynamic Auto 6–2–1)
 # ============================================================
 
 import warnings
@@ -28,20 +28,13 @@ MIN_SAMPLES_LEAF = 2
 # ============================================================
 @st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
-    """
-    Loads and cleans foundry scrap data.
-    Only 'Part ID' is used as the unique identifier (no work order mappings).
-    """
     df = pd.read_csv(csv_path)
 
-    # Flatten any multi-row headers
+    # Flatten multiindex headers
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [
-            "_".join([str(x) for x in col if str(x) != "None"]).strip()
-            for col in df.columns.values
-        ]
+        df.columns = ["_".join([str(x) for x in col if str(x) != "None"]).strip() for col in df.columns.values]
 
-    # Normalize headers (spaces -> underscores, lowercase)
+    # Normalize headers
     df.columns = (
         pd.Index(df.columns)
         .str.strip()
@@ -51,7 +44,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         .str.lower()
     )
 
-    # 🔒 Explicitly disallow any "work_order" columns
+    # Drop disallowed columns
     forbidden_cols = [c for c in df.columns if "work_order" in c]
     if forbidden_cols:
         df.drop(columns=forbidden_cols, inplace=True, errors="ignore")
@@ -73,7 +66,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     }
     df.rename(columns=rename_map, inplace=True)
 
-    # 🧩 Ensure 'part_id' exists
+    # Ensure part_id exists
     if "part_id" not in df.columns:
         for c in df.columns:
             if "part" in c and "id" in c:
@@ -83,7 +76,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         st.error("❌ No 'Part ID' column found — please add one to your CSV.")
         st.stop()
 
-    # Handle duplicate part_id columns
+    # Flatten duplicates
     if (df.columns == "part_id").sum() > 1:
         first_idx = np.where(df.columns == "part_id")[0][0]
         keep_mask = np.ones(len(df.columns), dtype=bool)
@@ -92,22 +85,13 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         df = df.loc[:, keep_mask]
         st.warning("⚠ Multiple 'Part ID' columns detected — keeping the first.")
 
-    # Guarantee part_id is 1D and string
+    # Ensure part_id is clean
     if isinstance(df["part_id"], pd.DataFrame):
         df["part_id"] = df["part_id"].iloc[:, 0]
-    df["part_id"] = (
-        df["part_id"].astype(str).replace({"nan": "unknown", "": "unknown"}).str.strip()
-    )
+    df["part_id"] = df["part_id"].astype(str).replace({"nan": "unknown", "": "unknown"}).str.strip()
 
-    # Numeric conversions
-    num_cols = [
-        c
-        for c in df.columns
-        if c.endswith("_rate")
-        or "scrap" in c
-        or "weight" in c
-        or "quantity" in c
-    ]
+    # Convert numerics
+    num_cols = [c for c in df.columns if c.endswith("_rate") or "scrap" in c or "weight" in c or "quantity" in c]
     for c in num_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
@@ -116,9 +100,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
         df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
 
-    st.info(
-        f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns. Using 'Part ID' as the unique identifier."
-    )
+    st.info(f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns. Using 'Part ID' as the unique identifier.")
     return df
 
 # ============================================================
@@ -170,34 +152,43 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
     return rf, cal, "calibrated (sigmoid, cv=3)"
 
 # ============================================================
-# Similarity search
+# Dynamic part-based data expansion
 # ============================================================
-@st.cache_data(show_spinner=False)
-def find_similar_parts(df, target_weight, defect_cols, min_rows=30):
-    """Iteratively widen similarity window for weight and defects until enough data are found."""
-    if df.empty or target_weight <= 0:
-        return pd.DataFrame()
+def prepare_part_data(df: pd.DataFrame, target_part: str, min_samples: int = 100) -> pd.DataFrame:
+    """Expand dataset iteratively by weight ±1% and defect ±1% until min_samples reached."""
+    df_part = df[df["part_id"] == target_part].copy()
+    if df_part.empty:
+        st.warning(f"⚠ No direct data for Part {target_part}. Searching for similar parts...")
+        base_weight = df["piece_weight_lbs"].median()
+    else:
+        base_weight = df_part["piece_weight_lbs"].mean()
 
-    weight_tol = 0.01  # ±1%
-    defect_tol = 0.01
-    max_tol = 0.10
-    similar = pd.DataFrame()
+    df_candidate = df.copy()
+    weight_tol, defect_tol, max_tol = 0.01, 0.01, 0.10
+    iteration = 0
+    defect_cols = [c for c in df.columns if c.endswith("_rate")]
 
-    while len(similar) < min_rows and weight_tol <= max_tol:
-        lower = target_weight * (1 - weight_tol)
-        upper = target_weight * (1 + weight_tol)
-        similar = df[df["piece_weight_lbs"].between(lower, upper)]
+    while len(df_part) < min_samples and weight_tol <= max_tol:
+        iteration += 1
+        lower = base_weight * (1 - weight_tol)
+        upper = base_weight * (1 + weight_tol)
+        df_weight = df_candidate[df_candidate["piece_weight_lbs"].between(lower, upper)]
+
+        if defect_cols:
+            for col in defect_cols:
+                base_def = df_part[col].mean() if not df_part.empty else df_weight[col].mean()
+                low = base_def * (1 - defect_tol)
+                high = base_def * (1 + defect_tol)
+                df_weight = df_weight[(df_weight[col] >= low) & (df_weight[col] <= high)]
+
+        df_part = pd.concat([df_part, df_weight]).drop_duplicates(subset=df.columns)
+
         weight_tol += 0.005
+        defect_tol += 0.005
 
-    if not similar.empty and defect_cols:
-        mean_defects = df[defect_cols].mean()
-        defect_tol = 0.01
-        while len(similar) < min_rows and defect_tol <= max_tol:
-            mask = (similar[defect_cols].sub(mean_defects).abs() <= defect_tol).all(axis=1)
-            similar = similar[mask]
-            defect_tol += 0.005
-
-    return similar
+    st.info(f"✅ Using {len(df_part)} samples for Part {target_part} "
+            f"(±{weight_tol*100:.1f}% weight, ±{defect_tol*100:.1f}% defects, {iteration} iterations)")
+    return df_part
 
 # ============================================================
 # Streamlit Sidebar
@@ -217,7 +208,7 @@ if not os.path.exists(csv_path):
 # ============================================================
 # Main Prediction Panel
 # ============================================================
-st.title("🏭 Foundry Scrap Risk Dashboard (Full Auto 6–2–1)")
+st.title("🏭 Foundry Scrap Risk Dashboard (Dynamic Auto 6–2–1)")
 
 part_id_input = st.text_input("Part ID", value="Unknown")
 order_qty = st.number_input("Order Quantity", min_value=1, value=100)
@@ -226,11 +217,16 @@ cost_per_part = st.number_input("Cost per Part ($)", min_value=0.1, value=10.0)
 
 if st.button("Predict"):
     try:
-        st.info("🔁 Re-training model (6–2–1 split) and refreshing features...")
+        st.info("🔁 Re-training model (6–2–1) with part-specific dataset...")
 
-        # 1️⃣ Load and prepare
         df = load_and_clean(csv_path)
-        df_train, df_calib, df_test = time_split(df)
+        df_part = prepare_part_data(df, part_id_input, min_samples=100)
+
+        if df_part.empty:
+            st.error("❌ No suitable data found for this part.")
+            st.stop()
+
+        df_train, df_calib, df_test = time_split(df_part)
         mtbf_train = compute_mtbf_on_train(df_train, thr_label)
         part_freq_train = df_train["part_id"].value_counts(normalize=True)
         default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
@@ -240,31 +236,17 @@ if st.button("Predict"):
         df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
         df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
 
-        # 2️⃣ Train fresh model
         X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
         X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
         rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
-        st.success(f"✅ Model retrained ({method}) using {len(X_train)} samples.")
+        st.success(f"✅ Model retrained ({method}) using {len(X_train)} samples from part-similar data.")
 
-        # 3️⃣ Handle part lookup or similarity
-        defect_cols = [c for c in df_train.columns if c.endswith("_rate")]
-        if part_id_input in mtbf_train["part_id"].values:
-            mtbf_val = mtbf_train.loc[mtbf_train["part_id"] == part_id_input, "mttf_scrap"].values[0]
-            freq_val = part_freq_train.get(part_id_input, default_freq)
-        else:
-            similar_df = find_similar_parts(df_train, piece_weight, defect_cols)
-            if len(similar_df) > 0:
-                mtbf_val = similar_df["scrap_percent"].mean()
-                freq_val = similar_df["part_id"].value_counts(normalize=True).mean()
-                st.info(f"⚙️ Using {len(similar_df)} similar parts for estimation.")
-                st.dataframe(similar_df.head(10))
-            else:
-                mtbf_val = default_mtbf
-                freq_val = default_freq
-                st.warning("⚠ No similar parts found — using global defaults.")
+        # Compute representative stats
+        mtbf_val = mtbf_train["mttf_scrap"].mean()
+        freq_val = part_freq_train.mean()
 
-        # 4️⃣ Predict
+        # Predict
         input_df = pd.DataFrame(
             [[part_id_input, order_qty, piece_weight, mtbf_val, freq_val]],
             columns=["part_id", "order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"],
@@ -281,7 +263,7 @@ if st.button("Predict"):
         exp_loss = exp_scrap * cost_per_part
         reliability = 1.0 - adj_prob
 
-        # 5️⃣ Display results
+        # Display
         st.markdown(f"### 🧩 Prediction Results for Part **{part_id_input}**")
         st.metric("Predicted Scrap Risk", f"{adj_prob*100:.2f}%")
         st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
@@ -290,7 +272,7 @@ if st.button("Predict"):
         st.metric("MTTF Scrap", f"{mtbf_val:.2f}")
         st.metric("Part Frequency", f"{freq_val:.4f}")
 
-        st.success("🔁 Full pipeline (6–2–1 + similarity search) executed successfully.")
+        st.success("🔁 Full pipeline (dynamic 6–2–1 + similarity expansion) executed successfully.")
 
     except Exception as e:
         st.error(f"❌ Prediction failed: {e}")
