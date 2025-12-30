@@ -1,6 +1,6 @@
 # ============================================================
 # 🏭 Foundry Scrap Risk Dashboard
-# Dynamic 6–2–1 retraining + similarity expansion + calibration-safe feature importances (final fix)
+# Dynamic 6–2–1 retraining + iterative expansion + calibration-safe feature importances (final verified)
 # ============================================================
 
 import warnings
@@ -22,6 +22,38 @@ st.set_page_config(page_title="Foundry Scrap Risk Dashboard", layout="wide")
 RANDOM_STATE = 42
 DEFAULT_ESTIMATORS = 180
 MIN_SAMPLES_LEAF = 2
+
+# ============================================================
+# ✅ Safe Feature Importances (Universal)
+# ============================================================
+def safe_feature_importances(model):
+    """
+    Extracts feature importances safely from any model, including calibrated wrappers or ensembles.
+    """
+    try:
+        # Case 1: Direct RandomForest or similar
+        if hasattr(model, "feature_importances_"):
+            return model.feature_importances_
+
+        # Case 2: CalibratedClassifierCV wrapper
+        if hasattr(model, "base_estimator"):
+            base = model.base_estimator
+            # Some calibrators hold a list of base models
+            if isinstance(base, list):
+                base = base[0]
+            if hasattr(base, "feature_importances_"):
+                return base.feature_importances_
+
+        # Case 3: Ensemble list (rare)
+        if hasattr(model, "estimators_") and len(model.estimators_) > 0:
+            est = model.estimators_[0]
+            if hasattr(est, "feature_importances_"):
+                return est.feature_importances_
+
+    except Exception:
+        pass
+
+    return np.zeros(1)
 
 # ============================================================
 # Data loading and cleaning
@@ -53,7 +85,6 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         "total_scrap_weight_lbs": "total_scrap_weight_lbs",
         "scrap_percent": "scrap_percent",
         "scrap": "scrap_percent",
-        "scrap_": "scrap_percent",
         "sellable": "sellable",
         "heats": "heats",
         "week_ending": "week_ending",
@@ -81,7 +112,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
         df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
 
-    st.info(f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns. Using 'Part ID' as unique identifier.")
+    st.info(f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns. Using 'Part ID' as the unique identifier.")
     return df
 
 # ============================================================
@@ -138,23 +169,6 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
         return rf, rf, "uncalibrated"
     cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
     return rf, cal, "calibrated (sigmoid, cv=3)"
-
-def safe_feature_importances(model):
-    """Handles any model type (raw, calibrated, list-based)."""
-    if hasattr(model, "feature_importances_"):
-        return model.feature_importances_
-    elif hasattr(model, "base_estimator"):
-        base = model.base_estimator
-        if isinstance(base, list):
-            base = base[0]
-        if hasattr(base, "feature_importances_"):
-            return base.feature_importances_
-    elif hasattr(model, "estimators_") and len(model.estimators_) > 0:
-        # For ensemble wrappers
-        est = model.estimators_[0]
-        if hasattr(est, "feature_importances_"):
-            return est.feature_importances_
-    return np.zeros(1)
 
 # ============================================================
 # Dynamic part-based data expansion
@@ -241,7 +255,7 @@ if st.button("Predict"):
 
         st.success(f"✅ Model retrained ({method}) using {len(X_train)} samples.")
 
-        # --- Safe feature importances ---
+        # --- SAFE FEATURE IMPORTANCES ---
         importances = safe_feature_importances(cal_model)
         if len(importances) == len(feats):
             fi_df = pd.DataFrame({"Feature": feats, "Importance": importances}).sort_values(
@@ -250,7 +264,7 @@ if st.button("Predict"):
             st.write("### 🔍 Feature Importances")
             st.dataframe(fi_df)
 
-        # --- Prediction ---
+        # --- PREDICTION ---
         mtbf_val = mtbf_train["mttf_scrap"].mean()
         freq_val = part_freq_train.mean()
 
