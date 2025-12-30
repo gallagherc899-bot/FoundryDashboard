@@ -1,5 +1,5 @@
 # ============================================================
-# 🏭 Foundry Scrap Risk Dashboard (Dynamic Auto 6–2–1 + Auto-Expansion Fallback)
+# 🏭 Foundry Scrap Risk Dashboard (Dynamic Auto 6–2–1 + Auto-Expansion Fallback + Calibration Fix)
 # ============================================================
 
 import warnings
@@ -29,11 +29,11 @@ MIN_SAMPLES_LEAF = 2
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
 
-    # Flatten MultiIndex if exists
+    # Flatten MultiIndex headers
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ["_".join([str(x) for x in col if str(x) != "None"]).strip() for col in df.columns.values]
 
-    # Clean headers
+    # Normalize headers
     df.columns = (
         pd.Index(df.columns)
         .str.strip()
@@ -49,12 +49,14 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         df.drop(columns=forbidden_cols, inplace=True, errors="ignore")
         st.warning(f"⚠ Dropped disallowed columns: {forbidden_cols}")
 
-    # Rename relevant columns
+    # Canonical renames
     rename_map = {
         "order_quantity": "order_quantity",
         "pieces_scrapped": "pieces_scrapped",
         "total_scrap_weight_lbs": "total_scrap_weight_lbs",
         "scrap_percent": "scrap_percent",
+        "scrap": "scrap_percent",
+        "scrap_": "scrap_percent",
         "sellable": "sellable",
         "heats": "heats",
         "week_ending": "week_ending",
@@ -63,7 +65,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     }
     df.rename(columns=rename_map, inplace=True)
 
-    # Ensure part_id column
+    # Ensure part_id
     if "part_id" not in df.columns:
         for c in df.columns:
             if "part" in c and "id" in c:
@@ -73,7 +75,6 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         st.error("❌ No 'Part ID' column found — please add one to your CSV.")
         st.stop()
 
-    # Flatten part_id if multi-column
     if isinstance(df["part_id"], pd.DataFrame):
         df["part_id"] = df["part_id"].iloc[:, 0]
     df["part_id"] = df["part_id"].astype(str).replace({"nan": "unknown", "": "unknown"}).str.strip()
@@ -83,7 +84,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     for c in num_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
-    # Parse dates
+    # Convert week ending
     if "week_ending" in df.columns:
         df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
         df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
@@ -115,7 +116,7 @@ def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, def
     return s
 
 def make_xy(df, thr_label, use_rate_cols):
-    # 🔧 FIX: Ensure numeric comparison for scrap_percent
+    # Ensure numeric scrap_percent
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0)
 
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
@@ -127,12 +128,9 @@ def make_xy(df, thr_label, use_rate_cols):
 
     y = (df["scrap_percent"] > thr_label).astype(int)
 
-    # Guardrail: Stop if all samples are one class
     if y.nunique() < 2:
-        st.warning(
-            f"⚠ Not enough label diversity after applying scrap threshold {thr_label}%. "
-            f"All samples are of one class — model cannot learn risk under this threshold."
-        )
+        st.warning(f"⚠ Not enough label diversity after applying scrap threshold {thr_label}%. "
+                   f"All samples are one class — model cannot learn risk under this threshold.")
         st.stop()
 
     X = df[feats]
@@ -152,6 +150,13 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
         return rf, rf, "uncalibrated"
     cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
     return rf, cal, "calibrated (sigmoid, cv=3)"
+
+def get_feature_importances(model):
+    """Safely extract feature importances from calibrated or uncalibrated models."""
+    base_model = getattr(model, "base_estimator", model)
+    if hasattr(base_model, "feature_importances_"):
+        return base_model.feature_importances_
+    return np.zeros(1)
 
 # ============================================================
 # Dynamic part-based data expansion
@@ -226,21 +231,17 @@ if st.button("Predict"):
             st.error("❌ No suitable data found for this part.")
             st.stop()
 
-        # Ensure at least 2 label classes — with auto-expansion fallback
+        # Auto-expansion fallback
         if df_part["scrap_percent"].nunique() < 2:
-            st.warning(f"⚠ Only one scrap label found for Part {part_id_input}. "
-                       f"Expanding similarity search to ±25% weight/defects for retry...")
-
+            st.warning(f"⚠ Only one scrap label found for Part {part_id_input}. Expanding similarity search ±25%...")
             df_part = prepare_part_data(df, part_id_input, min_samples=30)
             df_part["piece_weight_lbs"] = pd.to_numeric(df_part["piece_weight_lbs"], errors="coerce").fillna(0)
 
             if df_part["scrap_percent"].nunique() < 2:
-                st.error(f"❌ Still only one scrap label found after ±25% expansion for Part {part_id_input}. "
-                         f"Not enough diversity to train model.")
+                st.error(f"❌ Still only one scrap label found for Part {part_id_input}. Not enough diversity.")
                 st.stop()
             else:
-                st.success(f"✅ Additional data found after expansion — proceeding with retraining using "
-                           f"{len(df_part)} samples.")
+                st.success(f"✅ Additional data found — proceeding with retraining ({len(df_part)} samples).")
 
         df_train, df_calib, df_test = time_split(df_part)
         mtbf_train = compute_mtbf_on_train(df_train, thr_label)
@@ -258,6 +259,19 @@ if st.button("Predict"):
 
         st.success(f"✅ Model retrained ({method}) using {len(X_train)} samples from part-similar data.")
 
+        # --- Feature Importances ---
+        base_model = getattr(cal_model, "base_estimator", cal_model)
+        if hasattr(base_model, "feature_importances_"):
+            importances = base_model.feature_importances_
+        else:
+            importances = np.zeros(len(feats))
+        fi_df = pd.DataFrame({"Feature": feats, "Importance": importances}).sort_values(
+            "Importance", ascending=False
+        )
+        st.write("### 🔍 Feature Importances")
+        st.dataframe(fi_df)
+
+        # --- Prediction ---
         mtbf_val = mtbf_train["mttf_scrap"].mean()
         freq_val = part_freq_train.mean()
 
@@ -286,10 +300,8 @@ if st.button("Predict"):
         st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
         st.metric("Expected Loss ($)", f"{exp_loss:,.2f}")
         st.metric("Reliability", f"{reliability*100:.2f}%")
-        st.metric("MTTF Scrap", f"{mtbf_val:.2f}")
-        st.metric("Part Frequency", f"{freq_val:.4f}")
 
-        st.success("🔁 Full pipeline (dynamic 6–2–1 + similarity expansion) executed successfully.")
+        st.success("🔁 Full pipeline executed successfully.")
 
     except Exception as e:
         st.error(f"❌ Prediction failed: {e}")
