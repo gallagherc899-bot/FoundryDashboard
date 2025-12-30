@@ -1,6 +1,6 @@
 # ============================================================
 # 🏭 Foundry Scrap Risk Dashboard
-# Dynamic 6–2–1 retraining + similarity expansion + calibration-safe feature importances
+# Dynamic 6–2–1 retraining + similarity expansion + calibration-safe feature importances (final fix)
 # ============================================================
 
 import warnings
@@ -71,8 +71,6 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         st.error("❌ No 'Part ID' column found — please add one to your CSV.")
         st.stop()
 
-    if isinstance(df["part_id"], pd.DataFrame):
-        df["part_id"] = df["part_id"].iloc[:, 0]
     df["part_id"] = df["part_id"].astype(str).replace({"nan": "unknown", "": "unknown"}).str.strip()
 
     num_cols = [c for c in df.columns if c.endswith("_rate") or "scrap" in c or "weight" in c or "quantity" in c]
@@ -83,7 +81,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
         df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
 
-    st.info(f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns. Using 'Part ID' as the unique identifier.")
+    st.info(f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns. Using 'Part ID' as unique identifier.")
     return df
 
 # ============================================================
@@ -142,16 +140,26 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
     return rf, cal, "calibrated (sigmoid, cv=3)"
 
 def safe_feature_importances(model):
-    """Safely extract feature importances from calibrated or uncalibrated models."""
-    base_model = getattr(model, "base_estimator", model)
-    if hasattr(base_model, "feature_importances_"):
-        return base_model.feature_importances_
+    """Handles any model type (raw, calibrated, list-based)."""
+    if hasattr(model, "feature_importances_"):
+        return model.feature_importances_
+    elif hasattr(model, "base_estimator"):
+        base = model.base_estimator
+        if isinstance(base, list):
+            base = base[0]
+        if hasattr(base, "feature_importances_"):
+            return base.feature_importances_
+    elif hasattr(model, "estimators_") and len(model.estimators_) > 0:
+        # For ensemble wrappers
+        est = model.estimators_[0]
+        if hasattr(est, "feature_importances_"):
+            return est.feature_importances_
     return np.zeros(1)
 
 # ============================================================
 # Dynamic part-based data expansion
 # ============================================================
-def prepare_part_data(df: pd.DataFrame, target_part: str, min_samples: int = 30) -> pd.DataFrame:
+def prepare_part_data(df, target_part, min_samples=30):
     df_part = df[df["part_id"] == target_part].copy()
     base_weight = df_part["piece_weight_lbs"].mean() if not df_part.empty else df["piece_weight_lbs"].median()
     df_candidate = df.copy()
@@ -208,7 +216,6 @@ if st.button("Predict"):
             st.error("❌ No suitable data found for this part.")
             st.stop()
 
-        # Auto-expansion fallback
         if df_part["scrap_percent"].nunique() < 2:
             st.warning(f"⚠ Only one scrap label found. Expanding ±25%...")
             df_part = prepare_part_data(df, part_id_input, min_samples=30)
@@ -234,7 +241,7 @@ if st.button("Predict"):
 
         st.success(f"✅ Model retrained ({method}) using {len(X_train)} samples.")
 
-        # Safe feature importances
+        # --- Safe feature importances ---
         importances = safe_feature_importances(cal_model)
         if len(importances) == len(feats):
             fi_df = pd.DataFrame({"Feature": feats, "Importance": importances}).sort_values(
@@ -243,7 +250,7 @@ if st.button("Predict"):
             st.write("### 🔍 Feature Importances")
             st.dataframe(fi_df)
 
-        # Prediction
+        # --- Prediction ---
         mtbf_val = mtbf_train["mttf_scrap"].mean()
         freq_val = part_freq_train.mean()
 
