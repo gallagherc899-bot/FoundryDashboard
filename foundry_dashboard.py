@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 # -------------------------------
 # Streamlit setup
@@ -152,9 +153,40 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
     return rf, cal, "calibrated (sigmoid, cv=3)"
 
 # ============================================================
+# Safe utilities
+# ============================================================
+def compute_metrics(model, X, y):
+    preds = model.predict(X)
+    try:
+        probs = model.predict_proba(X)
+        if probs.shape[1] == 1:
+            probs = np.hstack([1 - probs, probs])
+    except Exception:
+        probs = np.zeros((len(preds), 2))
+        probs[:, 1] = preds
+
+    return {
+        "accuracy": accuracy_score(y, preds),
+        "precision": precision_score(y, preds, zero_division=0),
+        "recall": recall_score(y, preds, zero_division=0),
+        "f1": f1_score(y, preds, zero_division=0),
+        "probabilities": probs,
+    }
+
+def get_feature_importances(model):
+    try:
+        if hasattr(model, "feature_importances_"):
+            return model.feature_importances_
+        elif hasattr(model, "base_estimator") and hasattr(model.base_estimator, "feature_importances_"):
+            return model.base_estimator.feature_importances_
+    except Exception:
+        pass
+    return np.zeros(1)
+
+# ============================================================
 # Dynamic part-based data expansion
 # ============================================================
-def prepare_part_data(df: pd.DataFrame, target_part: str, min_samples: int = 100) -> pd.DataFrame:
+def prepare_part_data(df: pd.DataFrame, target_part: str, min_samples: int = 30) -> pd.DataFrame:
     """Expand dataset iteratively by weight ±1% and defect ±1% until min_samples reached."""
     df_part = df[df["part_id"] == target_part].copy()
     if df_part.empty:
@@ -164,7 +196,7 @@ def prepare_part_data(df: pd.DataFrame, target_part: str, min_samples: int = 100
         base_weight = df_part["piece_weight_lbs"].mean()
 
     df_candidate = df.copy()
-    weight_tol, defect_tol, max_tol = 0.01, 0.01, 0.10
+    weight_tol, defect_tol, max_tol = 0.01, 0.01, 0.15
     iteration = 0
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
 
@@ -220,10 +252,15 @@ if st.button("Predict"):
         st.info("🔁 Re-training model (6–2–1) with part-specific dataset...")
 
         df = load_and_clean(csv_path)
-        df_part = prepare_part_data(df, part_id_input, min_samples=100)
+        df_part = prepare_part_data(df, part_id_input, min_samples=30)
 
         if df_part.empty:
             st.error("❌ No suitable data found for this part.")
+            st.stop()
+
+        # Ensure at least 2 label classes
+        if df_part["scrap_percent"].nunique() < 2:
+            st.error(f"❌ Not enough scrap label diversity for Part {part_id_input} — only one class found.")
             st.stop()
 
         df_train, df_calib, df_test = time_split(df_part)
@@ -242,11 +279,9 @@ if st.button("Predict"):
 
         st.success(f"✅ Model retrained ({method}) using {len(X_train)} samples from part-similar data.")
 
-        # Compute representative stats
         mtbf_val = mtbf_train["mttf_scrap"].mean()
         freq_val = part_freq_train.mean()
 
-        # Predict
         input_df = pd.DataFrame(
             [[part_id_input, order_qty, piece_weight, mtbf_val, freq_val]],
             columns=["part_id", "order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"],
@@ -257,13 +292,16 @@ if st.button("Predict"):
                 X_input[col] = 0.0
         X_input = X_input[feats]
 
-        prob = float(cal_model.predict_proba(X_input)[0, 1])
+        try:
+            prob = float(cal_model.predict_proba(X_input)[0, 1])
+        except Exception:
+            prob = 0.0
+
         adj_prob = np.clip(prob, 0.0, 1.0)
         exp_scrap = order_qty * adj_prob
         exp_loss = exp_scrap * cost_per_part
         reliability = 1.0 - adj_prob
 
-        # Display
         st.markdown(f"### 🧩 Prediction Results for Part **{part_id_input}**")
         st.metric("Predicted Scrap Risk", f"{adj_prob*100:.2f}%")
         st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
