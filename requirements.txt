@@ -1,18 +1,14 @@
-streamlit
-pandas
-numpy
-scikit-learn
-altair
-matplotlib
-imbalanced-learn
-shap
-plotly>=5.0.0
 streamlit==1.39.0
 pandas==2.2.3
 numpy==1.26.4
+scikit-learn==1.5.2
+plotly>=5.17.0
+scipy>=1.11.0
+lifelines>=0.27.0
 matplotlib==3.9.2
 seaborn==0.13.2
-scikit-learn==1.5.2
+altair
+imbalanced-learn
 shap==0.46.0
 tqdm==4.66.4
 
