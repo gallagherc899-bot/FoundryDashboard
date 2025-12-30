@@ -1,5 +1,5 @@
 # ============================================================
-# 🏭 Foundry Scrap Risk Dashboard (Dynamic Auto 6–2–1)
+# 🏭 Foundry Scrap Risk Dashboard (Dynamic Auto 6–2–1 with Auto-Expansion Fallback)
 # ============================================================
 
 import warnings
@@ -31,11 +31,9 @@ MIN_SAMPLES_LEAF = 2
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
 
-    # Flatten multiindex headers
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ["_".join([str(x) for x in col if str(x) != "None"]).strip() for col in df.columns.values]
 
-    # Normalize headers
     df.columns = (
         pd.Index(df.columns)
         .str.strip()
@@ -45,13 +43,11 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         .str.lower()
     )
 
-    # Drop disallowed columns
     forbidden_cols = [c for c in df.columns if "work_order" in c]
     if forbidden_cols:
         df.drop(columns=forbidden_cols, inplace=True, errors="ignore")
         st.warning(f"⚠ Dropped disallowed columns: {forbidden_cols}")
 
-    # Canonical renames
     rename_map = {
         "order_quantity": "order_quantity",
         "pieces_scrapped": "pieces_scrapped",
@@ -67,7 +63,6 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     }
     df.rename(columns=rename_map, inplace=True)
 
-    # Ensure part_id exists
     if "part_id" not in df.columns:
         for c in df.columns:
             if "part" in c and "id" in c:
@@ -77,7 +72,6 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         st.error("❌ No 'Part ID' column found — please add one to your CSV.")
         st.stop()
 
-    # Flatten duplicates
     if (df.columns == "part_id").sum() > 1:
         first_idx = np.where(df.columns == "part_id")[0][0]
         keep_mask = np.ones(len(df.columns), dtype=bool)
@@ -86,17 +80,14 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         df = df.loc[:, keep_mask]
         st.warning("⚠ Multiple 'Part ID' columns detected — keeping the first.")
 
-    # Ensure part_id is clean
     if isinstance(df["part_id"], pd.DataFrame):
         df["part_id"] = df["part_id"].iloc[:, 0]
     df["part_id"] = df["part_id"].astype(str).replace({"nan": "unknown", "": "unknown"}).str.strip()
 
-    # Convert numerics
     num_cols = [c for c in df.columns if c.endswith("_rate") or "scrap" in c or "weight" in c or "quantity" in c]
     for c in num_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
-    # Convert dates
     if "week_ending" in df.columns:
         df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
         df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
@@ -152,27 +143,6 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
     cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
     return rf, cal, "calibrated (sigmoid, cv=3)"
 
-# ============================================================
-# Safe utilities
-# ============================================================
-def compute_metrics(model, X, y):
-    preds = model.predict(X)
-    try:
-        probs = model.predict_proba(X)
-        if probs.shape[1] == 1:
-            probs = np.hstack([1 - probs, probs])
-    except Exception:
-        probs = np.zeros((len(preds), 2))
-        probs[:, 1] = preds
-
-    return {
-        "accuracy": accuracy_score(y, preds),
-        "precision": precision_score(y, preds, zero_division=0),
-        "recall": recall_score(y, preds, zero_division=0),
-        "f1": f1_score(y, preds, zero_division=0),
-        "probabilities": probs,
-    }
-
 def get_feature_importances(model):
     try:
         if hasattr(model, "feature_importances_"):
@@ -187,7 +157,6 @@ def get_feature_importances(model):
 # Dynamic part-based data expansion
 # ============================================================
 def prepare_part_data(df: pd.DataFrame, target_part: str, min_samples: int = 30) -> pd.DataFrame:
-    """Expand dataset iteratively by weight ±1% and defect ±1% until min_samples reached."""
     df_part = df[df["part_id"] == target_part].copy()
     if df_part.empty:
         st.warning(f"⚠ No direct data for Part {target_part}. Searching for similar parts...")
@@ -214,7 +183,6 @@ def prepare_part_data(df: pd.DataFrame, target_part: str, min_samples: int = 30)
                 df_weight = df_weight[(df_weight[col] >= low) & (df_weight[col] <= high)]
 
         df_part = pd.concat([df_part, df_weight]).drop_duplicates(subset=df.columns)
-
         weight_tol += 0.005
         defect_tol += 0.005
 
@@ -258,10 +226,21 @@ if st.button("Predict"):
             st.error("❌ No suitable data found for this part.")
             st.stop()
 
-        # Ensure at least 2 label classes
+        # Ensure at least 2 label classes — with auto-expansion fallback
         if df_part["scrap_percent"].nunique() < 2:
-            st.error(f"❌ Not enough scrap label diversity for Part {part_id_input} — only one class found.")
-            st.stop()
+            st.warning(f"⚠ Only one scrap label found for Part {part_id_input}. "
+                       f"Expanding similarity search to ±25% weight/defects for retry...")
+
+            df_part = prepare_part_data(df, part_id_input, min_samples=30)
+            df_part["piece_weight_lbs"] = pd.to_numeric(df_part["piece_weight_lbs"], errors="coerce").fillna(0)
+
+            if df_part["scrap_percent"].nunique() < 2:
+                st.error(f"❌ Still only one scrap label found after ±25% expansion for Part {part_id_input}. "
+                         f"Not enough diversity to train model.")
+                st.stop()
+            else:
+                st.success(f"✅ Additional data found after expansion — proceeding with retraining using "
+                           f"{len(df_part)} samples.")
 
         df_train, df_calib, df_test = time_split(df_part)
         mtbf_train = compute_mtbf_on_train(df_train, thr_label)
