@@ -12,6 +12,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 @st.cache_data
 def load_data():
     df = pd.read_csv("anonymized_parts.csv")
+
     df.columns = (
         df.columns.str.strip()
         .str.replace(r"[^\w\s]", "", regex=True)
@@ -44,6 +45,7 @@ def load_data():
     defect_cols = [c for c in df.columns if c.endswith("_rate")]
     return df, defect_cols
 
+
 df, defect_cols = load_data()
 
 campbell_mapping = {
@@ -72,8 +74,8 @@ def train_global_model(df, threshold):
     )
     rf.fit(X, y)
 
-    cal = CalibratedClassifierCV(rf, method="sigmoid", cv=3)
     try:
+        cal = CalibratedClassifierCV(rf, method="sigmoid", cv=3)
         cal.fit(X, y)
         model = cal
     except ValueError:
@@ -90,6 +92,7 @@ def train_global_model(df, threshold):
     }
     return model, metrics
 
+
 with st.sidebar:
     st.header("🔧 Manager Input Controls")
     part_id = st.text_input("Enter Part ID (matches 'Part ID' column exactly)")
@@ -98,6 +101,7 @@ with st.sidebar:
     cost = st.number_input("Cost per Part ($)", min_value=0.0, value=50.0)
     threshold = st.slider("Scrap% Threshold", 0.0, 5.0, 2.5, 0.5)
     predict = st.button("🔮 Predict")
+
 
 tab1, tab2 = st.tabs(["📈 Dashboard", "📊 Model Performance"])
 
@@ -115,8 +119,9 @@ if predict:
         expected_scrap = order_qty * (scrap_pred / 100)
         loss = expected_scrap * cost
 
+        base_model = model.base_estimator if hasattr(model, "base_estimator") else model
+        pareto_pred = pd.Series(base_model.feature_importances_, index=defect_cols).sort_values(ascending=False)
         pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
-        pareto_pred = pd.Series(model.feature_importances_, index=defect_cols).sort_values(ascending=False)
 
         process_influence = {}
         for process, defects in campbell_mapping.items():
@@ -157,6 +162,7 @@ if predict:
         })
         st.success("✅ Prediction Complete!")
 
+
 with tab1:
     if "pareto_hist" in st.session_state:
         col1, col2, col3 = st.columns(3)
@@ -183,9 +189,10 @@ with tab1:
         st.dataframe(st.session_state.process_df.style.format({"Influence_%": "{:.2f}"}))
         st.info(st.session_state.rec_text)
 
+
 with tab2:
     if "metrics" in st.session_state:
         st.write(pd.DataFrame([st.session_state.metrics]).T.rename(columns={0: "Score"}))
-        st.caption("Rolling validation replaced with global performance metrics (v8.4 global model)")
+        st.caption("Global model metrics (v8.4.1) — trained across all parts")
 
-st.caption("© 2025 Foundry Analytics | Global ML-PHM Model with Campbell Process Integration (v8.4)")
+st.caption("© 2025 Foundry Analytics | Global ML-PHM Model with Campbell Process Integration (v8.4.1)")
