@@ -9,17 +9,17 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# ================================================================
-# 🏭 Aluminum Foundry Scrap Analytics Dashboard — v8.2 (ML-PHM Enhanced)
-# ================================================================
-# ✅ No Streamlit title or set_page_config (to avoid order errors)
-# ✅ Keeps ML-PHM interpretive layer + Campbell logic + stability fix
-# ================================================================
+# =========================================================
+# 🏭 Aluminum Foundry Scrap Analytics Dashboard — v8.2
+# Enhanced ML-PHM model with Campbell process integration
+# Title removed to prevent set_page_config conflicts
+# =========================================================
 
 @st.cache_data
 def load_data():
     df = pd.read_csv("anonymized_parts.csv")
 
+    # Normalize column names (handles “Week Ending” → “week_ending”)
     df.columns = (
         df.columns.str.strip()
         .str.replace(r"[^\\w\\s]", "", regex=True)
@@ -27,27 +27,45 @@ def load_data():
         .str.lower()
     )
 
+    # Detect possible date column (auto match)
+    possible_date_cols = ["week_ending", "weekending", "week_end", "date", "week"]
+    date_col = next((c for c in df.columns if c in possible_date_cols), None)
+
+    if not date_col:
+        st.error(
+            "❌ Could not find a valid date column in your dataset. "
+            "Expected one of: 'Week Ending', 'week_ending', 'week_end', or 'date'."
+        )
+        st.stop()
+
+    df.rename(columns={date_col: "week_ending"}, inplace=True)
+
+    # Rename other key columns for consistency
     rename_map = {
         "part_id": "part_id",
         "partid": "part_id",
         "scrap%": "scrap_percent",
         "scrap": "scrap_percent",
         "order_quantity": "order_quantity",
-        "week_ending": "week_ending",
     }
     df.rename(columns=rename_map, inplace=True)
 
+    # Convert and clean data
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-    df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0.0)
-    df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce").fillna(0.0)
-
+    df["scrap_percent"] = pd.to_numeric(df.get("scrap_percent", 0), errors="coerce").fillna(0.0)
+    df["order_quantity"] = pd.to_numeric(df.get("order_quantity", 0), errors="coerce").fillna(0.0)
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
-    defect_cols = [c for c in df.columns if c.endswith("_rate")]
 
+    # Identify all defect rate columns
+    defect_cols = [c for c in df.columns if c.endswith("_rate")]
     return df, defect_cols
 
+# Load dataset
 df, defect_cols = load_data()
 
+# =========================================================
+# Campbell Process Mapping
+# =========================================================
 campbell_mapping = {
     "Sand System and Preparation": ["sand_rate", "dirty_pattern_rate", "crush_rate", "runout_rate", "gas_porosity_rate"],
     "Core Making": ["core_rate", "gas_porosity_rate", "shrink_porosity_rate", "crush_rate"],
@@ -60,6 +78,9 @@ campbell_mapping = {
     "Inspection and Finishing": ["failed_zyglo_rate", "zyglo_rate", "outside_process_scrap_rate"],
 }
 
+# =========================================================
+# Helper functions
+# =========================================================
 def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
     weeks = sorted(df["week_ending"].unique())
     total = len(weeks) - (weeks_train + weeks_val + weeks_test) + 1
@@ -72,26 +93,18 @@ def rolling_splits(df, weeks_train=6, weeks_val=2, weeks_test=1):
 
 def train_and_evaluate(df_part, threshold):
     features = defect_cols
-
     y_global = (df_part["scrap_percent"] > threshold).astype(int)
-    pos = y_global.sum()
-    neg = len(y_global) - pos
+    pos, neg = y_global.sum(), len(y_global) - y_global.sum()
     pct_above = 100 * pos / len(y_global)
     avg_scrap = df_part["scrap_percent"].mean()
 
     if pos == 0 or neg == 0:
-        st.info(
-            f"Average scrap% = {avg_scrap:.2f}%. "
-            f"All runs are below threshold {threshold:.2f}%. "
-            f"100% yield achieved."
-        )
+        st.info(f"Average scrap% = {avg_scrap:.2f}%. All runs below {threshold:.2f}%. 100% yield achieved.")
         return pd.DataFrame(), None
 
-    st.info(f"{pct_above:.1f}% of runs exceed {threshold:.2f}% scrap, average scrap% = {avg_scrap:.2f}%.")
+    st.info(f"{pct_above:.1f}% of runs exceed {threshold:.2f}%, average scrap% = {avg_scrap:.2f}%.")
 
-    results = []
-    rf = None
-
+    results, rf = [], None
     for train, val, test in rolling_splits(df_part):
         for d in [train, val, test]:
             d["Label"] = (d["scrap_percent"] > threshold).astype(int)
@@ -120,28 +133,26 @@ def train_and_evaluate(df_part, threshold):
         probs = probs[:, 1] if probs.shape[1] > 1 else np.zeros(len(X_test))
         preds = (probs > 0.5).astype(int)
 
-        results.append(
-            {
-                "accuracy": accuracy_score(y_test, preds),
-                "precision": precision_score(y_test, preds, zero_division=0),
-                "recall": recall_score(y_test, preds, zero_division=0),
-                "f1": f1_score(y_test, preds, zero_division=0),
-                "brier": brier_score_loss(y_test, probs),
-            }
-        )
+        results.append({
+            "accuracy": accuracy_score(y_test, preds),
+            "precision": precision_score(y_test, preds, zero_division=0),
+            "recall": recall_score(y_test, preds, zero_division=0),
+            "f1": f1_score(y_test, preds, zero_division=0),
+            "brier": brier_score_loss(y_test, probs),
+        })
 
-    if len(results) == 0 or rf is None:
-        st.warning(
-            "⚠️ Not enough historical data to perform rolling validation for this Part ID. "
-            "The model will skip training and continue using available summary statistics."
-        )
+    if not results or rf is None:
+        st.warning("⚠️ Insufficient historical data for rolling validation — using summary statistics only.")
         return pd.DataFrame(), None
 
     return pd.DataFrame(results), rf
 
+# =========================================================
+# UI Sidebar
+# =========================================================
 with st.sidebar:
     st.header("🔧 Manager Input Controls")
-    part_id = st.text_input("Enter Part ID")
+    part_id = st.text_input("Enter Part ID (matches 'Part ID' column exactly)")
     order_qty = st.number_input("Order Quantity", min_value=1, value=100)
     weight = st.number_input("Piece Weight (lbs)", min_value=0.0, value=10.0)
     cost = st.number_input("Cost per Part ($)", min_value=0.0, value=50.0)
@@ -158,13 +169,12 @@ with st.sidebar:
 
 tab1, tab2 = st.tabs(["📈 Dashboard", "📊 Validation (6–2–1)"])
 
+# =========================================================
+# Prediction + ML-PHM Campbell Logic
+# =========================================================
 if predict:
-    with st.spinner("⏳ Training enhanced model..."):
-        if part_id:
-            df_part = df[df["part_id"].astype(str).str.strip().str.lower() == str(part_id).strip().lower()]
-        else:
-            df_part = df.copy()
-
+    with st.spinner("⏳ Training enhanced ML-PHM model..."):
+        df_part = df[df["part_id"].astype(str).str.lower() == str(part_id).lower()]
         if df_part.empty:
             st.warning(f"No data found for Part ID '{part_id}'. Using full dataset.")
             df_part = df.copy()
@@ -194,24 +204,20 @@ if predict:
 
             spc_top = pareto_hist.head(3).index.tolist()
             ml_top_process = process_df.head(3).index.tolist()
-            overlap = set()
-            for proc, defs in campbell_mapping.items():
-                if any(d in spc_top for d in defs):
-                    overlap.add(proc)
+            overlap = {proc for proc, defs in campbell_mapping.items() if any(d in spc_top for d in defs)}
 
             alignment = len(overlap.intersection(ml_top_process)) / max(1, len(ml_top_process))
-
             if alignment >= 0.5:
                 rec_text = (
-                    f"🟢 ML-PHM confirms SPC insight — {', '.join(ml_top_process[:2])} are consistent drivers.\n"
-                    f"Focus on reinforcing best practices and monitoring in these processes."
+                    f"🟢 ML-PHM confirms SPC findings — {', '.join(ml_top_process[:2])} are consistent drivers.\n"
+                    f"Focus on reinforcing best practices and monitoring these processes."
                 )
             else:
                 rec_text = (
-                    f"⚠️ ML-PHM detects emerging or counter-intuitive process trends.\n"
-                    f"SPC may emphasize {', '.join(list(overlap)[:2]) if overlap else 'different processes'},\n"
-                    f"but ML indicates {', '.join(ml_top_process[:2])} as rising contributors.\n"
-                    f"Prioritize investigation and real-time monitoring in these areas."
+                    f"⚠️ ML-PHM detects counter-intuitive process signals.\n"
+                    f"SPC suggests {', '.join(list(overlap)[:2]) if overlap else 'different areas'}, "
+                    f"but ML indicates {', '.join(ml_top_process[:2])} as emerging contributors.\n"
+                    f"Investigate and monitor these for root-cause insights."
                 )
 
             st.session_state.update({
@@ -225,8 +231,11 @@ if predict:
                 "mtts": mtts,
                 "df_part": df_part,
             })
-            st.success("✅ Prediction and ML-PHM Analysis Complete!")
+            st.success("✅ Prediction Complete!")
 
+# =========================================================
+# Dashboard Display
+# =========================================================
 with tab1:
     if "results" in st.session_state:
         df_part = st.session_state.df_part
@@ -242,9 +251,10 @@ with tab1:
         with colA:
             fig, ax = plt.subplots(figsize=(5, 3))
             st.session_state.pareto_hist.head(15).plot(kind="bar", ax=ax, color="steelblue")
-            ax.set_title("Historical Pareto (Observed SPC)")
+            ax.set_title("Historical Pareto (SPC Observed)")
             ax.tick_params(axis="x", rotation=90)
             st.pyplot(fig)
+
         with colB:
             fig, ax = plt.subplots(figsize=(5, 3))
             st.session_state.pareto_pred.head(15).plot(kind="bar", ax=ax, color="seagreen")
