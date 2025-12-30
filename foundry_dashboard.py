@@ -1,5 +1,5 @@
 # ============================================================
-# 🏭 Foundry Scrap Risk Dashboard — Full Version (Auto 6–2–1)
+# 🏭 Foundry Scrap Risk Dashboard (Full Auto 6–2–1)
 # ============================================================
 
 import warnings
@@ -12,7 +12,6 @@ import pandas as pd
 import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import accuracy_score, classification_report
 
 # -------------------------------
 # Streamlit setup
@@ -24,67 +23,107 @@ DEFAULT_ESTIMATORS = 180
 DEFAULT_THRESHOLD = 6.5
 MIN_SAMPLES_LEAF = 2
 
-# -------------------------------
-# Utility: normalize headers
-# -------------------------------
-def _normalize_headers(cols: pd.Index) -> pd.Index:
-    return (
-        pd.Index(cols)
+# ============================================================
+# Data loading and cleaning
+# ============================================================
+@st.cache_data(show_spinner=False)
+def load_and_clean(csv_path: str) -> pd.DataFrame:
+    """
+    Loads and cleans foundry scrap data.
+    Only 'Part ID' is used as the unique identifier (no work order mappings).
+    """
+    df = pd.read_csv(csv_path)
+
+    # Flatten any multi-row headers
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            "_".join([str(x) for x in col if str(x) != "None"]).strip()
+            for col in df.columns.values
+        ]
+
+    # Normalize headers (spaces -> underscores, lowercase)
+    df.columns = (
+        pd.Index(df.columns)
         .str.strip()
-        .str.lower()
         .str.replace(r"[^\w\s]", " ", regex=True)
         .str.replace(r"\s+", "_", regex=True)
         .str.strip("_")
+        .str.lower()
     )
 
-def _canonical_rename(df: pd.DataFrame) -> pd.DataFrame:
+    # 🔒 Explicitly disallow any "work_order" columns
+    forbidden_cols = [c for c in df.columns if "work_order" in c]
+    if forbidden_cols:
+        df.drop(columns=forbidden_cols, inplace=True, errors="ignore")
+        st.warning(f"⚠ Dropped disallowed columns: {forbidden_cols}")
+
+    # Canonical renames
     rename_map = {
-        "work_order": "part_id",
-        "work_order_number": "part_id",
-        "work_order_#": "part_id",
-        "work_order_num": "part_id",
         "order_quantity": "order_quantity",
-        "pieces": "order_quantity",
         "pieces_scrapped": "pieces_scrapped",
-        "total_scrap_weight": "total_scrap_weight_lbs",
-        "piece_weight": "piece_weight_lbs",
-        "scrap%": "scrap_percent",
+        "total_scrap_weight_lbs": "total_scrap_weight_lbs",
         "scrap_percent": "scrap_percent",
         "scrap": "scrap_percent",
-        "week_end": "week_ending",
+        "scrap_": "scrap_percent",
+        "sellable": "sellable",
+        "heats": "heats",
+        "week_ending": "week_ending",
+        "piece_weight_lbs": "piece_weight_lbs",
+        "part_id": "part_id",
     }
     df.rename(columns=rename_map, inplace=True)
-    return df
 
-# -------------------------------
-# Data load and clean
-# -------------------------------
-@st.cache_data(show_spinner=False)
-def load_and_clean(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    df.columns = _normalize_headers(df.columns)
-    df = _canonical_rename(df)
+    # 🧩 Ensure 'part_id' exists
+    if "part_id" not in df.columns:
+        for c in df.columns:
+            if "part" in c and "id" in c:
+                df.rename(columns={c: "part_id"}, inplace=True)
+                break
+    if "part_id" not in df.columns:
+        st.error("❌ No 'Part ID' column found — please add one to your CSV.")
+        st.stop()
 
-    for c in ["part_id", "order_quantity", "piece_weight_lbs", "week_ending"]:
-        if c not in df.columns:
-            df[c] = np.nan
+    # Handle duplicate part_id columns
+    if (df.columns == "part_id").sum() > 1:
+        first_idx = np.where(df.columns == "part_id")[0][0]
+        keep_mask = np.ones(len(df.columns), dtype=bool)
+        dup_idx = np.where(df.columns == "part_id")[0][1:]
+        keep_mask[dup_idx] = False
+        df = df.loc[:, keep_mask]
+        st.warning("⚠ Multiple 'Part ID' columns detected — keeping the first.")
 
-    df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-    df["scrap_percent"] = pd.to_numeric(df.get("scrap_percent", 0.0), errors="coerce").fillna(0.0)
-    df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce").fillna(0.0)
-    df["piece_weight_lbs"] = pd.to_numeric(df["piece_weight_lbs"], errors="coerce").fillna(0.0)
-    df["part_id"] = df["part_id"].astype(str).replace({"nan": "unknown", "": "unknown"})
-    df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
+    # Guarantee part_id is 1D and string
+    if isinstance(df["part_id"], pd.DataFrame):
+        df["part_id"] = df["part_id"].iloc[:, 0]
+    df["part_id"] = (
+        df["part_id"].astype(str).replace({"nan": "unknown", "": "unknown"}).str.strip()
+    )
 
-    # convert *_rate columns to numeric
-    for c in [c for c in df.columns if c.endswith("_rate")]:
+    # Numeric conversions
+    num_cols = [
+        c
+        for c in df.columns
+        if c.endswith("_rate")
+        or "scrap" in c
+        or "weight" in c
+        or "quantity" in c
+    ]
+    for c in num_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
+    # Convert dates
+    if "week_ending" in df.columns:
+        df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
+        df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
+
+    st.info(
+        f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns. Using 'Part ID' as the unique identifier."
+    )
     return df
 
-# -------------------------------
+# ============================================================
 # Helper functions
-# -------------------------------
+# ============================================================
 def time_split(df, train_ratio=0.6, calib_ratio=0.2):
     df_sorted = df.sort_values("week_ending").reset_index(drop=True)
     n = len(df_sorted)
@@ -93,7 +132,7 @@ def time_split(df, train_ratio=0.6, calib_ratio=0.2):
     return df_sorted.iloc[:train_end], df_sorted.iloc[train_end:calib_end], df_sorted.iloc[calib_end:]
 
 def compute_mtbf_on_train(df_train, thr_label):
-    grp = df_train.groupby("part_id")["scrap_percent"].mean().reset_index()
+    grp = df_train.groupby("part_id", dropna=False)["scrap_percent"].mean().reset_index()
     grp.rename(columns={"scrap_percent": "mttf_scrap"}, inplace=True)
     grp["mttf_scrap"] = np.where(grp["mttf_scrap"] <= thr_label, 1.0, grp["mttf_scrap"])
     return grp
@@ -124,17 +163,15 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
         random_state=RANDOM_STATE,
         n_jobs=-1,
     ).fit(X_train, y_train)
-
     pos = int(y_calib.sum())
     if pos == 0 or pos == len(y_calib):
         return rf, rf, "uncalibrated"
-
     cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
     return rf, cal, "calibrated (sigmoid, cv=3)"
 
-# -------------------------------
-# Similarity Search Helper
-# -------------------------------
+# ============================================================
+# Similarity search
+# ============================================================
 @st.cache_data(show_spinner=False)
 def find_similar_parts(df, target_weight, defect_cols, min_rows=30):
     """Iteratively widen similarity window for weight and defects until enough data are found."""
@@ -143,17 +180,15 @@ def find_similar_parts(df, target_weight, defect_cols, min_rows=30):
 
     weight_tol = 0.01  # ±1%
     defect_tol = 0.01
-    max_tol = 0.10     # ±10%
+    max_tol = 0.10
     similar = pd.DataFrame()
 
-    # Step 1: Similar by weight
     while len(similar) < min_rows and weight_tol <= max_tol:
         lower = target_weight * (1 - weight_tol)
         upper = target_weight * (1 + weight_tol)
         similar = df[df["piece_weight_lbs"].between(lower, upper)]
         weight_tol += 0.005
 
-    # Step 2: Refine by defect similarity
     if not similar.empty and defect_cols:
         mean_defects = df[defect_cols].mean()
         defect_tol = 0.01
@@ -164,13 +199,13 @@ def find_similar_parts(df, target_weight, defect_cols, min_rows=30):
 
     return similar
 
-# -------------------------------
-# Sidebar
-# -------------------------------
-st.sidebar.header("📂 Data source")
+# ============================================================
+# Streamlit Sidebar
+# ============================================================
+st.sidebar.header("📂 Data Source")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
 
-st.sidebar.header("⚙️ Model controls")
+st.sidebar.header("⚙️ Model Controls")
 thr_label = st.sidebar.slider("Scrap % threshold (Label & MTTF)", 1.0, 15.0, DEFAULT_THRESHOLD, 0.5)
 use_rate_cols = st.sidebar.checkbox("Include *_rate process features", True)
 n_est = st.sidebar.slider("Number of trees (n_estimators)", 50, 300, DEFAULT_ESTIMATORS, 10)
@@ -179,9 +214,9 @@ if not os.path.exists(csv_path):
     st.error("❌ CSV not found.")
     st.stop()
 
-# -------------------------------
-# Predict Tab
-# -------------------------------
+# ============================================================
+# Main Prediction Panel
+# ============================================================
 st.title("🏭 Foundry Scrap Risk Dashboard (Full Auto 6–2–1)")
 
 part_id_input = st.text_input("Part ID", value="Unknown")
@@ -246,7 +281,7 @@ if st.button("Predict"):
         exp_loss = exp_scrap * cost_per_part
         reliability = 1.0 - adj_prob
 
-        # 5️⃣ Display
+        # 5️⃣ Display results
         st.markdown(f"### 🧩 Prediction Results for Part **{part_id_input}**")
         st.metric("Predicted Scrap Risk", f"{adj_prob*100:.2f}%")
         st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
