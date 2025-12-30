@@ -133,11 +133,25 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     df.columns = _normalize_headers(df.columns)
     df = _canonical_rename(df)
 
+    # Handle duplicate columns (keep first occurrence only)
+    if df.columns.duplicated().any():
+        st.warning(f"⚠️ Detected {df.columns.duplicated().sum()} duplicate column names - keeping first occurrence")
+        df = df.loc[:, ~df.columns.duplicated()]
+    
     # Ensure key columns exist
     for c in ["part_id", "order_quantity", "piece_weight_lbs", "week_ending", "scrap_percent"]:
         if c not in df.columns:
             df[c] = 0.0 if c != "week_ending" else pd.NaT
 
+    # Clean part_id FIRST (before other conversions)
+    if "part_id" in df.columns:
+        # Force to single column if somehow still a DataFrame
+        if isinstance(df["part_id"], pd.DataFrame):
+            df["part_id"] = df["part_id"].iloc[:, 0]
+        df["part_id"] = df["part_id"].fillna("Unknown").astype(str)
+        df["part_id"] = df["part_id"].str.strip()
+        df["part_id"] = df["part_id"].replace({"nan": "Unknown", "": "Unknown", "None": "Unknown"})
+    
     # Data type conversions
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0.0)
@@ -151,11 +165,6 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
 
     # Drop invalid dates
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
-    
-    # Clean part_id
-    if "part_id" in df.columns:
-        df["part_id"] = df["part_id"].astype(str).str.strip()
-        df["part_id"] = df["part_id"].replace({"nan": "Unknown", "": "Unknown", "None": "Unknown"})
 
     st.info(f"✅ Loaded {len(df):,} rows, {len(defect_cols)} defect rate columns")
     return df
