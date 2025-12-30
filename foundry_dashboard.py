@@ -246,6 +246,9 @@ if st.button("Predict"):
         X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
         rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
 
+        # Debug: show class balance
+        st.write(f"🧩 Training samples: {len(X_train)} | Scrap=1: {y_train.sum()} | Scrap=0: {(y_train==0).sum()}")
+
         st.success(f"✅ Model retrained ({method}) using {len(X_train)} samples.")
 
         # --- SAFE FEATURE IMPORTANCES ---
