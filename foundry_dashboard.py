@@ -1,6 +1,7 @@
 # ============================================================
 # 🏭 Foundry Scrap Risk Dashboard
-# Dynamic 6–2–1 retraining + similarity expansion + calibration-safe feature importances
+# Dynamic 6–2–1 retraining + iterative similarity expansion +
+# calibration-safe feature importances + full cache reset per Predict
 # ============================================================
 
 import warnings
@@ -29,19 +30,14 @@ MIN_SAMPLES_LEAF = 2
 def safe_feature_importances(model):
     """Extracts feature importances safely from any model type."""
     try:
-        # Direct RandomForest case
         if hasattr(model, "feature_importances_"):
             return model.feature_importances_
-
-        # CalibratedClassifierCV wrapper
         if hasattr(model, "base_estimator"):
             base = model.base_estimator
             if isinstance(base, list):
                 base = base[0]
             if hasattr(base, "feature_importances_"):
                 return base.feature_importances_
-
-        # Ensemble list (rare)
         if hasattr(model, "estimators_") and len(model.estimators_) > 0:
             est = model.estimators_[0]
             if hasattr(est, "feature_importances_"):
@@ -217,6 +213,9 @@ cost_per_part = st.number_input("Cost per Part ($)", min_value=0.1, value=10.0)
 
 if st.button("Predict"):
     try:
+        # 👇 Force clear cached data each run
+        st.cache_data.clear()
+
         st.info("🔁 Re-training model (6–2–1) with part-specific dataset...")
 
         df = load_and_clean(csv_path)
