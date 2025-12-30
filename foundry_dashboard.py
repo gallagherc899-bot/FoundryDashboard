@@ -58,11 +58,17 @@ def train_and_evaluate(df_part, threshold):
     X = df_part.select_dtypes(include=[np.number]).drop(columns=['Scrap%'], errors='ignore')
     y = (df_part['Scrap%'] > threshold).astype(int)
 
+    # Handle single-class data
     if len(np.unique(y)) < 2:
         return None, None
 
     model = RandomForestClassifier(random_state=42, n_estimators=200)
     model.fit(X, y)
+
+    # Unwrap any calibration wrapper
+    if hasattr(model, "base_estimator_"):
+        model = model.base_estimator_
+
     y_pred = model.predict(X)
 
     metrics = {
@@ -73,8 +79,14 @@ def train_and_evaluate(df_part, threshold):
     }
 
     try:
-        y_prob = model.predict_proba(X)[:, 1]
-        metrics['brier'] = brier_score_loss(y, y_prob)
+        if hasattr(model, "predict_proba"):
+            y_prob = model.predict_proba(X)
+            if y_prob.shape[1] > 1:
+                metrics['brier'] = brier_score_loss(y, y_prob[:, 1])
+            else:
+                metrics['brier'] = np.nan
+        else:
+            metrics['brier'] = np.nan
     except Exception:
         metrics['brier'] = np.nan
 
