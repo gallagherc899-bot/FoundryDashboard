@@ -220,11 +220,19 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
     ).fit(X_train, y_train)
 
     pos = int(y_calib.sum())
-    if pos == 0 or pos == len(y_calib):
-        return rf, rf, "uncalibrated"
-
-    cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
-    return rf, cal, "calibrated (sigmoid, cv=3)"
+    neg = int((y_calib == 0).sum())
+    
+    # Need at least 3 samples per class for 3-fold CV
+    if pos < 3 or neg < 3:
+        st.warning(f"⚠️ Insufficient samples for calibration (Scrap=1: {pos}, Scrap=0: {neg}). Using uncalibrated model.")
+        return rf, rf, "uncalibrated (insufficient calibration samples)"
+    
+    try:
+        cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
+        return rf, cal, "calibrated (sigmoid, cv=3)"
+    except ValueError as e:
+        st.warning(f"⚠️ Calibration failed: {e}. Using uncalibrated model.")
+        return rf, rf, "uncalibrated (calibration failed)"
 
 
 # ================================================================
