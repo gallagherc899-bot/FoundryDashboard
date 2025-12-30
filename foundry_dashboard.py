@@ -52,13 +52,12 @@ def get_similar_parts(df, part_id, scrap_col='Scrap%', weight_col='Piece Weight 
     return similar
 
 # ---------------------------------------------------------
-# Train and Evaluate Model
+# Train and Evaluate Model (forced RF only)
 # ---------------------------------------------------------
 def train_and_evaluate(df_part, threshold):
     X = df_part.select_dtypes(include=[np.number]).drop(columns=['Scrap%'], errors='ignore')
     y = (df_part['Scrap%'] > threshold).astype(int)
 
-    # Skip training if one class only
     if len(np.unique(y)) < 2:
         return None, None
 
@@ -87,6 +86,16 @@ def train_and_evaluate(df_part, threshold):
     return metrics, feature_imp
 
 # ---------------------------------------------------------
+# Correlation-based fallback (if RF fails)
+# ---------------------------------------------------------
+def correlation_fallback(df_part):
+    corr = df_part.corr(numeric_only=True)
+    if 'Scrap%' not in corr.columns:
+        return pd.DataFrame()
+    corr_target = corr['Scrap%'].drop('Scrap%', errors='ignore').abs().sort_values(ascending=False)
+    return pd.DataFrame({'Feature': corr_target.index, 'Importance': corr_target.values})
+
+# ---------------------------------------------------------
 # Prediction Logic
 # ---------------------------------------------------------
 if st.sidebar.button("🔮 Predict"):
@@ -100,7 +109,6 @@ if st.sidebar.button("🔮 Predict"):
         else:
             y_check = (df_part['Scrap%'] > threshold).astype(int)
 
-            # Dual-class safeguard
             if len(df_part) >= 10 and len(np.unique(y_check)) == 2:
                 st.info(f"✅ Direct training on Part {part_id} (dual-class dataset).")
                 active_df = df_part
@@ -114,6 +122,11 @@ if st.sidebar.button("🔮 Predict"):
                     active_df = df_part
 
             metrics, feature_imp = train_and_evaluate(active_df, threshold)
+
+            # If model fails, use correlation fallback
+            if feature_imp is None or feature_imp.empty:
+                st.warning("⚠️ ML model could not find enough variation — using correlation-based defect mapping.")
+                feature_imp = correlation_fallback(active_df)
 
             # ---------------------------------------------------------
             # Charts
@@ -131,7 +144,7 @@ if st.sidebar.button("🔮 Predict"):
 
             with col2:
                 st.subheader("Predicted Pareto (Enhanced ML-PHM)")
-                if feature_imp is not None:
+                if feature_imp is not None and not feature_imp.empty:
                     pred_pareto = feature_imp.set_index('Feature').head(10)
                     plt.figure(figsize=(6, 4))
                     plt.bar(pred_pareto.index, pred_pareto['Importance'], color='seagreen')
@@ -156,7 +169,7 @@ if st.sidebar.button("🔮 Predict"):
             }
 
             influence_data = []
-            if feature_imp is not None:
+            if feature_imp is not None and not feature_imp.empty:
                 for process, defects in process_map.items():
                     for defect in defects:
                         imp = feature_imp.loc[feature_imp['Feature'] == defect, 'Importance']
