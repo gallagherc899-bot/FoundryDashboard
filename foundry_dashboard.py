@@ -119,7 +119,12 @@ if predict:
         expected_scrap = order_qty * (scrap_pred / 100)
         loss = expected_scrap * cost
 
-        base_model = model.base_estimator if hasattr(model, "base_estimator") else model
+        # ✅ FIX: Safely extract the random forest from calibrated model (works across sklearn versions)
+        if isinstance(model, CalibratedClassifierCV):
+            base_model = model.calibrated_classifiers_[0].estimator
+        else:
+            base_model = model
+
         pareto_pred = pd.Series(base_model.feature_importances_, index=defect_cols).sort_values(ascending=False)
         pareto_hist = df_part[defect_cols].mean().sort_values(ascending=False)
 
@@ -193,6 +198,6 @@ with tab1:
 with tab2:
     if "metrics" in st.session_state:
         st.write(pd.DataFrame([st.session_state.metrics]).T.rename(columns={0: "Score"}))
-        st.caption("Global model metrics (v8.4.1) — trained across all parts")
+        st.caption("Global model metrics (v8.4.2) — trained across all parts")
 
-st.caption("© 2025 Foundry Analytics | Global ML-PHM Model with Campbell Process Integration (v8.4.1)")
+st.caption("© 2025 Foundry Analytics | Global ML-PHM Model with Campbell Process Integration (v8.4.2)")
