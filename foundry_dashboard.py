@@ -1,9 +1,16 @@
 # ================================================================
 # 🏭 Foundry Scrap Risk Dashboard with Process Diagnosis
-# VERSION 2.1 - 6-2-1 ROLLING WINDOW + DATA CONFIDENCE INDICATORS
-# Features: Prediction, Process Root Cause Analysis, Pareto Charts,
-#           Rolling Window Retraining, Outcome Logging,
-#           Data Confidence Disclaimers
+# VERSION 3.0 - MULTI-DEFECT INTELLIGENCE
+# ================================================================
+# 
+# NEW IN V3.0:
+# - Multi-defect feature engineering (n_defect_types, total_defect_rate)
+# - Multi-defect interaction detection
+# - Multi-defect alerts in predictions
+# - Performance comparison: with vs without multi-defect features
+# - 6-2-1 Rolling Window + Data Confidence Indicators
+#
+# Based on Campbell (2003) "Castings Practice: The Ten Rules"
 # ================================================================
 
 import warnings
@@ -25,6 +32,7 @@ from sklearn.metrics import (
     classification_report,
     recall_score,
     precision_score,
+    f1_score,
 )
 from datetime import datetime
 import json
@@ -32,7 +40,24 @@ import json
 # -------------------------------
 # Streamlit setup
 # -------------------------------
-st.set_page_config(page_title="Foundry Scrap Risk Dashboard (Rolling Window)", layout="wide")
+st.set_page_config(
+    page_title="Foundry Scrap Risk Dashboard v3.0 - Multi-Defect Intelligence", 
+    layout="wide"
+)
+
+# ================================================================
+# VERSION BANNER
+# ================================================================
+st.markdown("""
+<div style="background: linear-gradient(90deg, #1e3c72 0%, #2a5298 100%); 
+            padding: 10px 20px; border-radius: 10px; margin-bottom: 20px;">
+    <h2 style="color: white; margin: 0;">🏭 Foundry Scrap Risk Dashboard</h2>
+    <p style="color: #a8d0ff; margin: 5px 0 0 0;">
+        <strong>Version 3.0 - Multi-Defect Intelligence</strong> | 
+        6-2-1 Rolling Window | Campbell Process Mapping | Data Confidence Indicators
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
 RANDOM_STATE = 42
 DEFAULT_ESTIMATORS = 180
@@ -43,12 +68,12 @@ MIN_SAMPLES_PER_CLASS = 5
 # ================================================================
 # DATA CONFIDENCE CONFIGURATION
 # ================================================================
-RECOMMENDED_MIN_RECORDS = 5    # Recommended minimum for reliable predictions
-HIGH_CONFIDENCE_RECORDS = 15   # High confidence threshold
+RECOMMENDED_MIN_RECORDS = 5
+HIGH_CONFIDENCE_RECORDS = 15
 DATA_CONFIDENCE_COLORS = {
-    'high': '#28a745',      # Green
-    'medium': '#ffc107',    # Yellow/Orange
-    'low': '#dc3545'        # Red
+    'high': '#28a745',
+    'medium': '#ffc107',
+    'low': '#dc3545'
 }
 
 # ================================================================
@@ -60,6 +85,12 @@ WINDOW_TRAIN_RATIO = 0.6
 WINDOW_CALIB_RATIO = 0.2
 WINDOW_TEST_RATIO = 0.2
 OUTCOMES_FILE = "prediction_outcomes.csv"
+
+# ================================================================
+# MULTI-DEFECT CONFIGURATION (NEW IN V3.0)
+# ================================================================
+MULTI_DEFECT_THRESHOLD = 2  # Alert when >= this many defect types
+MULTI_DEFECT_FEATURES_ENABLED = True  # Toggle for comparison
 
 # ================================================================
 # CAMPBELL PROCESS-DEFECT MAPPING
@@ -111,6 +142,138 @@ for process, info in PROCESS_DEFECT_MAP.items():
         if defect not in DEFECT_TO_PROCESS:
             DEFECT_TO_PROCESS[defect] = []
         DEFECT_TO_PROCESS[defect].append(process)
+
+
+# ================================================================
+# MULTI-DEFECT FEATURE ENGINEERING (NEW IN V3.0)
+# ================================================================
+def add_multi_defect_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add multi-defect intelligence features to the dataframe.
+    
+    NEW FEATURES:
+    - n_defect_types: Count of defect types present (rate > 0)
+    - has_multiple_defects: Binary flag (1 if >= 2 defect types)
+    - total_defect_rate: Sum of all defect rates
+    - max_defect_rate: Maximum single defect rate
+    - defect_concentration: How concentrated defects are (max/total)
+    - shift_x_tearup: Interaction term for common co-occurring defects
+    - shrink_x_porosity: Interaction term for metallurgical defects
+    """
+    df = df.copy()
+    
+    # Identify defect columns
+    defect_cols = [c for c in df.columns if c.endswith('_rate')]
+    
+    if len(defect_cols) == 0:
+        return df
+    
+    # Ensure numeric
+    for col in defect_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
+    # Count of defect types present
+    df['n_defect_types'] = (df[defect_cols] > 0).sum(axis=1)
+    
+    # Binary flag for multiple defects
+    df['has_multiple_defects'] = (df['n_defect_types'] >= MULTI_DEFECT_THRESHOLD).astype(int)
+    
+    # Total defect burden
+    df['total_defect_rate'] = df[defect_cols].sum(axis=1)
+    
+    # Maximum single defect rate
+    df['max_defect_rate'] = df[defect_cols].max(axis=1)
+    
+    # Defect concentration (high = concentrated in few types, low = spread across many)
+    df['defect_concentration'] = df['max_defect_rate'] / (df['total_defect_rate'] + 0.001)
+    
+    # Interaction terms for common defect pairs
+    if 'shift_rate' in df.columns and 'tear_up_rate' in df.columns:
+        df['shift_x_tearup'] = df['shift_rate'] * df['tear_up_rate']
+    
+    if 'shrink_rate' in df.columns and 'gas_porosity_rate' in df.columns:
+        df['shrink_x_porosity'] = df['shrink_rate'] * df['gas_porosity_rate']
+    
+    if 'shrink_rate' in df.columns and 'shrink_porosity_rate' in df.columns:
+        df['shrink_x_shrink_porosity'] = df['shrink_rate'] * df['shrink_porosity_rate']
+    
+    if 'core_rate' in df.columns and 'sand_rate' in df.columns:
+        df['core_x_sand'] = df['core_rate'] * df['sand_rate']
+    
+    return df
+
+
+def get_multi_defect_analysis(df_row: pd.Series, defect_cols: list) -> dict:
+    """
+    Analyze multi-defect patterns for a single row.
+    Returns detailed breakdown for display.
+    """
+    # Get non-zero defects
+    active_defects = []
+    for col in defect_cols:
+        if col in df_row.index and df_row[col] > 0:
+            active_defects.append({
+                'defect': col,
+                'rate': df_row[col],
+                'processes': DEFECT_TO_PROCESS.get(col, ['Unknown'])
+            })
+    
+    # Sort by rate descending
+    active_defects.sort(key=lambda x: x['rate'], reverse=True)
+    
+    # Analyze patterns
+    n_defects = len(active_defects)
+    total_rate = sum(d['rate'] for d in active_defects)
+    
+    # Find process overlaps
+    all_processes = []
+    for d in active_defects:
+        all_processes.extend(d['processes'])
+    
+    from collections import Counter
+    process_counts = Counter(all_processes)
+    
+    return {
+        'n_defect_types': n_defects,
+        'active_defects': active_defects,
+        'total_rate': total_rate,
+        'is_multi_defect': n_defects >= MULTI_DEFECT_THRESHOLD,
+        'process_overlap': process_counts,
+        'primary_processes': [p for p, c in process_counts.most_common(3)]
+    }
+
+
+def display_multi_defect_alert(analysis: dict):
+    """Display multi-defect alert banner if applicable."""
+    if not analysis['is_multi_defect']:
+        return
+    
+    n_defects = analysis['n_defect_types']
+    active = analysis['active_defects']
+    
+    # Create defect list
+    defect_list = ", ".join([
+        f"{d['defect'].replace('_rate', '').replace('_', ' ').title()} ({d['rate']*100:.1f}%)"
+        for d in active[:5]
+    ])
+    
+    # Find common processes
+    common_processes = analysis['primary_processes']
+    
+    st.error(f"""
+🚨 **MULTI-DEFECT ALERT: {n_defects} Defect Types Detected**
+
+**Active Defects:** {defect_list}
+
+**Common Root Cause Processes:** {', '.join(common_processes)}
+
+⚠️ **Interpretation:** Multiple concurrent defects on a single work order often indicate 
+systemic process issues rather than isolated incidents. When defects like Shift and Tear-Up 
+co-occur (as in your data), they typically affect the **same casting**, compounding scrap risk.
+
+💡 **Recommended Action:** Focus on the overlapping processes ({', '.join(common_processes[:2])}) 
+as they likely share a common root cause.
+    """)
 
 
 # ================================================================
@@ -181,8 +344,7 @@ def display_confidence_meter(n_records):
     confidence_pct = get_confidence_percentage(n_records)
     level, level_text, color = get_data_confidence_level(n_records)
     
-    # Create progress bar visualization
-    filled_blocks = int(confidence_pct / 5)  # 20 blocks total
+    filled_blocks = int(confidence_pct / 5)
     empty_blocks = 20 - filled_blocks
     
     if level == 'high':
@@ -242,7 +404,7 @@ def _canonical_rename(df: pd.DataFrame) -> pd.DataFrame:
 # Data loading and cleaning
 # -------------------------------
 @st.cache_data(show_spinner=False)
-def load_and_clean(csv_path: str) -> pd.DataFrame:
+def load_and_clean(csv_path: str, add_multi_defect: bool = True) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
 
     if isinstance(df.columns, pd.MultiIndex):
@@ -285,9 +447,13 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
     df = df.sort_values("week_ending").reset_index(drop=True)
 
+    # ADD MULTI-DEFECT FEATURES (NEW IN V3.0)
+    if add_multi_defect:
+        df = add_multi_defect_features(df)
+
     n_parts = df["part_id"].nunique() if "part_id" in df.columns else 0
     n_work_orders = df["work_order"].nunique() if "work_order" in df.columns else len(df)
-    st.info(f"✅ Loaded {len(df):,} rows | {n_parts} unique parts | {n_work_orders} work orders | {len(defect_cols)} defect columns")
+    st.info(f"✅ Loaded {len(df):,} rows | {n_parts} unique parts | {n_work_orders} work orders | {len(defect_cols)} defect columns | Multi-defect features: {'ON' if add_multi_defect else 'OFF'}")
     return df
 
 
@@ -379,9 +545,21 @@ def attach_train_features(df_sub: pd.DataFrame, mtbf_train: pd.DataFrame,
     return s
 
 
-def make_xy(df: pd.DataFrame, thr_label: float, use_rate_cols: bool):
+def make_xy(df: pd.DataFrame, thr_label: float, use_rate_cols: bool, use_multi_defect: bool = True):
     """Prepare features (X) and labels (y)."""
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
+    
+    # Add multi-defect features (NEW IN V3.0)
+    if use_multi_defect:
+        multi_defect_feats = [
+            "n_defect_types", "has_multiple_defects", "total_defect_rate",
+            "max_defect_rate", "defect_concentration",
+            "shift_x_tearup", "shrink_x_porosity", "shrink_x_shrink_porosity", "core_x_sand"
+        ]
+        for f in multi_defect_feats:
+            if f in df.columns:
+                feats.append(f)
+    
     if use_rate_cols:
         feats += [c for c in df.columns if c.endswith("_rate")]
 
@@ -421,7 +599,7 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
 # ================================================================
 # ROLLING WINDOW MODEL TRAINING
 # ================================================================
-def train_model_with_rolling_window(df_base, df_outcomes, thr_label, use_rate_cols, n_est):
+def train_model_with_rolling_window(df_base, df_outcomes, thr_label, use_rate_cols, n_est, use_multi_defect=True):
     """Train model using 6-2-1 rolling window on combined base + outcome data."""
     
     if df_outcomes is not None and len(df_outcomes) > 0:
@@ -461,11 +639,84 @@ def train_model_with_rolling_window(df_base, df_outcomes, thr_label, use_rate_co
     df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
     df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
     
-    X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
-    X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
+    X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols, use_multi_defect)
+    X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols, use_multi_defect)
     rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
     
     return rf, cal_model, method, feats, df_train, df_calib, df_test, mtbf_train, part_freq_train, default_mtbf, default_freq
+
+
+# ================================================================
+# MODEL COMPARISON (NEW IN V3.0)
+# ================================================================
+def compare_models_with_without_multi_defect(df_base, thr_label, use_rate_cols, n_est):
+    """
+    Compare model performance WITH vs WITHOUT multi-defect features.
+    Returns comparison metrics for display.
+    """
+    results = {}
+    
+    # Model WITHOUT multi-defect features
+    df_train, df_calib, df_test = time_split_621(df_base)
+    
+    mtbf_train = compute_mtbf_on_train(df_train, thr_label)
+    part_freq_train = df_train["part_id"].value_counts(normalize=True)
+    default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
+    default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
+    
+    df_train_f = attach_train_features(df_train.copy(), mtbf_train, part_freq_train, default_mtbf, default_freq)
+    df_calib_f = attach_train_features(df_calib.copy(), mtbf_train, part_freq_train, default_mtbf, default_freq)
+    df_test_f = attach_train_features(df_test.copy(), mtbf_train, part_freq_train, default_mtbf, default_freq)
+    
+    # WITHOUT multi-defect
+    X_train_no, y_train_no, feats_no = make_xy(df_train_f.copy(), thr_label, use_rate_cols, use_multi_defect=False)
+    X_calib_no, y_calib_no, _ = make_xy(df_calib_f.copy(), thr_label, use_rate_cols, use_multi_defect=False)
+    X_test_no, y_test_no, _ = make_xy(df_test_f.copy(), thr_label, use_rate_cols, use_multi_defect=False)
+    
+    _, cal_no, _ = train_and_calibrate(X_train_no, y_train_no, X_calib_no, y_calib_no, n_est)
+    
+    preds_no = cal_no.predict_proba(X_test_no)[:, 1]
+    pred_binary_no = (preds_no > 0.5).astype(int)
+    
+    results['without'] = {
+        'brier': brier_score_loss(y_test_no, preds_no),
+        'accuracy': accuracy_score(y_test_no, pred_binary_no),
+        'recall': recall_score(y_test_no, pred_binary_no, zero_division=0),
+        'precision': precision_score(y_test_no, pred_binary_no, zero_division=0),
+        'f1': f1_score(y_test_no, pred_binary_no, zero_division=0),
+        'n_features': len(feats_no)
+    }
+    
+    # WITH multi-defect
+    X_train_yes, y_train_yes, feats_yes = make_xy(df_train_f.copy(), thr_label, use_rate_cols, use_multi_defect=True)
+    X_calib_yes, y_calib_yes, _ = make_xy(df_calib_f.copy(), thr_label, use_rate_cols, use_multi_defect=True)
+    X_test_yes, y_test_yes, _ = make_xy(df_test_f.copy(), thr_label, use_rate_cols, use_multi_defect=True)
+    
+    _, cal_yes, _ = train_and_calibrate(X_train_yes, y_train_yes, X_calib_yes, y_calib_yes, n_est)
+    
+    preds_yes = cal_yes.predict_proba(X_test_yes)[:, 1]
+    pred_binary_yes = (preds_yes > 0.5).astype(int)
+    
+    results['with'] = {
+        'brier': brier_score_loss(y_test_yes, preds_yes),
+        'accuracy': accuracy_score(y_test_yes, pred_binary_yes),
+        'recall': recall_score(y_test_yes, pred_binary_yes, zero_division=0),
+        'precision': precision_score(y_test_yes, pred_binary_yes, zero_division=0),
+        'f1': f1_score(y_test_yes, pred_binary_yes, zero_division=0),
+        'n_features': len(feats_yes)
+    }
+    
+    # Calculate improvements
+    results['improvement'] = {
+        'brier': (results['without']['brier'] - results['with']['brier']) / results['without']['brier'] * 100,
+        'accuracy': (results['with']['accuracy'] - results['without']['accuracy']) * 100,
+        'recall': (results['with']['recall'] - results['without']['recall']) * 100,
+        'precision': (results['with']['precision'] - results['without']['precision']) * 100,
+        'f1': (results['with']['f1'] - results['without']['f1']) * 100,
+        'n_features': results['with']['n_features'] - results['without']['n_features']
+    }
+    
+    return results
 
 
 # ================================================================
@@ -628,6 +879,10 @@ thr_label = st.sidebar.slider("Scrap % threshold", 1.0, 15.0, DEFAULT_THRESHOLD,
 use_rate_cols = st.sidebar.checkbox("Include *_rate process features", True)
 n_est = st.sidebar.slider("Number of trees", 50, 300, DEFAULT_ESTIMATORS, 10)
 
+st.sidebar.header("🧬 Multi-Defect Intelligence (V3.0)")
+use_multi_defect = st.sidebar.checkbox("Enable Multi-Defect Features", True)
+st.sidebar.caption("Adds n_defect_types, interaction terms, and alerts")
+
 st.sidebar.header("🔄 Rolling Window")
 rolling_enabled = st.sidebar.checkbox("Enable 6-2-1 Rolling Window", ROLLING_WINDOW_ENABLED)
 if rolling_enabled:
@@ -645,7 +900,7 @@ if not os.path.exists(csv_path):
 # -------------------------------
 # Load and prepare data
 # -------------------------------
-df_base = load_and_clean(csv_path)
+df_base = load_and_clean(csv_path, add_multi_defect=use_multi_defect)
 df_base = calculate_process_indices(df_base)
 
 df_outcomes = load_outcomes() if rolling_enabled else None
@@ -659,6 +914,12 @@ avg_runs_per_part = len(df_base) / n_parts if n_parts > 0 else 0
 st.sidebar.metric("Unique Parts", f"{n_parts:,}")
 st.sidebar.metric("Work Orders", f"{n_work_orders:,}")
 st.sidebar.metric("Avg Runs/Part", f"{avg_runs_per_part:.1f}")
+
+# Multi-defect stats
+if use_multi_defect and 'n_defect_types' in df_base.columns:
+    multi_defect_pct = (df_base['has_multiple_defects'].sum() / len(df_base) * 100)
+    st.sidebar.metric("Multi-Defect Work Orders", f"{multi_defect_pct:.1f}%")
+
 st.sidebar.caption("ℹ️ Model analyzes by Part ID, not Work Order")
 
 # Train model with rolling window
@@ -666,19 +927,20 @@ st.sidebar.caption("ℹ️ Model analyzes by Part ID, not Work Order")
  df_train_base, df_calib_base, df_test_base,
  mtbf_train_base, part_freq_train_base, 
  default_mtbf_base, default_freq_base) = train_model_with_rolling_window(
-    df_base, df_outcomes, thr_label, use_rate_cols, n_est
+    df_base, df_outcomes, thr_label, use_rate_cols, n_est, use_multi_defect
 )
 
+feature_label = "with Multi-Defect features" if use_multi_defect else "without Multi-Defect features"
 if rolling_enabled:
-    st.success(f"✅ Model trained with 6-2-1 Rolling Window: {method_base}, {len(df_train_base)} train samples")
+    st.success(f"✅ Model trained ({feature_label}) with 6-2-1 Rolling Window: {method_base}, {len(df_train_base)} train samples, {len(feats_base)} features")
 else:
-    st.success(f"✅ Base model loaded: {method_base}, {len(df_train_base)} samples")
+    st.success(f"✅ Base model loaded ({feature_label}): {method_base}, {len(df_train_base)} samples, {len(feats_base)} features")
 
 
 # -------------------------------
 # TABS
 # -------------------------------
-tab1, tab2, tab3 = st.tabs(["🔮 Predict & Diagnose", "📏 Validation", "📝 Log Outcome"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔮 Predict & Diagnose", "📏 Validation", "📊 Model Comparison", "📝 Log Outcome"])
 
 # ================================================================
 # TAB 1: PREDICTION & PROCESS DIAGNOSIS
@@ -688,6 +950,9 @@ with tab1:
     
     if rolling_enabled:
         st.info("🔄 **Rolling Window Mode**: Model trains on combined historical + logged outcome data using 6-2-1 temporal split")
+    
+    if use_multi_defect:
+        st.info("🧬 **Multi-Defect Intelligence**: Enabled - model includes defect count, interactions, and concentration features")
     
     col1, col2, col3, col4 = st.columns(4)
     part_id_input = col1.text_input("Part ID", value="Unknown")
@@ -702,7 +967,7 @@ with tab1:
             st.info("🔄 Retraining model with part-specific dataset...")
             
             # Reload and combine with outcomes
-            df_full = load_and_clean(csv_path)
+            df_full = load_and_clean(csv_path, add_multi_defect=use_multi_defect)
             df_full = calculate_process_indices(df_full)
             
             # If rolling window, combine with outcomes
@@ -720,10 +985,21 @@ with tab1:
                         df_full = pd.concat([df_full, df_outcomes_valid[df_full.columns]], ignore_index=True)
                         df_full = df_full.sort_values('week_ending').reset_index(drop=True)
             
-            # ================================================================
-            # COUNT PART-SPECIFIC RECORDS FOR CONFIDENCE ASSESSMENT
-            # ================================================================
+            # Count part-specific records
             part_specific_records = len(df_full[df_full["part_id"] == part_id_input])
+            
+            # Get part history for multi-defect analysis
+            part_history = df_full[df_full["part_id"] == part_id_input]
+            defect_cols = [c for c in df_full.columns if c.endswith("_rate")]
+            
+            # MULTI-DEFECT ANALYSIS (NEW IN V3.0)
+            if len(part_history) > 0 and use_multi_defect:
+                # Get most recent row for analysis
+                latest_row = part_history.iloc[-1]
+                multi_defect_analysis = get_multi_defect_analysis(latest_row, defect_cols)
+                
+                if multi_defect_analysis['is_multi_defect']:
+                    display_multi_defect_alert(multi_defect_analysis)
             
             df_part = prepare_part_specific_data(
                 df_full, 
@@ -764,29 +1040,39 @@ with tab1:
             df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
             df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
             
-            X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
-            X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
+            X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols, use_multi_defect)
+            X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols, use_multi_defect)
             
             rf_part, cal_part, method_part = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
             
-            st.success(f"✅ Part-specific model trained: {method_part}, {len(X_train)} samples")
+            st.success(f"✅ Part-specific model trained: {method_part}, {len(X_train)} samples, {len(feats)} features")
             st.info(f"📊 Training labels: Scrap=1: {y_train.sum()}, Scrap=0: {(y_train == 0).sum()}")
             
             # Create prediction input
-            part_history = df_full[df_full["part_id"] == part_id_input]
             if len(part_history) > 0:
                 hist_mttf = float(mtbf_train[mtbf_train["part_id"] == part_id_input]["mttf_scrap"].values[0]) \
                     if part_id_input in mtbf_train["part_id"].values else default_mtbf
                 hist_freq = float(part_freq_train.get(part_id_input, default_freq))
+                defect_means = part_history[defect_cols].mean()
+                
+                # Multi-defect features from history
+                if use_multi_defect:
+                    n_defect_types = (part_history[defect_cols] > 0).sum(axis=1).mean()
+                    has_multiple = 1 if n_defect_types >= MULTI_DEFECT_THRESHOLD else 0
+                    total_defect = part_history[defect_cols].sum(axis=1).mean()
+                    max_defect = part_history[defect_cols].max(axis=1).mean()
+                    defect_conc = max_defect / (total_defect + 0.001)
             else:
                 hist_mttf = default_mtbf
                 hist_freq = default_freq
-
-            defect_cols = [c for c in df_full.columns if c.endswith("_rate")]
-            if len(part_history) > 0:
-                defect_means = part_history[defect_cols].mean()
-            else:
                 defect_means = df_full[defect_cols].mean()
+                
+                if use_multi_defect:
+                    n_defect_types = df_full['n_defect_types'].mean() if 'n_defect_types' in df_full.columns else 0
+                    has_multiple = 0
+                    total_defect = df_full['total_defect_rate'].mean() if 'total_defect_rate' in df_full.columns else 0
+                    max_defect = df_full['max_defect_rate'].mean() if 'max_defect_rate' in df_full.columns else 0
+                    defect_conc = max_defect / (total_defect + 0.001)
 
             input_dict = {
                 "order_quantity": order_qty,
@@ -794,6 +1080,25 @@ with tab1:
                 "mttf_scrap": hist_mttf,
                 "part_freq": hist_freq,
             }
+            
+            # Add multi-defect features
+            if use_multi_defect:
+                input_dict["n_defect_types"] = n_defect_types
+                input_dict["has_multiple_defects"] = has_multiple
+                input_dict["total_defect_rate"] = total_defect
+                input_dict["max_defect_rate"] = max_defect
+                input_dict["defect_concentration"] = defect_conc
+                
+                # Interaction terms
+                if 'shift_rate' in defect_means.index and 'tear_up_rate' in defect_means.index:
+                    input_dict["shift_x_tearup"] = defect_means['shift_rate'] * defect_means['tear_up_rate']
+                if 'shrink_rate' in defect_means.index and 'gas_porosity_rate' in defect_means.index:
+                    input_dict["shrink_x_porosity"] = defect_means['shrink_rate'] * defect_means['gas_porosity_rate']
+                if 'shrink_rate' in defect_means.index and 'shrink_porosity_rate' in defect_means.index:
+                    input_dict["shrink_x_shrink_porosity"] = defect_means['shrink_rate'] * defect_means['shrink_porosity_rate']
+                if 'core_rate' in defect_means.index and 'sand_rate' in defect_means.index:
+                    input_dict["core_x_sand"] = defect_means['core_rate'] * defect_means['sand_rate']
+            
             for dc in defect_cols:
                 input_dict[dc] = defect_means.get(dc, 0.0)
 
@@ -812,12 +1117,11 @@ with tab1:
                 'piece_weight_lbs': piece_weight,
                 'predicted_scrap': scrap_risk,
                 'cost_per_part': cost_per_part,
-                'part_records': part_specific_records
+                'part_records': part_specific_records,
+                'multi_defect_enabled': use_multi_defect
             }
 
-            # ================================================================
-            # DISPLAY DATA CONFIDENCE BANNER
-            # ================================================================
+            # Display data confidence banner
             st.markdown("---")
             display_data_confidence_banner(part_specific_records, part_id_input)
             display_confidence_meter(part_specific_records)
@@ -831,18 +1135,26 @@ with tab1:
             r3.metric("Expected Loss", f"${expected_loss:,.2f}")
             r4.metric("Reliability", f"{reliability:.1f}%")
 
-            # ================================================================
-            # DATA SOURCE EXPLANATION
-            # ================================================================
+            # Multi-defect summary (NEW IN V3.0)
+            if use_multi_defect:
+                st.markdown("#### 🧬 Multi-Defect Intelligence Summary")
+                md_col1, md_col2, md_col3, md_col4 = st.columns(4)
+                md_col1.metric("Avg Defect Types", f"{n_defect_types:.1f}")
+                md_col2.metric("Multi-Defect Pattern", "Yes" if has_multiple else "No")
+                md_col3.metric("Total Defect Rate", f"{total_defect:.2f}")
+                md_col4.metric("Defect Concentration", f"{defect_conc:.2f}")
+
+            # Data source explanation
             with st.expander("📋 Data Sources Used for This Prediction"):
                 st.markdown(f"""
 **Part-Specific Data:**
 - Historical runs for Part {part_id_input}: **{part_specific_records}**
 - Defect rates based on: {'Part-specific history' if part_specific_records > 0 else 'Dataset average (no part history)'}
 
-**Model Training Data:**
-- Total samples used for training: **{len(X_train)}**
-- {'Expanded to include similar parts by weight' if len(df_part) > part_specific_records else 'Used part-specific data only'}
+**Model Features ({len(feats)} total):**
+- Base features: order_quantity, piece_weight_lbs, mttf_scrap, part_freq
+- Defect rate features: {len(defect_cols)} columns
+- Multi-defect features: {'Enabled' if use_multi_defect else 'Disabled'}
 
 **Confidence Assessment:**
 - Data confidence: **{get_data_confidence_level(part_specific_records)[1]}**
@@ -930,7 +1242,6 @@ with tab1:
                     
                     # Defect-to-Process mapping
                     st.markdown("#### 🔗 Defect → Process Mapping")
-                    st.markdown("Shows which processes are responsible for each predicted defect")
                     
                     mapping_data = []
                     for _, row in top_defects.head(10).iterrows():
@@ -992,13 +1303,16 @@ with tab2:
     if rolling_enabled:
         st.info("🔄 **Rolling Window Mode**: Validation metrics reflect combined historical + outcome data")
     
+    if use_multi_defect:
+        st.info("🧬 **Multi-Defect Intelligence**: Enabled in current model")
+    
     try:
-        X_test, y_test, _ = make_xy(df_test_base, thr_label, use_rate_cols)
+        X_test, y_test, _ = make_xy(df_test_base, thr_label, use_rate_cols, use_multi_defect)
         preds = cal_model_base.predict_proba(X_test)[:, 1]
         pred_binary = (preds > 0.5).astype(int)
         
         # Metrics
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         brier = brier_score_loss(y_test, preds)
         acc = accuracy_score(y_test, pred_binary)
         
@@ -1007,7 +1321,9 @@ with tab2:
         
         if y_test.sum() > 0:
             recall = recall_score(y_test, pred_binary, zero_division=0)
+            prec = precision_score(y_test, pred_binary, zero_division=0)
             col3.metric("Recall (High Scrap)", f"{recall:.3f}")
+            col4.metric("Precision", f"{prec:.3f}")
         
         # Data split info
         st.markdown("### 📊 Data Split (6-2-1 Temporal)")
@@ -1048,14 +1364,24 @@ with tab2:
             feat_imp = pd.DataFrame({
                 "Feature": feats_base,
                 "Importance": importances
-            }).sort_values("Importance", ascending=False).head(15)
+            }).sort_values("Importance", ascending=False).head(20)
+            
+            # Highlight multi-defect features
+            multi_defect_feats = ["n_defect_types", "has_multiple_defects", "total_defect_rate",
+                                  "max_defect_rate", "defect_concentration", "shift_x_tearup",
+                                  "shrink_x_porosity", "shrink_x_shrink_porosity", "core_x_sand"]
+            feat_imp["Type"] = feat_imp["Feature"].apply(
+                lambda x: "Multi-Defect (V3.0)" if x in multi_defect_feats else "Standard"
+            )
             
             fig_imp = px.bar(
                 feat_imp,
                 x="Importance",
                 y="Feature",
+                color="Type",
                 orientation='h',
-                title="Top 15 Features"
+                title="Top 20 Features (Multi-Defect features highlighted)",
+                color_discrete_map={"Multi-Defect (V3.0)": "#ff6b6b", "Standard": "steelblue"}
             )
             st.plotly_chart(fig_imp, use_container_width=True)
         except Exception as e:
@@ -1066,9 +1392,144 @@ with tab2:
 
 
 # ================================================================
-# TAB 3: LOG OUTCOME (For Rolling Window)
+# TAB 3: MODEL COMPARISON (NEW IN V3.0)
 # ================================================================
 with tab3:
+    st.header("📊 Model Comparison: With vs Without Multi-Defect Features")
+    
+    st.markdown("""
+    This comparison shows the impact of the **Multi-Defect Intelligence** features 
+    introduced in Version 3.0 on model performance.
+    """)
+    
+    if st.button("🔬 Run Comparison"):
+        with st.spinner("Training both models for comparison..."):
+            try:
+                comparison = compare_models_with_without_multi_defect(
+                    df_base, thr_label, use_rate_cols, n_est
+                )
+                
+                st.markdown("### 📈 Performance Comparison")
+                
+                # Create comparison table
+                comp_data = {
+                    "Metric": ["Brier Score ↓", "Accuracy ↑", "Recall ↑", "Precision ↑", "F1 Score ↑", "# Features"],
+                    "Without Multi-Defect": [
+                        f"{comparison['without']['brier']:.4f}",
+                        f"{comparison['without']['accuracy']:.3f}",
+                        f"{comparison['without']['recall']:.3f}",
+                        f"{comparison['without']['precision']:.3f}",
+                        f"{comparison['without']['f1']:.3f}",
+                        f"{comparison['without']['n_features']}"
+                    ],
+                    "With Multi-Defect (V3.0)": [
+                        f"{comparison['with']['brier']:.4f}",
+                        f"{comparison['with']['accuracy']:.3f}",
+                        f"{comparison['with']['recall']:.3f}",
+                        f"{comparison['with']['precision']:.3f}",
+                        f"{comparison['with']['f1']:.3f}",
+                        f"{comparison['with']['n_features']}"
+                    ],
+                    "Change": [
+                        f"{comparison['improvement']['brier']:+.1f}% {'✅' if comparison['improvement']['brier'] > 0 else '❌'}",
+                        f"{comparison['improvement']['accuracy']:+.1f}% {'✅' if comparison['improvement']['accuracy'] > 0 else '❌'}",
+                        f"{comparison['improvement']['recall']:+.1f}% {'✅' if comparison['improvement']['recall'] > 0 else '❌'}",
+                        f"{comparison['improvement']['precision']:+.1f}% {'✅' if comparison['improvement']['precision'] > 0 else '❌'}",
+                        f"{comparison['improvement']['f1']:+.1f}% {'✅' if comparison['improvement']['f1'] > 0 else '❌'}",
+                        f"+{comparison['improvement']['n_features']}"
+                    ]
+                }
+                
+                comp_df = pd.DataFrame(comp_data)
+                st.dataframe(comp_df, use_container_width=True)
+                
+                # Visual comparison
+                st.markdown("### 📊 Visual Comparison")
+                
+                fig = go.Figure()
+                
+                metrics = ["Accuracy", "Recall", "Precision", "F1 Score"]
+                without_vals = [
+                    comparison['without']['accuracy'],
+                    comparison['without']['recall'],
+                    comparison['without']['precision'],
+                    comparison['without']['f1']
+                ]
+                with_vals = [
+                    comparison['with']['accuracy'],
+                    comparison['with']['recall'],
+                    comparison['with']['precision'],
+                    comparison['with']['f1']
+                ]
+                
+                fig.add_trace(go.Bar(
+                    name='Without Multi-Defect',
+                    x=metrics,
+                    y=without_vals,
+                    marker_color='lightgray'
+                ))
+                
+                fig.add_trace(go.Bar(
+                    name='With Multi-Defect (V3.0)',
+                    x=metrics,
+                    y=with_vals,
+                    marker_color='#ff6b6b'
+                ))
+                
+                fig.update_layout(
+                    barmode='group',
+                    title="Model Performance Comparison",
+                    yaxis_title="Score",
+                    yaxis_range=[0, 1]
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Summary
+                st.markdown("### 📋 Summary")
+                
+                improvements = []
+                if comparison['improvement']['brier'] > 0:
+                    improvements.append(f"Brier Score improved by {comparison['improvement']['brier']:.1f}%")
+                if comparison['improvement']['accuracy'] > 0:
+                    improvements.append(f"Accuracy improved by {comparison['improvement']['accuracy']:.1f}%")
+                if comparison['improvement']['recall'] > 0:
+                    improvements.append(f"Recall improved by {comparison['improvement']['recall']:.1f}%")
+                if comparison['improvement']['f1'] > 0:
+                    improvements.append(f"F1 Score improved by {comparison['improvement']['f1']:.1f}%")
+                
+                if improvements:
+                    st.success(f"""
+✅ **Multi-Defect Features Improve Model Performance**
+
+{chr(10).join(['• ' + imp for imp in improvements])}
+
+The multi-defect features capture important patterns like:
+- **Defect co-occurrence** (multiple defects on same work order)
+- **Defect interactions** (e.g., Shift × Tear-Up combination)
+- **Overall defect burden** (total and max defect rates)
+                    """)
+                else:
+                    st.info("""
+📊 **Results Mixed or No Improvement**
+
+The multi-defect features did not show clear improvement on this dataset split.
+This could be due to:
+- Limited multi-defect cases in test set
+- Existing features already capturing the patterns
+- Need for more data to see the benefit
+                    """)
+                
+            except Exception as e:
+                st.error(f"❌ Comparison failed: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
+
+# ================================================================
+# TAB 4: LOG OUTCOME
+# ================================================================
+with tab4:
     st.header("📝 Log Production Outcome")
     
     if not rolling_enabled:
@@ -1081,7 +1542,6 @@ with tab3:
         The model will retrain on updated data after enough outcomes are logged.
         """)
         
-        # Check if there's a recent prediction to reference
         if 'last_prediction' in st.session_state:
             last_pred = st.session_state['last_prediction']
             st.info(f"📌 Last prediction: Part {last_pred['part_id']}, Predicted Scrap: {last_pred['predicted_scrap']:.1f}% (based on {last_pred.get('part_records', 'N/A')} historical runs)")
@@ -1090,7 +1550,6 @@ with tab3:
             use_last = False
             last_pred = None
         
-        # Input form
         out_col1, out_col2, out_col3, out_col4 = st.columns(4)
         
         if use_last and last_pred:
@@ -1117,7 +1576,6 @@ with tab3:
                 count = save_outcome(outcome_data)
                 st.success(f"✅ Outcome logged! Total outcomes: {count}")
                 
-                # Check if retrain needed
                 outcomes_since_retrain = get_outcomes_count()
                 if outcomes_since_retrain >= RETRAIN_THRESHOLD:
                     st.warning(f"⚠️ {outcomes_since_retrain} outcomes logged since last retrain. Consider retraining the model.")
@@ -1128,7 +1586,6 @@ with tab3:
             else:
                 st.error("❌ Please enter a Part ID")
         
-        # Show recent outcomes
         st.markdown("### 📋 Recent Outcomes")
         df_outcomes_display = load_outcomes()
         if not df_outcomes_display.empty:
@@ -1140,7 +1597,6 @@ with tab3:
         else:
             st.info("No outcomes logged yet.")
         
-        # Manual retrain button
         st.markdown("### 🔄 Manual Retrain")
         if st.button("Force Retrain Model"):
             mark_retrain()
@@ -1149,4 +1605,4 @@ with tab3:
 
 
 st.markdown("---")
-st.caption("Based on Campbell (2003) *Castings Practice: The Ten Rules of Castings* | 6-2-1 Rolling Window + Data Confidence Indicators")
+st.caption("🏭 Foundry Scrap Risk Dashboard **v3.0 - Multi-Defect Intelligence** | Based on Campbell (2003) | 6-2-1 Rolling Window | Data Confidence Indicators")
