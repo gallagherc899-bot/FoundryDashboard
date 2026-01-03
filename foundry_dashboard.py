@@ -1,8 +1,9 @@
 # ================================================================
 # 🏭 Foundry Scrap Risk Dashboard with Process Diagnosis
-# VERSION 2.0 - TRUE 6-2-1 ROLLING WINDOW
+# VERSION 2.1 - 6-2-1 ROLLING WINDOW + DATA CONFIDENCE INDICATORS
 # Features: Prediction, Process Root Cause Analysis, Pareto Charts,
-#           Rolling Window Retraining, Outcome Logging
+#           Rolling Window Retraining, Outcome Logging,
+#           Data Confidence Disclaimers
 # ================================================================
 
 import warnings
@@ -40,14 +41,25 @@ MIN_SAMPLES_LEAF = 2
 MIN_SAMPLES_PER_CLASS = 5
 
 # ================================================================
+# DATA CONFIDENCE CONFIGURATION
+# ================================================================
+RECOMMENDED_MIN_RECORDS = 5    # Recommended minimum for reliable predictions
+HIGH_CONFIDENCE_RECORDS = 15   # High confidence threshold
+DATA_CONFIDENCE_COLORS = {
+    'high': '#28a745',      # Green
+    'medium': '#ffc107',    # Yellow/Orange
+    'low': '#dc3545'        # Red
+}
+
+# ================================================================
 # ROLLING WINDOW CONFIGURATION
 # ================================================================
-ROLLING_WINDOW_ENABLED = True      # Toggle rolling window on/off
-RETRAIN_THRESHOLD = 50             # Retrain after N new outcomes logged
-WINDOW_TRAIN_RATIO = 0.6           # 60% for training
-WINDOW_CALIB_RATIO = 0.2           # 20% for calibration
-WINDOW_TEST_RATIO = 0.2            # 20% for testing
-OUTCOMES_FILE = "prediction_outcomes.csv"  # File to store outcomes
+ROLLING_WINDOW_ENABLED = True
+RETRAIN_THRESHOLD = 50
+WINDOW_TRAIN_RATIO = 0.6
+WINDOW_CALIB_RATIO = 0.2
+WINDOW_TEST_RATIO = 0.2
+OUTCOMES_FILE = "prediction_outcomes.csv"
 
 # ================================================================
 # CAMPBELL PROCESS-DEFECT MAPPING
@@ -99,6 +111,94 @@ for process, info in PROCESS_DEFECT_MAP.items():
         if defect not in DEFECT_TO_PROCESS:
             DEFECT_TO_PROCESS[defect] = []
         DEFECT_TO_PROCESS[defect].append(process)
+
+
+# ================================================================
+# DATA CONFIDENCE FUNCTIONS
+# ================================================================
+def get_data_confidence_level(n_records):
+    """Determine confidence level based on number of records."""
+    if n_records >= HIGH_CONFIDENCE_RECORDS:
+        return 'high', 'HIGH', DATA_CONFIDENCE_COLORS['high']
+    elif n_records >= RECOMMENDED_MIN_RECORDS:
+        return 'medium', 'MEDIUM', DATA_CONFIDENCE_COLORS['medium']
+    else:
+        return 'low', 'LOW', DATA_CONFIDENCE_COLORS['low']
+
+
+def get_confidence_percentage(n_records):
+    """Calculate confidence percentage (0-100) based on records."""
+    if n_records >= HIGH_CONFIDENCE_RECORDS:
+        return 100
+    else:
+        return min(100, (n_records / HIGH_CONFIDENCE_RECORDS) * 100)
+
+
+def display_data_confidence_banner(n_records, part_id):
+    """Display appropriate confidence banner based on data availability."""
+    level, level_text, color = get_data_confidence_level(n_records)
+    confidence_pct = get_confidence_percentage(n_records)
+    
+    if level == 'low':
+        st.warning(f"""
+⚠️ **DATA NOTICE: LOW CONFIDENCE**
+
+This prediction for **Part {part_id}** is based on only **{n_records} historical run(s)**.
+
+- Recommended minimum: {RECOMMENDED_MIN_RECORDS} runs
+- High confidence threshold: {HIGH_CONFIDENCE_RECORDS} runs
+
+**Interpret this prediction with caution.** The model uses similar parts data to supplement, 
+but part-specific predictions improve significantly with more historical data.
+
+💡 *Log outcomes after production runs to build part history and improve future predictions.*
+        """)
+    elif level == 'medium':
+        st.info(f"""
+📊 **DATA NOTICE: MEDIUM CONFIDENCE**
+
+This prediction for **Part {part_id}** is based on **{n_records} historical runs**.
+
+- Meets minimum threshold: ✅ ({RECOMMENDED_MIN_RECORDS} runs)
+- High confidence threshold: {HIGH_CONFIDENCE_RECORDS} runs
+
+Prediction reliability is acceptable but will improve with additional historical data.
+        """)
+    else:
+        st.success(f"""
+✅ **DATA CONFIDENCE: HIGH**
+
+This prediction for **Part {part_id}** is based on **{n_records} historical runs**.
+
+Sufficient historical data exists for reliable ML-based prediction.
+        """)
+    
+    return level, n_records
+
+
+def display_confidence_meter(n_records):
+    """Display a visual confidence meter."""
+    confidence_pct = get_confidence_percentage(n_records)
+    level, level_text, color = get_data_confidence_level(n_records)
+    
+    # Create progress bar visualization
+    filled_blocks = int(confidence_pct / 5)  # 20 blocks total
+    empty_blocks = 20 - filled_blocks
+    
+    if level == 'high':
+        bar_color = "🟩"
+    elif level == 'medium':
+        bar_color = "🟨"
+    else:
+        bar_color = "🟥"
+    
+    progress_bar = bar_color * filled_blocks + "⬜" * empty_blocks
+    
+    st.markdown(f"""
+**📊 Data Confidence: {level_text}** ({n_records} of {HIGH_CONFIDENCE_RECORDS} recommended runs)
+
+{progress_bar} {confidence_pct:.0f}%
+    """)
 
 
 # -------------------------------
@@ -183,8 +283,6 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
-    
-    # Sort by time for temporal split
     df = df.sort_values("week_ending").reset_index(drop=True)
 
     n_parts = df["part_id"].nunique() if "part_id" in df.columns else 0
@@ -226,7 +324,6 @@ def get_outcomes_count():
     df = load_outcomes()
     if df.empty:
         return 0
-    # Count outcomes since last retrain marker
     if 'retrain_marker' in df.columns:
         last_retrain = df[df['retrain_marker'] == True]
         if not last_retrain.empty:
@@ -239,7 +336,6 @@ def mark_retrain():
     """Mark that retraining has occurred."""
     df = load_outcomes()
     if not df.empty:
-        # Add a marker row
         marker = {
             'timestamp': datetime.now().isoformat(),
             'retrain_marker': True,
@@ -253,17 +349,10 @@ def mark_retrain():
 
 
 # ================================================================
-# 6-2-1 TEMPORAL SPLIT (Rolling Window Compatible)
+# 6-2-1 TEMPORAL SPLIT
 # ================================================================
 def time_split_621(df: pd.DataFrame, train_ratio=0.6, calib_ratio=0.2):
-    """
-    TRUE 6-2-1 Temporal Split.
-    
-    Data MUST be sorted by week_ending before calling.
-    - Train: oldest 60%
-    - Calibration: middle 20%  
-    - Test: newest 20%
-    """
+    """TRUE 6-2-1 Temporal Split."""
     df_sorted = df.sort_values("week_ending").reset_index(drop=True)
     n = len(df_sorted)
     train_end = int(n * train_ratio)
@@ -333,39 +422,23 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
 # ROLLING WINDOW MODEL TRAINING
 # ================================================================
 def train_model_with_rolling_window(df_base, df_outcomes, thr_label, use_rate_cols, n_est):
-    """
-    Train model using 6-2-1 rolling window on combined base + outcome data.
+    """Train model using 6-2-1 rolling window on combined base + outcome data."""
     
-    If outcomes exist, they are appended to base data (sorted by time),
-    then 6-2-1 split is applied to the combined dataset.
-    """
-    
-    # Combine base data with logged outcomes
     if df_outcomes is not None and len(df_outcomes) > 0:
-        # Filter valid outcome rows (not markers)
         df_outcomes_valid = df_outcomes[df_outcomes['part_id'] != 'RETRAIN_MARKER'].copy()
         
         if len(df_outcomes_valid) > 0:
-            # Ensure outcomes have required columns
-            required_cols = ['part_id', 'order_quantity', 'piece_weight_lbs', 'scrap_percent', 'week_ending']
-            
-            # Check which columns exist
-            available_cols = [c for c in required_cols if c in df_outcomes_valid.columns]
-            
             if 'actual_scrap' in df_outcomes_valid.columns and 'scrap_percent' not in df_outcomes_valid.columns:
                 df_outcomes_valid['scrap_percent'] = df_outcomes_valid['actual_scrap']
             
             if 'timestamp' in df_outcomes_valid.columns and 'week_ending' not in df_outcomes_valid.columns:
                 df_outcomes_valid['week_ending'] = pd.to_datetime(df_outcomes_valid['timestamp'])
             
-            # Only merge if we have the minimum required data
             if 'part_id' in df_outcomes_valid.columns and 'scrap_percent' in df_outcomes_valid.columns:
-                # Get columns from base that outcomes might be missing
                 for col in df_base.columns:
                     if col not in df_outcomes_valid.columns:
                         df_outcomes_valid[col] = 0.0 if col != 'week_ending' else pd.NaT
                 
-                # Combine
                 df_combined = pd.concat([df_base, df_outcomes_valid[df_base.columns]], ignore_index=True)
                 df_combined = df_combined.sort_values('week_ending').reset_index(drop=True)
                 
@@ -377,21 +450,17 @@ def train_model_with_rolling_window(df_base, df_outcomes, thr_label, use_rate_co
     else:
         df_combined = df_base.copy()
     
-    # Apply 6-2-1 temporal split
     df_train, df_calib, df_test = time_split_621(df_combined)
     
-    # Compute features from training data only
     mtbf_train = compute_mtbf_on_train(df_train, thr_label)
     part_freq_train = df_train["part_id"].value_counts(normalize=True)
     default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
     default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
     
-    # Attach features
     df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
     df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
     df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
     
-    # Train model
     X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
     X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
     rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
@@ -579,7 +648,6 @@ if not os.path.exists(csv_path):
 df_base = load_and_clean(csv_path)
 df_base = calculate_process_indices(df_base)
 
-# Load outcomes for rolling window
 df_outcomes = load_outcomes() if rolling_enabled else None
 
 # Display data summary in sidebar
@@ -651,6 +719,11 @@ with tab1:
                                 df_outcomes_valid[col] = 0.0
                         df_full = pd.concat([df_full, df_outcomes_valid[df_full.columns]], ignore_index=True)
                         df_full = df_full.sort_values('week_ending').reset_index(drop=True)
+            
+            # ================================================================
+            # COUNT PART-SPECIFIC RECORDS FOR CONFIDENCE ASSESSMENT
+            # ================================================================
+            part_specific_records = len(df_full[df_full["part_id"] == part_id_input])
             
             df_part = prepare_part_specific_data(
                 df_full, 
@@ -738,11 +811,18 @@ with tab1:
                 'order_quantity': order_qty,
                 'piece_weight_lbs': piece_weight,
                 'predicted_scrap': scrap_risk,
-                'cost_per_part': cost_per_part
+                'cost_per_part': cost_per_part,
+                'part_records': part_specific_records
             }
 
-            # Display results
+            # ================================================================
+            # DISPLAY DATA CONFIDENCE BANNER
+            # ================================================================
             st.markdown("---")
+            display_data_confidence_banner(part_specific_records, part_id_input)
+            display_confidence_meter(part_specific_records)
+            
+            # Display results
             st.markdown(f"### 🎯 Risk Assessment for Part {part_id_input}")
             
             r1, r2, r3, r4 = st.columns(4)
@@ -750,6 +830,25 @@ with tab1:
             r2.metric("Expected Scrap", f"{expected_scrap_pcs:.1f} pieces")
             r3.metric("Expected Loss", f"${expected_loss:,.2f}")
             r4.metric("Reliability", f"{reliability:.1f}%")
+
+            # ================================================================
+            # DATA SOURCE EXPLANATION
+            # ================================================================
+            with st.expander("📋 Data Sources Used for This Prediction"):
+                st.markdown(f"""
+**Part-Specific Data:**
+- Historical runs for Part {part_id_input}: **{part_specific_records}**
+- Defect rates based on: {'Part-specific history' if part_specific_records > 0 else 'Dataset average (no part history)'}
+
+**Model Training Data:**
+- Total samples used for training: **{len(X_train)}**
+- {'Expanded to include similar parts by weight' if len(df_part) > part_specific_records else 'Used part-specific data only'}
+
+**Confidence Assessment:**
+- Data confidence: **{get_data_confidence_level(part_specific_records)[1]}**
+- Recommended minimum: {RECOMMENDED_MIN_RECORDS} runs
+- High confidence threshold: {HIGH_CONFIDENCE_RECORDS} runs
+                """)
 
             # Defect analysis
             if defect_cols:
@@ -985,7 +1084,7 @@ with tab3:
         # Check if there's a recent prediction to reference
         if 'last_prediction' in st.session_state:
             last_pred = st.session_state['last_prediction']
-            st.info(f"📌 Last prediction: Part {last_pred['part_id']}, Predicted Scrap: {last_pred['predicted_scrap']:.1f}%")
+            st.info(f"📌 Last prediction: Part {last_pred['part_id']}, Predicted Scrap: {last_pred['predicted_scrap']:.1f}% (based on {last_pred.get('part_records', 'N/A')} historical runs)")
             use_last = st.checkbox("Use last prediction details", value=True)
         else:
             use_last = False
@@ -1033,7 +1132,6 @@ with tab3:
         st.markdown("### 📋 Recent Outcomes")
         df_outcomes_display = load_outcomes()
         if not df_outcomes_display.empty:
-            # Filter out markers
             df_display = df_outcomes_display[df_outcomes_display['part_id'] != 'RETRAIN_MARKER'].tail(20)
             if not df_display.empty:
                 st.dataframe(df_display[['timestamp', 'part_id', 'order_quantity', 'actual_scrap', 'predicted_scrap']].tail(10))
@@ -1051,4 +1149,4 @@ with tab3:
 
 
 st.markdown("---")
-st.caption("Based on Campbell (2003) *Castings Practice: The Ten Rules of Castings* | 6-2-1 Rolling Window Enabled")
+st.caption("Based on Campbell (2003) *Castings Practice: The Ten Rules of Castings* | 6-2-1 Rolling Window + Data Confidence Indicators")
