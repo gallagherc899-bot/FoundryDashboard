@@ -1,7 +1,5 @@
-# ================================================================
-# 🏭 Foundry Scrap Risk Dashboard with Process Diagnosis
-# Features: Prediction, Process Root Cause Analysis, Pareto Charts
-# ================================================================
+# Foundry Scrap Risk Dashboard — Complete Updated Script
+# Drop-in replacement for your current foundry_dashboard.py
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -11,8 +9,6 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-import plotly.graph_objects as go
-import plotly.express as px
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
@@ -31,58 +27,6 @@ RANDOM_STATE = 42
 DEFAULT_ESTIMATORS = 180
 DEFAULT_THRESHOLD = 6.5
 MIN_SAMPLES_LEAF = 2
-MIN_SAMPLES_PER_CLASS = 5
-
-# ================================================================
-# CAMPBELL PROCESS-DEFECT MAPPING
-# Based on Campbell (2003) "Castings Practice: The Ten Rules"
-# ================================================================
-PROCESS_DEFECT_MAP = {
-    "Sand System": {
-        "defects": ["sand_rate", "gas_porosity_rate", "runout_rate", "dirty_pattern_rate"],
-        "description": "Sand moisture, clay content, compactability issues"
-    },
-    "Core Making": {
-        "defects": ["core_rate", "crush_rate", "shrink_porosity_rate", "gas_porosity_rate"],
-        "description": "Core binder ratios, cure cycles, venting problems"
-    },
-    "Pattern Making": {
-        "defects": ["shift_rate", "bent_rate", "dirty_pattern_rate"],
-        "description": "Pattern wear, dimensional drift, parting line issues"
-    },
-    "Mold Making": {
-        "defects": ["shift_rate", "runout_rate", "missrun_rate", "short_pour_rate", "gas_porosity_rate"],
-        "description": "Compaction, venting, gating setup problems"
-    },
-    "Melting": {
-        "defects": ["dross_rate", "gas_porosity_rate", "shrink_rate", "shrink_porosity_rate", "gouged_rate"],
-        "description": "Melt cleanliness, temperature, hydrogen content"
-    },
-    "Pouring": {
-        "defects": ["missrun_rate", "short_pour_rate", "dross_rate", "tear_up_rate"],
-        "description": "Pour temperature, velocity, turbulence issues"
-    },
-    "Solidification": {
-        "defects": ["shrink_rate", "shrink_porosity_rate", "gas_porosity_rate", "missrun_rate"],
-        "description": "Cooling rates, feeding design, thermal gradients"
-    },
-    "Shakeout": {
-        "defects": ["tear_up_rate", "over_grind_rate", "sand_rate"],
-        "description": "Mechanical stress during casting removal"
-    },
-    "Inspection": {
-        "defects": ["failed_zyglo_rate", "zyglo_rate", "outside_process_scrap_rate"],
-        "description": "NDT detection, finishing defects"
-    },
-}
-
-# Create reverse mapping: defect -> processes
-DEFECT_TO_PROCESS = {}
-for process, info in PROCESS_DEFECT_MAP.items():
-    for defect in info["defects"]:
-        if defect not in DEFECT_TO_PROCESS:
-            DEFECT_TO_PROCESS[defect] = []
-        DEFECT_TO_PROCESS[defect].append(process)
 
 
 # -------------------------------
@@ -100,47 +44,100 @@ def _normalize_headers(cols: pd.Index) -> pd.Index:
 
 
 def _canonical_rename(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Rename columns to canonical names.
-    
-    IMPORTANT: Part ID and Work Order are DIFFERENT:
-    - Part ID: Identifies the PART being produced (359 unique parts)
-    - Work Order: Identifies the PRODUCTION RUN (882 unique work orders)
-    
-    The model should analyze by PART ID to:
-    - Track historical scrap patterns per part
-    - Calculate meaningful MTTF per part
-    - Make predictions based on part characteristics
-    """
+    # Canonical renames for typical foundry spreadsheets (includes the image headings you shared)
     rename_map = {
-        # Part identifier - USE ACTUAL PART ID, NOT WORK ORDER
-        "part_id": "part_id",  # Already correct name after normalization
-        
-        # Work order kept as separate column for traceability
-        "work_order": "work_order",
-        "work_order_number": "work_order",
-        "work_order_#": "work_order",
-        "work_order_num": "work_order",
-        
-        # Production quantities
+        # Part/Work order ID
+        "work_order": "part_id",
+        "work_order_number": "part_id",
+        "work_order_#": "part_id",
+        "work_order_num": "part_id",
+        "work_order_": "part_id",
+        "work_order_#_": "part_id",
+        "work_ord": "part_id",
+        "part_id": "part_id",
+
+        # Quantities and weights
         "order_quantity": "order_quantity",
         "order_qty": "order_quantity",
-        
-        # Scrap data
+        "pieces": "order_quantity",
         "pieces_scrapped": "pieces_scrapped",
-        "scrap%": "scrap_percent",
-        "scrap_percent": "scrap_percent",
-        "scrap": "scrap_percent",
-        
-        # Physical properties
+        "total_scrap_weight": "total_scrap_weight_lbs",
+        "total_scrap_weight_lbs": "total_scrap_weight_lbs",
         "piece_weight_lbs": "piece_weight_lbs",
         "piece_weight": "piece_weight_lbs",
-        
-        # Time
+
+        # Dates / time
         "week_ending": "week_ending",
         "week_end": "week_ending",
+        "week_end_date": "week_ending",
+
+        # Scrap %
+        "scrap%": "scrap_percent",
+        "scrap_percent": "scrap_percent",
+        "scrap_percentage": "scrap_percent",
+        "scrap": "scrap_percent",
+
+        # Other common columns
+        "sellable": "sellable",
+        "saleable": "sellable",
+        "heats": "heats",
     }
     df.rename(columns=rename_map, inplace=True)
+    return df
+
+
+def _normalize_defect_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Normalize defect headings variations to *_rate (using best-effort mapping)
+    # From your dataset: dross_rate, bent_rate, outside_process_scrap_rate, failed_zyglo_rate, gouged_rate, shift_rate,
+    # missrun_rate, core_rate, cut_into_rate, dirty_pattern_rate, crush_rate, zyglo_rate, shrink_rate,
+    # short_pour_rate, runout_rate, shrink_porosity_rate, gas_porosity_rate, over_grind_rate, sand_rate, tear_up_rate
+
+    # First pass: coerce any column ending in _rate to numeric
+    for c in [c for c in df.columns if c.endswith("_rate")]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    # Second pass: map likely variants from screenshot to canonical names
+    variant_map = {
+        "gross_rate": "dross_rate",  # screenshot likely mis-OCR of "Dross Rate"
+        "dross_rat": "dross_rate",
+        "bent_rate": "bent_rate",
+        "outside_proc": "outside_process_scrap_rate",
+        "outside_process_scrap": "outside_process_scrap_rate",
+        "failed_zyglo_rate": "failed_zyglo_rate",
+        "failed_zigzag_rate": "failed_zyglo_rate",  # OCR variant
+        "gouged_rate": "gouged_rate",
+        "gouge_rate": "gouged_rate",
+        "shift_rate": "shift_rate",
+        "mismatch_rate": "missrun_rate",  # approximate mapping if mismatch ~ missrun
+        "missrun_rate": "missrun_rate",
+        "core_rate": "core_rate",
+        "out_iron_rate": "cut_into_rate",  # approximate mapping (if cut into = out iron)
+        "cut_into_rate": "cut_into_rate",
+        "dirty_pattern_rate": "dirty_pattern_rate",
+        "crush_rate": "crush_rate",
+        "zigzag_rate": "zyglo_rate",  # OCR variant
+        "zyglo_rate": "zyglo_rate",
+        "shrink_rate": "shrink_rate",
+        "short_pour_rate": "short_pour_rate",
+        "runout_rate": "runout_rate",
+        "shrink_porosity_rate": "shrink_porosity_rate",
+        "gas_porosity_rate": "gas_porosity_rate",
+        "over_grind_rate": "over_grind_rate",
+        "sand_rate": "sand_rate",
+        "tear_up_rate": "tear_up_rate",
+    }
+
+    # Apply variant mapping
+    for src, tgt in variant_map.items():
+        if src in df.columns and src != tgt:
+            if tgt not in df.columns:
+                df[tgt] = pd.to_numeric(df[src], errors="coerce").fillna(0.0)
+            df.drop(columns=[src], inplace=True)
+
+    # Final: any remaining *_rate to numeric
+    for c in [c for c in df.columns if c.endswith("_rate")]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
     return df
 
 
@@ -151,65 +148,82 @@ def _canonical_rename(df: pd.DataFrame) -> pd.DataFrame:
 def load_and_clean(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
 
+    # Flatten multi-index column headers if present (Excel multi-row headers)
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ["_".join([str(x) for x in col if str(x) != "None"]).strip() 
-                      for col in df.columns.values]
+        df.columns = ["_".join([str(x) for x in col if str(x) != "None"]).strip() for col in df.columns.values]
 
+    # Normalize headers
     df.columns = _normalize_headers(df.columns)
+
+    # Canonical renaming
     df = _canonical_rename(df)
 
-    # Handle duplicate columns (keep first occurrence only)
-    if df.columns.duplicated().any():
-        st.warning(f"⚠️ Detected {df.columns.duplicated().sum()} duplicate column names - keeping first occurrence")
-        df = df.loc[:, ~df.columns.duplicated()]
-    
-    # Ensure key columns exist
-    for c in ["part_id", "order_quantity", "piece_weight_lbs", "week_ending", "scrap_percent"]:
-        if c not in df.columns:
-            df[c] = 0.0 if c != "week_ending" else pd.NaT
+    # Handle duplicate 'part_id' columns: keep the first occurrence
+    if (df.columns == "part_id").sum() > 1:
+        st.warning("⚠ Detected multiple 'part_id' columns — keeping the first one.")
+        # Drop duplicate columns beyond the first
+        first_idx = np.where(df.columns == "part_id")[0][0]
+        keep = np.ones(len(df.columns), dtype=bool)
+        dup_indices = np.where(df.columns == "part_id")[0][1:]
+        keep[dup_indices] = False
+        df = df.loc[:, keep]
 
-    # Clean part_id FIRST (before other conversions)
-    if "part_id" in df.columns:
-        # Force to single column if somehow still a DataFrame
-        if isinstance(df["part_id"], pd.DataFrame):
-            df["part_id"] = df["part_id"].iloc[:, 0]
-        df["part_id"] = df["part_id"].fillna("Unknown").astype(str)
-        df["part_id"] = df["part_id"].str.strip()
-        df["part_id"] = df["part_id"].replace({"nan": "Unknown", "": "Unknown", "None": "Unknown"})
-    
-    # Clean work_order if present (keep as separate field for traceability)
-    if "work_order" in df.columns:
-        if isinstance(df["work_order"], pd.DataFrame):
-            df["work_order"] = df["work_order"].iloc[:, 0]
-        df["work_order"] = df["work_order"].fillna("Unknown").astype(str)
-        df["work_order"] = df["work_order"].str.strip()
-    
-    # Report unique parts vs work orders
-    n_parts = df["part_id"].nunique() if "part_id" in df.columns else 0
-    n_work_orders = df["work_order"].nunique() if "work_order" in df.columns else len(df)
-    
-    # Data type conversions
+    # Fallbacks for missing key columns
+    for c in ["part_id", "order_quantity", "piece_weight_lbs", "week_ending"]:
+        if c not in df.columns:
+            df[c] = np.nan
+
+    # Scrap column: unify to 'scrap_percent'
+    scrap_candidates = ["scrap_percent", "scrap%", "scrap", "pieces_scrapped"]
+    scrap_col = next((c for c in scrap_candidates if c in df.columns), None)
+    if scrap_col is None:
+        df["scrap_percent"] = 0.0
+        scrap_col = "scrap_percent"
+    else:
+        df.rename(columns={scrap_col: "scrap_percent"}, inplace=True)
+
+    # Convert data types (coerce errors)
     df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0.0)
-    df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce").fillna(0)
-    df["piece_weight_lbs"] = pd.to_numeric(df["piece_weight_lbs"], errors="coerce").fillna(0.0)
-    
-    # Normalize defect columns
-    defect_cols = [c for c in df.columns if c.endswith("_rate")]
-    for c in defect_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce")
+    df["piece_weight_lbs"] = pd.to_numeric(df["piece_weight_lbs"], errors="coerce")
 
-    # Drop invalid dates
+    # Drop rows with invalid week_ending
     df = df.dropna(subset=["week_ending"]).reset_index(drop=True)
 
-    # Report data summary with part vs work order distinction
-    n_parts = df["part_id"].nunique() if "part_id" in df.columns else 0
-    n_work_orders = df["work_order"].nunique() if "work_order" in df.columns else len(df)
-    st.info(f"✅ Loaded {len(df):,} rows | {n_parts} unique parts | {n_work_orders} work orders | {len(defect_cols)} defect columns")
+    # Normalize defect rate columns
+    df = _normalize_defect_columns(df)
+    defect_cols = [c for c in df.columns if c.endswith("_rate")]
+
+    # Flatten part_id if nested, cast to string
+    if "part_id" in df.columns:
+        if isinstance(df["part_id"], pd.DataFrame):
+            st.warning("⚠ 'part_id' detected as multi-column. Flattening first column.")
+            df["part_id"] = df["part_id"].iloc[:, 0]
+        elif len(df) > 0 and isinstance(df["part_id"].iloc[0], (list, tuple)):
+            st.warning("⚠ 'part_id' contains nested values. Flattening with first element.")
+            df["part_id"] = df["part_id"].apply(lambda x: x[0] if isinstance(x, (list, tuple)) else x)
+    else:
+        df["part_id"] = np.nan
+
+    df["part_id"] = df["part_id"].astype(str)
+    df["part_id"].replace({"nan": "unknown", "": "unknown"}, inplace=True)
+
+    # De-duplicate any remaining columns
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    # Informational summary
+    st.info(f"✅ Loaded {len(df):,} records with {len(df.columns)} columns. Detected {len(defect_cols)} defect-type rate columns.")
+    st.write("🧩 Final cleaned column names:", list(df.columns))
+
     return df
 
 
-def time_split(df: pd.DataFrame, train_ratio=0.6, calib_ratio=0.2):
+# -------------------------------
+# Helper functions
+# -------------------------------
+def time_split(df, train_ratio=0.75, calib_ratio=0.1):
+    # Temporal split: sort by week_ending ascending
     df_sorted = df.sort_values("week_ending").reset_index(drop=True)
     n = len(df_sorted)
     train_end = int(n * train_ratio)
@@ -218,26 +232,25 @@ def time_split(df: pd.DataFrame, train_ratio=0.6, calib_ratio=0.2):
 
 
 def compute_mtbf_on_train(df_train: pd.DataFrame, thr_label: float) -> pd.DataFrame:
-    """
-    Compute Mean Time To Failure (MTTF) proxy for each PART.
-    
-    This calculates the average scrap rate per unique Part ID across all
-    work orders for that part. This is meaningful because:
-    - Same part produced multiple times → track historical scrap pattern
-    - High MTTF = part historically has high scrap → higher risk
-    - Low MTTF = part historically has low scrap → lower risk
-    
-    NOTE: This would NOT be meaningful if calculated per Work Order,
-    since each work order is unique and has no history.
-    """
-    grp = df_train.groupby("part_id", dropna=False)["scrap_percent"].mean().reset_index()
+    # Part-level mean scrap_percent as proxy; floor to 1.0 if <= threshold
+    df_train = df_train.copy()
+    df_train["part_id"] = df_train["part_id"].astype(str)
+    df_train["scrap_percent"] = pd.to_numeric(df_train["scrap_percent"], errors="coerce").fillna(0.0)
+
+    grp = (
+        df_train.groupby("part_id", dropna=False)["scrap_percent"]
+        .mean(numeric_only=True)
+        .reset_index()
+    )
     grp.rename(columns={"scrap_percent": "mttf_scrap"}, inplace=True)
     grp["mttf_scrap"] = np.where(grp["mttf_scrap"] <= thr_label, 1.0, grp["mttf_scrap"])
     return grp
 
 
-def attach_train_features(df_sub: pd.DataFrame, mtbf_train: pd.DataFrame, 
-                          part_freq_train: pd.Series, default_mtbf: float,
+def attach_train_features(df_sub: pd.DataFrame,
+                          mtbf_train: pd.DataFrame,
+                          part_freq_train: pd.Series,
+                          default_mtbf: float,
                           default_freq: float) -> pd.DataFrame:
     s = df_sub.merge(mtbf_train, on="part_id", how="left")
     s["mttf_scrap"] = s["mttf_scrap"].fillna(default_mtbf)
@@ -251,12 +264,22 @@ def make_xy(df: pd.DataFrame, thr_label: float, use_rate_cols: bool):
     if use_rate_cols:
         feats += [c for c in df.columns if c.endswith("_rate")]
 
+    # Ensure all features exist
     for f in feats:
         if f not in df.columns:
             df[f] = 0.0
 
-    df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0.0)
-    y = (df["scrap_percent"] > thr_label).astype(int)
+    # Defensive scrap label handling
+    scrap_candidates = ["scrap_percent", "scrap%", "scrap", "pieces_scrapped"]
+    scrap_col = next((c for c in scrap_candidates if c in df.columns), None)
+    if scrap_col is None:
+        df["scrap_percent"] = 0.0
+        scrap_col = "scrap_percent"
+    df[scrap_col] = pd.to_numeric(df[scrap_col], errors="coerce").fillna(0.0)
+
+    # Label
+    y = (df[scrap_col] > thr_label).astype(int)
+
     X = df[feats].copy()
     return X, y, feats
 
@@ -270,581 +293,161 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
         n_jobs=-1,
     ).fit(X_train, y_train)
 
+    # If calibration set is degenerate, skip calibration gracefully
     pos = int(y_calib.sum())
-    neg = int((y_calib == 0).sum())
-    
-    # Need at least 3 samples per class for 3-fold CV
-    if pos < 3 or neg < 3:
-        st.warning(f"⚠️ Insufficient samples for calibration (Scrap=1: {pos}, Scrap=0: {neg}). Using uncalibrated model.")
-        return rf, rf, "uncalibrated (insufficient calibration samples)"
-    
-    try:
-        cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
-        return rf, cal, "calibrated (sigmoid, cv=3)"
-    except ValueError as e:
-        st.warning(f"⚠️ Calibration failed: {e}. Using uncalibrated model.")
-        return rf, rf, "uncalibrated (calibration failed)"
+    if pos == 0 or pos == len(y_calib):
+        return rf, rf, "uncalibrated"
 
-
-# ================================================================
-# DYNAMIC PART-SPECIFIC DATA PREPARATION
-# ================================================================
-def prepare_part_specific_data(df_full: pd.DataFrame, target_part: str, 
-                                piece_weight: float, thr_label: float, 
-                                min_samples: int = 30):
-    """
-    Prepare part-specific dataset with similarity-based expansion.
-    Ensures label diversity for training.
-    """
-    st.info(f"🔍 Preparing data for Part {target_part}...")
-    
-    # Start with exact part matches
-    df_part = df_full[df_full["part_id"] == target_part].copy()
-    
-    # If we don't have enough samples, expand by similarity
-    if len(df_part) < min_samples:
-        st.info(f"⚠️ Only {len(df_part)} samples for Part {target_part}. Expanding search...")
-        
-        # Find similar parts by weight
-        weight_tolerance = 0.1  # Start with ±10%
-        max_tolerance = 0.5     # Max ±50%
-        
-        while len(df_part) < min_samples and weight_tolerance <= max_tolerance:
-            lower = piece_weight * (1 - weight_tolerance)
-            upper = piece_weight * (1 + weight_tolerance)
-            
-            df_similar = df_full[
-                (df_full["piece_weight_lbs"] >= lower) & 
-                (df_full["piece_weight_lbs"] <= upper)
-            ].copy()
-            
-            df_part = df_similar.copy()
-            weight_tolerance += 0.1
-        
-        st.info(f"✅ Found {len(df_part)} similar samples (±{(weight_tolerance-0.1)*100:.0f}% weight tolerance)")
-    
-    # Check label diversity
-    df_part["temp_label"] = (df_part["scrap_percent"] > thr_label).astype(int)
-    label_counts = df_part["temp_label"].value_counts()
-    
-    if len(label_counts) < 2 or label_counts.min() < MIN_SAMPLES_PER_CLASS:
-        st.warning(f"⚠️ Insufficient label diversity. Expanding to broader dataset...")
-        # Use much broader weight range
-        lower = piece_weight * 0.5
-        upper = piece_weight * 1.5
-        df_part = df_full[
-            (df_full["piece_weight_lbs"] >= lower) & 
-            (df_full["piece_weight_lbs"] <= upper)
-        ].copy()
-        df_part["temp_label"] = (df_part["scrap_percent"] > thr_label).astype(int)
-        label_counts = df_part["temp_label"].value_counts()
-        
-        if len(label_counts) < 2 or label_counts.min() < MIN_SAMPLES_PER_CLASS:
-            st.error("❌ Cannot find sufficient label diversity even with broad search.")
-            return None
-    
-    df_part = df_part.drop(columns=["temp_label"])
-    
-    st.success(f"✅ Dataset prepared: {len(df_part)} samples, Labels: {label_counts.to_dict()}")
-    return df_part
-
-
-# ================================================================
-# PROCESS ROOT CAUSE DIAGNOSIS
-# ================================================================
-def calculate_process_indices(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate Campbell process indices from defect rates"""
-    df = df.copy()
-    
-    for process, info in PROCESS_DEFECT_MAP.items():
-        present_cols = [c for c in info["defects"] if c in df.columns]
-        if present_cols:
-            df[f"{process}_index"] = df[present_cols].mean(axis=1)
-        else:
-            df[f"{process}_index"] = 0.0
-    
-    return df
-
-
-def diagnose_root_causes(defect_predictions: pd.DataFrame) -> pd.DataFrame:
-    """
-    Map predicted defects to their root cause processes.
-    Returns a ranked list of processes by contribution.
-    """
-    if defect_predictions.empty:
-        return pd.DataFrame(columns=["Process", "Contribution (%)", "Description"])
-    
-    process_scores = {}
-    
-    for _, row in defect_predictions.iterrows():
-        defect = row.get("Defect_Code", "")
-        likelihood = row.get("Predicted Rate (%)", 0.0)
-        
-        # Find which processes could cause this defect
-        if defect in DEFECT_TO_PROCESS:
-            processes = DEFECT_TO_PROCESS[defect]
-            # Distribute the defect likelihood across responsible processes
-            contribution = likelihood / len(processes) if len(processes) > 0 else 0.0
-            
-            for process in processes:
-                if process not in process_scores:
-                    process_scores[process] = 0.0
-                process_scores[process] += contribution
-    
-    # Convert to DataFrame and sort
-    if not process_scores:
-        return pd.DataFrame(columns=["Process", "Contribution (%)", "Description"])
-    
-    diagnosis = pd.DataFrame([
-        {
-            "Process": process,
-            "Contribution (%)": score,
-            "Description": PROCESS_DEFECT_MAP.get(process, {}).get("description", "")
-        }
-        for process, score in process_scores.items()
-    ])
-    
-    if not diagnosis.empty:
-        diagnosis = diagnosis.sort_values("Contribution (%)", ascending=False)
-    
-    return diagnosis
-
-
-def create_pareto_chart(data: pd.DataFrame, value_col: str, label_col: str, title: str):
-    """Create interactive Pareto chart with cumulative percentage"""
-    data = data.sort_values(value_col, ascending=False).head(10)
-    
-    # Calculate cumulative percentage
-    total = data[value_col].sum()
-    data["Cumulative %"] = (data[value_col].cumsum() / total * 100) if total > 0 else 0
-    
-    fig = go.Figure()
-    
-    # Bar chart
-    fig.add_trace(go.Bar(
-        x=data[label_col],
-        y=data[value_col],
-        name=value_col,
-        marker_color='steelblue',
-        yaxis='y'
-    ))
-    
-    # Cumulative line
-    fig.add_trace(go.Scatter(
-        x=data[label_col],
-        y=data["Cumulative %"],
-        name='Cumulative %',
-        marker_color='red',
-        yaxis='y2',
-        mode='lines+markers'
-    ))
-    
-    fig.update_layout(
-        title=title,
-        xaxis=dict(title=label_col, tickangle=-45),
-        yaxis=dict(title=value_col, side='left'),
-        yaxis2=dict(title='Cumulative %', side='right', overlaying='y', range=[0, 105]),
-        legend=dict(x=0.7, y=1),
-        height=400,
-        hovermode='x unified'
-    )
-    
-    return fig
+    cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
+    return rf, cal, "calibrated (sigmoid, cv=3)"
 
 
 # -------------------------------
 # Sidebar controls
 # -------------------------------
-st.sidebar.header("📂 Data Source")
+st.sidebar.header("📂 Data source")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
 
-st.sidebar.header("⚙️ Model Controls")
-thr_label = st.sidebar.slider("Scrap % threshold", 1.0, 15.0, DEFAULT_THRESHOLD, 0.5)
+st.sidebar.header("⚙️ Model controls")
+thr_label = st.sidebar.slider("Scrap % threshold (Label & MTTF)", 1.0, 15.0, DEFAULT_THRESHOLD, 0.5)
 use_rate_cols = st.sidebar.checkbox("Include *_rate process features", True)
-n_est = st.sidebar.slider("Number of trees", 50, 300, DEFAULT_ESTIMATORS, 10)
+n_est = st.sidebar.slider("Number of trees (n_estimators)", 50, 300, DEFAULT_ESTIMATORS, 10)
+run_validation = st.sidebar.checkbox("Run 6–2–1 rolling validation", True)
 
 if not os.path.exists(csv_path):
     st.error("❌ CSV not found.")
     st.stop()
 
-# -------------------------------
-# Load base dataset (for validation tab only)
-# -------------------------------
-df_base = load_and_clean(csv_path)
-df_base = calculate_process_indices(df_base)
-
-# Display data quality info in sidebar
-st.sidebar.header("📊 Data Summary")
-n_parts = df_base["part_id"].nunique()
-n_work_orders = df_base["work_order"].nunique() if "work_order" in df_base.columns else len(df_base)
-avg_runs_per_part = len(df_base) / n_parts if n_parts > 0 else 0
-
-st.sidebar.metric("Unique Parts", f"{n_parts:,}")
-st.sidebar.metric("Work Orders", f"{n_work_orders:,}")
-st.sidebar.metric("Avg Runs/Part", f"{avg_runs_per_part:.1f}")
-st.sidebar.caption("ℹ️ Model analyzes by Part ID, not Work Order")
-
-# Split for validation metrics
-df_train_base, df_calib_base, df_test_base = time_split(df_base)
-
-# Train base model for validation tab
-# MTTF: Average scrap rate per PART (meaningful because parts have history)
-mtbf_train_base = compute_mtbf_on_train(df_train_base, thr_label)
-
-# Part frequency: How often each PART appears in production (run frequency)
-# This is meaningful because it captures which parts are produced frequently vs. rarely
-part_freq_train_base = df_train_base["part_id"].value_counts(normalize=True)
-default_mtbf_base = float(mtbf_train_base["mttf_scrap"].median()) if len(mtbf_train_base) else 1.0
-default_freq_base = float(part_freq_train_base.median()) if len(part_freq_train_base) else 0.0
-
-df_train_base = attach_train_features(df_train_base, mtbf_train_base, part_freq_train_base, default_mtbf_base, default_freq_base)
-df_calib_base = attach_train_features(df_calib_base, mtbf_train_base, part_freq_train_base, default_mtbf_base, default_freq_base)
-df_test_base = attach_train_features(df_test_base, mtbf_train_base, part_freq_train_base, default_mtbf_base, default_freq_base)
-
-X_train_base, y_train_base, feats_base = make_xy(df_train_base, thr_label, use_rate_cols)
-X_calib_base, y_calib_base, _ = make_xy(df_calib_base, thr_label, use_rate_cols)
-rf_base, cal_model_base, method_base = train_and_calibrate(X_train_base, y_train_base, X_calib_base, y_calib_base, n_est)
-
-st.success(f"✅ Base model loaded: {method_base}, {len(X_train_base)} samples")
 
 # -------------------------------
-# TABS
+# Data preparation
 # -------------------------------
-tab1, tab2 = st.tabs(["🔮 Predict & Diagnose", "📏 Validation"])
+df = load_and_clean(csv_path)
+df_train, df_calib, df_test = time_split(df)
 
-# ================================================================
-# TAB 1: PREDICTION & PROCESS DIAGNOSIS
-# ================================================================
+# Compute part-level signals from train
+mtbf_train = compute_mtbf_on_train(df_train, thr_label)
+part_freq_train = df_train["part_id"].value_counts(normalize=True)
+
+# Defaults for unseen parts
+default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
+default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
+
+# Attach features
+df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
+df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
+df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
+
+# Train and calibrate
+X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
+X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
+rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
+
+
+# -------------------------------
+# Tabs
+# -------------------------------
+tab1, tab2 = st.tabs(["🔮 Predict", "📏 Validation (6–2–1)"])
+
+
+# -------------------------------
+# Predict tab
+# -------------------------------
 with tab1:
-    st.header("🔮 Scrap Risk Prediction & Root Cause Analysis")
-    
-    # Input form
-    col1, col2, col3, col4 = st.columns(4)
-    part_id_input = col1.text_input("Part ID", value="Unknown")
-    order_qty = col2.number_input("Order Quantity", min_value=1, value=100)
-    piece_weight = col3.number_input("Piece Weight (lbs)", min_value=0.1, value=5.0)
-    cost_per_part = col4.number_input("Cost per Part ($)", min_value=0.1, value=10.0)
+    st.subheader("🔮 Predict scrap risk and reliability")
 
-    if st.button("🎯 Predict Risk & Diagnose Process"):
+    c0, c1, c2, c3 = st.columns(4)
+    part_id_input = c0.text_input("Part ID", value="Unknown")
+    order_qty = c1.number_input("Order Quantity", min_value=1, value=100)
+    piece_weight = c2.number_input("Piece Weight (lbs)", min_value=0.1, value=5.0)
+    cost_per_part = c3.number_input("Cost per Part ($)", min_value=0.1, value=10.0)
+
+    input_df = pd.DataFrame(
+        [[part_id_input, order_qty, piece_weight, default_mtbf, default_freq]],
+        columns=["part_id", "order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"],
+    )
+
+    if st.button("Predict"):
         try:
-            # 🔥 CLEAR ALL CACHES FOR FRESH TRAINING
-            st.cache_data.clear()
-            
-            st.info("🔄 Retraining model with part-specific dataset...")
-            
-            # Reload full dataset
-            df_full = load_and_clean(csv_path)
-            df_full = calculate_process_indices(df_full)
-            
-            # Prepare part-specific dataset
-            df_part = prepare_part_specific_data(
-                df_full, 
-                part_id_input, 
-                piece_weight, 
-                thr_label, 
-                min_samples=30
-            )
-            
-            if df_part is None:
-                st.error("❌ Cannot proceed with prediction - insufficient data diversity")
-                st.stop()
-            
-            # Time-based split
-            df_train, df_calib, df_test = time_split(df_part)
-            
-            # Check each split has both labels
-            for split_name, split_df in [("train", df_train), ("calib", df_calib)]:
-                split_labels = (split_df["scrap_percent"] > thr_label).astype(int)
-                if split_labels.nunique() < 2:
-                    st.warning(f"⚠️ {split_name} split lacks diversity. Using stratified split...")
-                    from sklearn.model_selection import train_test_split
-                    y_stratify = (df_part["scrap_percent"] > thr_label).astype(int)
-                    train_temp, test_temp = train_test_split(
-                        df_part, test_size=0.4, stratify=y_stratify, random_state=RANDOM_STATE
-                    )
-                    calib_temp, test_temp = train_test_split(
-                        test_temp, test_size=0.5, stratify=(test_temp["scrap_percent"] > thr_label).astype(int),
-                        random_state=RANDOM_STATE
-                    )
-                    df_train, df_calib, df_test = train_temp, calib_temp, test_temp
-                    break
-            
-            # Feature engineering
-            mtbf_train = compute_mtbf_on_train(df_train, thr_label)
-            part_freq_train = df_train["part_id"].value_counts(normalize=True)
-            default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
-            default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
-            
-            df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
-            df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
-            df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
-            
-            # Train part-specific model
-            X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols)
-            X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols)
-            
-            if y_train.nunique() < 2:
-                st.error("❌ Training set has only one class after feature engineering")
-                st.stop()
-            
-            rf_part, cal_model_part, method_part = train_and_calibrate(
-                X_train, y_train, X_calib, y_calib, n_est
-            )
-            
-            st.success(f"✅ Part-specific model trained: {method_part}, {len(X_train)} samples")
-            st.info(f"📊 Training labels: Scrap=1: {y_train.sum()}, Scrap=0: {(y_train==0).sum()}")
-            
-            # Prepare input
-            input_df = pd.DataFrame(
-                [[part_id_input, order_qty, piece_weight, default_mtbf, default_freq]],
-                columns=["part_id", "order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"],
-            )
-            
             X_input = input_df.drop(columns=["part_id"])
+            # Ensure feature parity with training
             for col in feats:
                 if col not in X_input.columns:
                     X_input[col] = 0.0
             X_input = X_input[feats]
 
-            # Make prediction
-            prob = float(cal_model_part.predict_proba(X_input)[0, 1])
+            prob = float(cal_model.predict_proba(X_input)[0, 1])
             adj_prob = np.clip(prob, 0.0, 1.0)
             exp_scrap = order_qty * adj_prob
             exp_loss = exp_scrap * cost_per_part
             reliability = 1.0 - adj_prob
 
-            # Display overall metrics
-            st.markdown(f"### 🎯 Risk Assessment for Part **{part_id_input}**")
-            
-            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-            metric_col1.metric("Scrap Risk", f"{adj_prob*100:.1f}%")
-            metric_col2.metric("Expected Scrap", f"{exp_scrap:.1f} pieces")
-            metric_col3.metric("Expected Loss", f"${exp_loss:,.2f}")
-            metric_col4.metric("Reliability", f"{reliability*100:.1f}%")
+            st.markdown(f"### 🧩 Prediction results for part **{part_id_input}**")
+            st.metric("Predicted Scrap Risk (raw)", f"{prob*100:.2f}%")
+            st.metric("Adjusted Scrap Risk", f"{adj_prob*100:.2f}%")
+            st.metric("Expected Scrap Count", f"{exp_scrap:.1f}")
+            st.metric("Expected Loss ($)", f"{exp_loss:,.2f}")
+            st.metric("MTTF Scrap (default)", f"{default_mtbf:.1f}")
+            st.metric("Reliability", f"{reliability*100:.2f}%")
 
-            st.markdown("---")
-
-            # ================================================================
-            # DEFECT-LEVEL PREDICTIONS
-            # ================================================================
-            st.markdown("### 🔬 Detailed Defect Analysis")
-            
-            defect_cols = [c for c in df_full.columns if c.endswith("_rate")]
-            
-            if len(defect_cols) > 0:
-                # Get historical baseline for this part (or similar parts)
-                similar_parts = df_train[
-                    (df_train["piece_weight_lbs"] >= piece_weight * 0.9) & 
-                    (df_train["piece_weight_lbs"] <= piece_weight * 1.1)
-                ]
-                
-                if len(similar_parts) < 10:
-                    similar_parts = df_train  # Fallback to all training data
-                
-                # Calculate defect predictions
-                defect_predictions = []
-                for defect_col in defect_cols:
-                    historical_rate = similar_parts[defect_col].mean()
-                    # Adjust by overall risk prediction
-                    predicted_rate = historical_rate * (1 + adj_prob)
-                    expected_defects = order_qty * predicted_rate / 100
-                    
-                    defect_predictions.append({
-                        "Defect": defect_col.replace("_rate", "").replace("_", " ").title(),
-                        "Defect_Code": defect_col,
-                        "Historical Rate (%)": historical_rate,
-                        "Predicted Rate (%)": predicted_rate,
-                        "Expected Count": expected_defects
-                    })
-                
-                defect_df = pd.DataFrame(defect_predictions).sort_values("Predicted Rate (%)", ascending=False)
-                
-                # ================================================================
-                # PARETO CHARTS
-                # ================================================================
-                pareto_col1, pareto_col2 = st.columns(2)
-                
-                with pareto_col1:
-                    st.markdown("#### 📊 Historical Defect Pareto")
-                    hist_data = defect_df[["Defect", "Historical Rate (%)"]].copy()
-                    hist_chart = create_pareto_chart(
-                        hist_data, 
-                        "Historical Rate (%)", 
-                        "Defect",
-                        "Top 10 Historical Defects"
-                    )
-                    st.plotly_chart(hist_chart, use_container_width=True)
-                
-                with pareto_col2:
-                    st.markdown("#### 🔮 Predicted Defect Pareto")
-                    pred_data = defect_df[["Defect", "Predicted Rate (%)"]].copy()
-                    pred_chart = create_pareto_chart(
-                        pred_data,
-                        "Predicted Rate (%)",
-                        "Defect",
-                        "Top 10 Predicted Defects"
-                    )
-                    st.plotly_chart(pred_chart, use_container_width=True)
-
-                # ================================================================
-                # PROCESS ROOT CAUSE DIAGNOSIS
-                # ================================================================
-                st.markdown("### 🏭 Root Cause Process Diagnosis")
-                st.markdown("*Based on Campbell (2003) process-defect relationships*")
-                
-                # Get top defects for diagnosis
-                top_defects = defect_df.head(10).copy()
-                
-                # Diagnose processes
-                diagnosis = diagnose_root_causes(top_defects)
-                
-                if not diagnosis.empty:
-                    # Display process contribution chart
-                    fig_process = px.bar(
-                        diagnosis,
-                        x="Process",
-                        y="Contribution (%)",
-                        color="Contribution (%)",
-                        color_continuous_scale="Reds",
-                        title="Process Contributions to Predicted Defects"
-                    )
-                    fig_process.update_layout(height=400, xaxis_tickangle=-45)
-                    st.plotly_chart(fig_process, use_container_width=True)
-                    
-                    # Display detailed process table
-                    st.markdown("#### 📋 Detailed Process Analysis")
-                    
-                    # Format the diagnosis table
-                    diagnosis_display = diagnosis.copy()
-                    diagnosis_display["Contribution (%)"] = diagnosis_display["Contribution (%)"].round(2)
-                    
-                    st.dataframe(
-                        diagnosis_display.style.background_gradient(
-                            subset=["Contribution (%)"], 
-                            cmap="Reds"
-                        ),
-                        use_container_width=True
-                    )
-                    
-                    # ================================================================
-                    # DEFECT-TO-PROCESS MAPPING TABLE
-                    # ================================================================
-                    st.markdown("#### 🔗 Defect → Process Mapping")
-                    st.markdown("Shows which processes are responsible for each predicted defect")
-                    
-                    mapping_data = []
-                    for _, row in top_defects.head(10).iterrows():
-                        defect_code = row["Defect_Code"]
-                        if defect_code in DEFECT_TO_PROCESS:
-                            processes = DEFECT_TO_PROCESS[defect_code]
-                            mapping_data.append({
-                                "Defect": row["Defect"],
-                                "Predicted Rate (%)": f"{row['Predicted Rate (%)']:.2f}",
-                                "Expected Count": f"{row['Expected Count']:.1f}",
-                                "Root Cause Process(es)": ", ".join(processes),
-                                "# Processes": len(processes)
-                            })
-                    
-                    if mapping_data:
-                        mapping_df = pd.DataFrame(mapping_data)
-                        st.dataframe(mapping_df, use_container_width=True)
-                    
-                    # ================================================================
-                    # ACTIONABLE RECOMMENDATIONS
-                    # ================================================================
-                    st.markdown("### 💡 Recommended Actions")
-                    
-                    top_process = diagnosis.iloc[0]["Process"]
-                    top_contribution = diagnosis.iloc[0]["Contribution (%)"]
-                    
-                    st.info(f"""
-**Primary Focus: {top_process}** ({top_contribution:.1f}% contribution)
-
-**Description:** {PROCESS_DEFECT_MAP[top_process]["description"]}
-
-**Recommended Actions:**
-- Review SPC charts for {top_process} parameters
-- Increase inspection frequency for related defects
-- Consider process capability study for {top_process}
-- Check if {top_process} parameters are within specification limits
-                    """)
-                    
-                    if len(diagnosis) > 1:
-                        st.warning(f"""
-**Secondary Concern: {diagnosis.iloc[1]["Process"]}** ({diagnosis.iloc[1]["Contribution (%)"]:.1f}% contribution)
-
-Monitor this process as well, as it contributes significantly to the predicted defect profile.
-                        """)
-
+            # Pareto — Historical
+            defect_cols = [c for c in df.columns if c.endswith("_rate")]
+            if len(defect_cols) == 0:
+                st.warning("⚠ No defect-type rate columns found.")
             else:
-                st.warning("⚠️ No defect rate columns found in dataset")
+                st.markdown("#### 📊 Historical Pareto (Top 10 defect types by actual defects)")
+                hist = (
+                    pd.DataFrame({
+                        "Defect Type": [c.replace("_rate", "").replace("_", " ").title() for c in defect_cols],
+                        "Historical Defects": [(df_train["order_quantity"] * df_train[c]).sum() for c in defect_cols]
+                    })
+                    .sort_values("Historical Defects", ascending=False)
+                    .head(10)
+                )
+                total_hist = hist["Historical Defects"].sum()
+                hist["Share (%)"] = np.where(total_hist > 0, hist["Historical Defects"] / total_hist * 100, 0.0)
+                st.dataframe(hist)
+                st.bar_chart(hist.set_index("Defect Type")["Historical Defects"])
+
+                # Pareto — Predicted
+                st.markdown("#### 🔮 Predicted Pareto (Top 10 defect types by expected defects)")
+                df_test_local = df_test.copy()
+                df_test_local["pred_prob"] = cal_model.predict_proba(make_xy(df_test_local, thr_label, use_rate_cols)[0])[:, 1]
+                pred = (
+                    pd.DataFrame({
+                        "Defect Type": [c.replace("_rate", "").replace("_", " ").title() for c in defect_cols],
+                        "Expected Defects": [(df_test_local["order_quantity"] * df_test_local[c] * df_test_local["pred_prob"]).sum()
+                                             for c in defect_cols]
+                    })
+                    .sort_values("Expected Defects", ascending=False)
+                    .head(10)
+                )
+                total_pred = pred["Expected Defects"].sum()
+                pred["Share (%)"] = np.where(total_pred > 0, pred["Expected Defects"] / total_pred * 100, 0.0)
+                st.dataframe(pred)
+                st.bar_chart(pred.set_index("Defect Type")["Expected Defects"])
 
         except Exception as e:
-            st.error(f"❌ Prediction failed: {e}")
-            import traceback
-            st.code(traceback.format_exc())
+            st.error(f"Prediction failed: {e}")
 
 
-# ================================================================
-# TAB 2: VALIDATION
-# ================================================================
+# -------------------------------
+# Validation tab
+# -------------------------------
 with tab2:
-    st.header("📏 Model Validation (6-2-1 Split)")
-    
+    st.subheader("📏 Rolling 6–2–1 validation")
     try:
-        X_test, y_test, _ = make_xy(df_test_base, thr_label, use_rate_cols)
-        preds = cal_model_base.predict_proba(X_test)[:, 1]
-        pred_binary = (preds > 0.5).astype(int)
-        
-        # Metrics
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Brier Score", f"{brier_score_loss(y_test, preds):.4f}")
-        col2.metric("Accuracy", f"{accuracy_score(y_test, pred_binary):.3f}")
-        
-        # Confusion matrix
-        st.markdown("### Confusion Matrix")
-        cm = confusion_matrix(y_test, pred_binary)
-        cm_df = pd.DataFrame(
-            cm,
+        X_test, y_test, _ = make_xy(df_test, thr_label, use_rate_cols)
+        preds = cal_model.predict_proba(X_test)[:, 1]
+        st.metric("Brier Score", f"{brier_score_loss(y_test, preds):.4f}")
+        st.metric("Accuracy", f"{accuracy_score(y_test, (preds > 0.5)):.3f}")
+        st.write(pd.DataFrame(
+            confusion_matrix(y_test, (preds > 0.5)),
             index=["Actual OK", "Actual Scrap"],
             columns=["Pred OK", "Pred Scrap"]
-        )
-        st.dataframe(cm_df)
-        
-        # Classification report
-        st.markdown("### Classification Report")
-        st.text(classification_report(y_test, pred_binary))
-        
-        # Feature importances
-        st.markdown("### 🔍 Feature Importances")
-        try:
-            if hasattr(cal_model_base, "base_estimator"):
-                base = cal_model_base.base_estimator
-                if isinstance(base, list):
-                    importances = base[0].feature_importances_
-                else:
-                    importances = base.feature_importances_
-            else:
-                importances = cal_model_base.feature_importances_
-            
-            feat_imp = pd.DataFrame({
-                "Feature": feats_base,
-                "Importance": importances
-            }).sort_values("Importance", ascending=False).head(15)
-            
-            fig_imp = px.bar(
-                feat_imp,
-                x="Importance",
-                y="Feature",
-                orientation='h',
-                title="Top 15 Features"
-            )
-            st.plotly_chart(fig_imp, use_container_width=True)
-        except Exception as e:
-            st.warning(f"⚠️ Could not extract feature importances: {e}")
-        
+        ))
+        st.text(classification_report(y_test, (preds > 0.5)))
     except Exception as e:
-        st.warning(f"⚠️ Validation failed: {e}")
+        st.warning(f"Validation failed: {e}")
 
-st.markdown("---")
-st.caption("Based on Campbell (2003) *Castings Practice: The Ten Rules of Castings*")
+st.success(f"✅ Model trained successfully with {method}.")
