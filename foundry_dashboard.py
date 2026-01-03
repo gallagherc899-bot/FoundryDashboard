@@ -41,8 +41,6 @@ from sklearn.metrics import (
     f1_score,
 )
 from datetime import datetime
-import json
-import io
 
 # -------------------------------
 # Streamlit setup
@@ -1021,17 +1019,13 @@ with tab2:
                 )
             
             with dl_col3:
-                # Excel download
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_results.to_excel(writer, sheet_name='All Results', index=False)
-                    df_display.to_excel(writer, sheet_name='Selected Columns', index=False)
-                
+                # JSON download (no extra dependencies needed)
+                json_data = df_results.to_json(orient='records', indent=2)
                 st.download_button(
-                    label="📥 Download Excel (All + Selected)",
-                    data=buffer.getvalue(),
-                    file_name=f"prediction_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    label="📥 Download JSON (All Data)",
+                    data=json_data,
+                    file_name=f"prediction_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
                 )
         else:
             st.warning("Please select at least one column category to display.")
