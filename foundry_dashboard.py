@@ -33,6 +33,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     brier_score_loss,
     accuracy_score,
@@ -304,13 +305,57 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
 # MODEL TRAINING UTILITIES
 # ================================================================
 
-def time_split_621(df: pd.DataFrame, train_ratio=0.6, calib_ratio=0.2):
-    """6-2-1 Temporal Split."""
-    df_sorted = df.sort_values("week_ending").reset_index(drop=True)
-    n = len(df_sorted)
-    train_end = int(n * train_ratio)
-    calib_end = int(n * (train_ratio + calib_ratio))
-    return df_sorted.iloc[:train_end], df_sorted.iloc[train_end:calib_end], df_sorted.iloc[calib_end:]
+def smart_split(df: pd.DataFrame, thr_label: float, use_temporal: bool = True):
+    """
+    Smart data splitting that ensures class balance in all splits.
+    Falls back to stratified random split if temporal split has class imbalance.
+    """
+    df = df.copy()
+    y_full = (df["scrap_percent"] > thr_label).astype(int)
+    
+    # Check if we have both classes in the full dataset
+    n_pos = int(y_full.sum())
+    n_neg = int((y_full == 0).sum())
+    
+    effective_thr = thr_label
+    if n_pos < 5 or n_neg < 5:
+        # Not enough samples of both classes - use median as threshold
+        effective_thr = df["scrap_percent"].median()
+        y_full = (df["scrap_percent"] > effective_thr).astype(int)
+    
+    # Try temporal split first
+    if use_temporal and 'week_ending' in df.columns:
+        df_sorted = df.sort_values("week_ending").reset_index(drop=True)
+        n = len(df_sorted)
+        train_end = int(n * 0.6)
+        calib_end = int(n * 0.8)
+        
+        df_train = df_sorted.iloc[:train_end].copy()
+        df_calib = df_sorted.iloc[train_end:calib_end].copy()
+        df_test = df_sorted.iloc[calib_end:].copy()
+        
+        # Check class balance in training set
+        y_train = (df_train["scrap_percent"] > effective_thr).astype(int)
+        if y_train.nunique() >= 2 and y_train.sum() >= 3 and (y_train == 0).sum() >= 3:
+            return df_train, df_calib, df_test, effective_thr
+    
+    # Fall back to stratified random split
+    try:
+        df_train_calib, df_test = train_test_split(
+            df, test_size=0.2, stratify=y_full, random_state=RANDOM_STATE
+        )
+        y_train_calib = (df_train_calib["scrap_percent"] > effective_thr).astype(int)
+        df_train, df_calib = train_test_split(
+            df_train_calib, test_size=0.25, stratify=y_train_calib, random_state=RANDOM_STATE
+        )
+        return df_train.copy(), df_calib.copy(), df_test.copy(), effective_thr
+    except:
+        # Last resort: simple random split
+        df_shuffled = df.sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
+        n = len(df_shuffled)
+        train_end = int(n * 0.6)
+        calib_end = int(n * 0.8)
+        return df_shuffled.iloc[:train_end].copy(), df_shuffled.iloc[train_end:calib_end].copy(), df_shuffled.iloc[calib_end:].copy(), effective_thr
 
 
 def compute_mtbf_on_train(df_train: pd.DataFrame, thr_label: float) -> pd.DataFrame:
@@ -385,8 +430,10 @@ def train_model_with_config(df: pd.DataFrame, phm_config: dict, thr_label: float
     if phm_config.get('temporal', False):
         df = add_temporal_features(df)
     
-    # Split data
-    df_train, df_calib, df_test = time_split_621(df)
+    # Smart split with class balance handling
+    df_train, df_calib, df_test, effective_thr = smart_split(
+        df, thr_label, use_temporal=phm_config.get('temporal', False)
+    )
     
     if len(df_train) < 20 or len(df_test) < 5:
         return None, None, None, {'error': 'Insufficient data'}
@@ -433,13 +480,13 @@ def train_model_with_config(df: pd.DataFrame, phm_config: dict, thr_label: float
             if f not in d.columns:
                 d[f] = 0.0
     
-    # Prepare X, y
+    # Prepare X, y using effective threshold
     X_train = df_train[feats].fillna(0)
-    y_train = (df_train["scrap_percent"] > thr_label).astype(int)
+    y_train = (df_train["scrap_percent"] > effective_thr).astype(int)
     X_calib = df_calib[feats].fillna(0)
-    y_calib = (df_calib["scrap_percent"] > thr_label).astype(int)
+    y_calib = (df_calib["scrap_percent"] > effective_thr).astype(int)
     X_test = df_test[feats].fillna(0)
-    y_test = (df_test["scrap_percent"] > thr_label).astype(int)
+    y_test = (df_test["scrap_percent"] > effective_thr).astype(int)
     
     # Check class balance
     if y_train.nunique() < 2:
@@ -574,7 +621,7 @@ def predict_for_part(df: pd.DataFrame, part_id: str, order_qty: int,
         results['historical_scrap_min'] = df['scrap_percent'].min()
     
     # Compute MTBF
-    df_train, _, _ = time_split_621(df)
+    df_train, _, _, _ = smart_split(df, thr_label, use_temporal=phm_config.get('temporal', False))
     mtbf_train = compute_mtbf_on_train(df_train, thr_label)
     part_freq_train = df_train["part_id"].value_counts(normalize=True)
     
