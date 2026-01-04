@@ -2402,7 +2402,7 @@ with tab3:
                     # Prepare model and dataset info
                     model_info = {
                         'type': 'Random Forest Classifier',
-                        'calibration': method,
+                        'calibration': method_base,
                         'n_features': len(feats_adv),
                         'threshold': thr_label
                     }
