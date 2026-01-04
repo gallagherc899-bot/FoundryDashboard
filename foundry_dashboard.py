@@ -30,7 +30,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import (
     brier_score_loss,
     accuracy_score,
@@ -39,9 +39,18 @@ from sklearn.metrics import (
     recall_score,
     precision_score,
     f1_score,
+    roc_auc_score,
+    average_precision_score,
+    roc_curve,
+    precision_recall_curve,
+    log_loss,
 )
+from sklearn.utils import resample
+from scipy import stats
 from datetime import datetime
 import json
+import io
+import base64
 
 # -------------------------------
 # Streamlit setup
@@ -950,6 +959,433 @@ def compare_models_with_without_multi_defect(df_base, thr_label, use_rate_cols, 
 
 
 # ================================================================
+# ADVANCED VALIDATION METHODS (PEER-REVIEWED)
+# ================================================================
+
+# Citation database for validation methods
+VALIDATION_CITATIONS = {
+    "brier_score": {
+        "name": "Brier Score",
+        "authors": "Brier, G.W.",
+        "year": 1950,
+        "title": "Verification of forecasts expressed in terms of probability",
+        "journal": "Monthly Weather Review",
+        "volume": "78(1)",
+        "pages": "1-3",
+        "doi": "10.1175/1520-0493(1950)078<0001:VOFEIT>2.0.CO;2",
+        "url": "https://doi.org/10.1175/1520-0493(1950)078<0001:VOFEIT>2.0.CO;2",
+        "description": "Measures the mean squared difference between predicted probabilities and actual binary outcomes. Range 0-1, lower is better."
+    },
+    "calibration_curve": {
+        "name": "Calibration Curves (Reliability Diagrams)",
+        "authors": "DeGroot, M.H. & Fienberg, S.E.",
+        "year": 1983,
+        "title": "The comparison and evaluation of forecasters",
+        "journal": "Journal of the Royal Statistical Society: Series D",
+        "volume": "32(1-2)",
+        "pages": "12-22",
+        "doi": "10.2307/2987588",
+        "url": "https://doi.org/10.2307/2987588",
+        "description": "Visual assessment of calibration by plotting predicted probabilities against observed frequencies. Well-calibrated models follow the diagonal."
+    },
+    "roc_auc": {
+        "name": "ROC-AUC (Receiver Operating Characteristic - Area Under Curve)",
+        "authors": "Hanley, J.A. & McNeil, B.J.",
+        "year": 1982,
+        "title": "The meaning and use of the area under a receiver operating characteristic (ROC) curve",
+        "journal": "Radiology",
+        "volume": "143(1)",
+        "pages": "29-36",
+        "doi": "10.1148/radiology.143.1.7063747",
+        "url": "https://doi.org/10.1148/radiology.143.1.7063747",
+        "description": "Measures discrimination ability across all classification thresholds. Range 0.5-1.0, higher is better. 0.5 = random, 1.0 = perfect."
+    },
+    "pr_auc": {
+        "name": "Precision-Recall AUC",
+        "authors": "Davis, J. & Goadrich, M.",
+        "year": 2006,
+        "title": "The relationship between Precision-Recall and ROC curves",
+        "journal": "Proceedings of the 23rd International Conference on Machine Learning",
+        "volume": "",
+        "pages": "233-240",
+        "doi": "10.1145/1143844.1143874",
+        "url": "https://doi.org/10.1145/1143844.1143874",
+        "description": "More informative than ROC-AUC for imbalanced datasets. Focuses on positive class performance. Higher is better."
+    },
+    "log_loss": {
+        "name": "Logarithmic Loss (Cross-Entropy)",
+        "authors": "Good, I.J.",
+        "year": 1952,
+        "title": "Rational decisions",
+        "journal": "Journal of the Royal Statistical Society: Series B",
+        "volume": "14(1)",
+        "pages": "107-114",
+        "doi": "10.1111/j.2517-6161.1952.tb00104.x",
+        "url": "https://doi.org/10.1111/j.2517-6161.1952.tb00104.x",
+        "description": "Penalizes confident wrong predictions heavily. Measures the accuracy of probabilistic predictions. Lower is better."
+    },
+    "ece": {
+        "name": "Expected Calibration Error (ECE)",
+        "authors": "Guo, C., Pleiss, G., Sun, Y., & Weinberger, K.Q.",
+        "year": 2017,
+        "title": "On calibration of modern neural networks",
+        "journal": "Proceedings of the 34th International Conference on Machine Learning",
+        "volume": "70",
+        "pages": "1321-1330",
+        "doi": "",
+        "url": "https://proceedings.mlr.press/v70/guo17a.html",
+        "description": "Weighted average of calibration error across probability bins. Single metric summarizing reliability diagram. Lower is better."
+    },
+    "hosmer_lemeshow": {
+        "name": "Hosmer-Lemeshow Test",
+        "authors": "Hosmer, D.W. & Lemeshow, S.",
+        "year": 1980,
+        "title": "Goodness of fit tests for the multiple logistic regression model",
+        "journal": "Communications in Statistics - Theory and Methods",
+        "volume": "9(10)",
+        "pages": "1043-1069",
+        "doi": "10.1080/03610928008827941",
+        "url": "https://doi.org/10.1080/03610928008827941",
+        "description": "Statistical test for calibration goodness-of-fit. p > 0.05 suggests adequate calibration (fail to reject null hypothesis)."
+    },
+    "bootstrap_ci": {
+        "name": "Bootstrap Confidence Intervals",
+        "authors": "Efron, B. & Tibshirani, R.J.",
+        "year": 1993,
+        "title": "An Introduction to the Bootstrap",
+        "journal": "Chapman & Hall/CRC",
+        "volume": "",
+        "pages": "",
+        "doi": "10.1007/978-1-4899-4541-9",
+        "url": "https://doi.org/10.1007/978-1-4899-4541-9",
+        "description": "Non-parametric method for estimating confidence intervals by resampling. Provides uncertainty quantification for metrics."
+    }
+}
+
+
+def calculate_expected_calibration_error(y_true, y_prob, n_bins=10):
+    """
+    Calculate Expected Calibration Error (ECE).
+    Guo et al. (2017) - On calibration of modern neural networks
+    """
+    bin_boundaries = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    bin_details = []
+    
+    for i in range(n_bins):
+        mask = (y_prob >= bin_boundaries[i]) & (y_prob < bin_boundaries[i+1])
+        if mask.sum() > 0:
+            bin_acc = y_true[mask].mean()
+            bin_conf = y_prob[mask].mean()
+            bin_size = mask.sum()
+            bin_error = abs(bin_acc - bin_conf)
+            ece += bin_size * bin_error
+            bin_details.append({
+                'bin': f"{bin_boundaries[i]:.1f}-{bin_boundaries[i+1]:.1f}",
+                'samples': bin_size,
+                'avg_confidence': bin_conf,
+                'avg_accuracy': bin_acc,
+                'calibration_error': bin_error
+            })
+    
+    ece = ece / len(y_true) if len(y_true) > 0 else 0
+    return ece, bin_details
+
+
+def hosmer_lemeshow_test(y_true, y_prob, n_bins=10):
+    """
+    Hosmer-Lemeshow goodness-of-fit test.
+    Hosmer & Lemeshow (1980)
+    """
+    y_true = np.array(y_true)
+    y_prob = np.array(y_prob)
+    
+    # Sort by predicted probability
+    order = np.argsort(y_prob)
+    y_true_sorted = y_true[order]
+    y_prob_sorted = y_prob[order]
+    
+    # Create bins
+    bin_size = len(y_true) // n_bins
+    chi2_stat = 0.0
+    degrees_freedom = n_bins - 2
+    
+    bin_results = []
+    
+    for i in range(n_bins):
+        start_idx = i * bin_size
+        end_idx = (i + 1) * bin_size if i < n_bins - 1 else len(y_true)
+        
+        observed_pos = y_true_sorted[start_idx:end_idx].sum()
+        expected_pos = y_prob_sorted[start_idx:end_idx].sum()
+        n_bin = end_idx - start_idx
+        observed_neg = n_bin - observed_pos
+        expected_neg = n_bin - expected_pos
+        
+        if expected_pos > 0 and expected_neg > 0:
+            chi2_stat += ((observed_pos - expected_pos) ** 2) / expected_pos
+            chi2_stat += ((observed_neg - expected_neg) ** 2) / expected_neg
+        
+        bin_results.append({
+            'bin': i + 1,
+            'n': n_bin,
+            'observed_events': observed_pos,
+            'expected_events': expected_pos,
+            'observed_non_events': observed_neg,
+            'expected_non_events': expected_neg
+        })
+    
+    p_value = 1 - stats.chi2.cdf(chi2_stat, degrees_freedom) if degrees_freedom > 0 else 1.0
+    
+    return chi2_stat, p_value, degrees_freedom, bin_results
+
+
+def bootstrap_confidence_intervals(y_true, y_prob, n_iterations=1000, confidence=0.95):
+    """
+    Calculate bootstrap confidence intervals for metrics.
+    Efron & Tibshirani (1993)
+    """
+    y_true = np.array(y_true)
+    y_prob = np.array(y_prob)
+    
+    metrics = {
+        'brier': [],
+        'accuracy': [],
+        'recall': [],
+        'precision': [],
+        'f1': [],
+        'roc_auc': [],
+        'pr_auc': []
+    }
+    
+    for _ in range(n_iterations):
+        # Resample with replacement
+        indices = np.random.randint(0, len(y_true), size=len(y_true))
+        y_true_boot = y_true[indices]
+        y_prob_boot = y_prob[indices]
+        y_pred_boot = (y_prob_boot > 0.5).astype(int)
+        
+        # Calculate metrics
+        metrics['brier'].append(brier_score_loss(y_true_boot, y_prob_boot))
+        metrics['accuracy'].append(accuracy_score(y_true_boot, y_pred_boot))
+        
+        # Handle edge cases where all samples are same class
+        if len(np.unique(y_true_boot)) > 1:
+            metrics['recall'].append(recall_score(y_true_boot, y_pred_boot, zero_division=0))
+            metrics['precision'].append(precision_score(y_true_boot, y_pred_boot, zero_division=0))
+            metrics['f1'].append(f1_score(y_true_boot, y_pred_boot, zero_division=0))
+            metrics['roc_auc'].append(roc_auc_score(y_true_boot, y_prob_boot))
+            metrics['pr_auc'].append(average_precision_score(y_true_boot, y_prob_boot))
+    
+    # Calculate confidence intervals
+    alpha = (1 - confidence) / 2
+    ci_results = {}
+    
+    for metric_name, values in metrics.items():
+        if len(values) > 0:
+            ci_results[metric_name] = {
+                'mean': np.mean(values),
+                'std': np.std(values),
+                'ci_lower': np.percentile(values, alpha * 100),
+                'ci_upper': np.percentile(values, (1 - alpha) * 100)
+            }
+    
+    return ci_results
+
+
+def run_advanced_validation(y_true, y_prob, n_bootstrap=500):
+    """
+    Run all advanced validation methods and return comprehensive results.
+    """
+    y_true = np.array(y_true)
+    y_prob = np.array(y_prob)
+    y_pred = (y_prob > 0.5).astype(int)
+    
+    results = {}
+    
+    # Basic metrics
+    results['brier_score'] = brier_score_loss(y_true, y_prob)
+    results['log_loss'] = log_loss(y_true, y_prob)
+    results['accuracy'] = accuracy_score(y_true, y_pred)
+    results['recall'] = recall_score(y_true, y_pred, zero_division=0)
+    results['precision'] = precision_score(y_true, y_pred, zero_division=0)
+    results['f1'] = f1_score(y_true, y_pred, zero_division=0)
+    
+    # ROC and PR curves
+    if len(np.unique(y_true)) > 1:
+        results['roc_auc'] = roc_auc_score(y_true, y_prob)
+        results['pr_auc'] = average_precision_score(y_true, y_prob)
+        results['fpr'], results['tpr'], results['roc_thresholds'] = roc_curve(y_true, y_prob)
+        results['precision_curve'], results['recall_curve'], results['pr_thresholds'] = precision_recall_curve(y_true, y_prob)
+    else:
+        results['roc_auc'] = None
+        results['pr_auc'] = None
+    
+    # Calibration curve
+    try:
+        results['calibration_prob_true'], results['calibration_prob_pred'] = calibration_curve(y_true, y_prob, n_bins=10, strategy='uniform')
+    except:
+        results['calibration_prob_true'] = None
+        results['calibration_prob_pred'] = None
+    
+    # ECE
+    results['ece'], results['ece_bins'] = calculate_expected_calibration_error(y_true, y_prob)
+    
+    # Hosmer-Lemeshow
+    results['hl_chi2'], results['hl_pvalue'], results['hl_df'], results['hl_bins'] = hosmer_lemeshow_test(y_true, y_prob)
+    
+    # Bootstrap CI
+    results['bootstrap_ci'] = bootstrap_confidence_intervals(y_true, y_prob, n_iterations=n_bootstrap)
+    
+    return results
+
+
+def generate_validation_report(results, model_info, dataset_info):
+    """
+    Generate a comprehensive validation report as a string.
+    """
+    report = []
+    report.append("=" * 80)
+    report.append("ADVANCED MODEL VALIDATION REPORT")
+    report.append("Foundry Scrap Risk Dashboard v3.1")
+    report.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    report.append("=" * 80)
+    report.append("")
+    
+    # Model Information
+    report.append("1. MODEL INFORMATION")
+    report.append("-" * 40)
+    report.append(f"   Model Type: {model_info.get('type', 'Random Forest Classifier')}")
+    report.append(f"   Calibration: {model_info.get('calibration', 'Sigmoid/Isotonic')}")
+    report.append(f"   Features: {model_info.get('n_features', 'N/A')}")
+    report.append(f"   Threshold: {model_info.get('threshold', 'N/A')}%")
+    report.append("")
+    
+    # Dataset Information
+    report.append("2. DATASET INFORMATION")
+    report.append("-" * 40)
+    report.append(f"   Total Records: {dataset_info.get('total_records', 'N/A')}")
+    report.append(f"   Training Set: {dataset_info.get('train_size', 'N/A')} ({dataset_info.get('train_pct', 'N/A')})")
+    report.append(f"   Calibration Set: {dataset_info.get('calib_size', 'N/A')} ({dataset_info.get('calib_pct', 'N/A')})")
+    report.append(f"   Test Set: {dataset_info.get('test_size', 'N/A')} ({dataset_info.get('test_pct', 'N/A')})")
+    report.append(f"   Positive Class (High Scrap): {dataset_info.get('positive_class', 'N/A')}")
+    report.append(f"   Negative Class (OK): {dataset_info.get('negative_class', 'N/A')}")
+    report.append("")
+    
+    # Performance Metrics with Citations
+    report.append("3. PERFORMANCE METRICS")
+    report.append("-" * 40)
+    report.append("")
+    
+    # Brier Score
+    cite = VALIDATION_CITATIONS['brier_score']
+    report.append(f"   3.1 Brier Score: {results['brier_score']:.4f}")
+    report.append(f"       Interpretation: {'Excellent' if results['brier_score'] < 0.1 else 'Good' if results['brier_score'] < 0.2 else 'Fair'} calibration")
+    report.append(f"       Citation: {cite['authors']} ({cite['year']}). {cite['title']}.")
+    report.append(f"                 {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+    report.append(f"       DOI: {cite['url']}")
+    report.append("")
+    
+    # Log Loss
+    cite = VALIDATION_CITATIONS['log_loss']
+    report.append(f"   3.2 Log Loss: {results['log_loss']:.4f}")
+    report.append(f"       Interpretation: Lower values indicate better probabilistic predictions")
+    report.append(f"       Citation: {cite['authors']} ({cite['year']}). {cite['title']}.")
+    report.append(f"                 {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+    report.append(f"       DOI: {cite['url']}")
+    report.append("")
+    
+    # ROC-AUC
+    if results['roc_auc'] is not None:
+        cite = VALIDATION_CITATIONS['roc_auc']
+        report.append(f"   3.3 ROC-AUC: {results['roc_auc']:.4f}")
+        auc_interp = 'Outstanding' if results['roc_auc'] >= 0.9 else 'Excellent' if results['roc_auc'] >= 0.8 else 'Acceptable' if results['roc_auc'] >= 0.7 else 'Poor'
+        report.append(f"       Interpretation: {auc_interp} discrimination ability")
+        report.append(f"       Citation: {cite['authors']} ({cite['year']}). {cite['title']}.")
+        report.append(f"                 {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+        report.append(f"       DOI: {cite['url']}")
+        report.append("")
+    
+    # PR-AUC
+    if results['pr_auc'] is not None:
+        cite = VALIDATION_CITATIONS['pr_auc']
+        report.append(f"   3.4 Precision-Recall AUC: {results['pr_auc']:.4f}")
+        report.append(f"       Interpretation: Important for imbalanced datasets; focuses on positive class")
+        report.append(f"       Citation: {cite['authors']} ({cite['year']}). {cite['title']}.")
+        report.append(f"                 {cite['journal']}, {cite['pages']}.")
+        report.append(f"       DOI: {cite['url']}")
+        report.append("")
+    
+    # Classification Metrics
+    report.append(f"   3.5 Classification Metrics (threshold=0.5):")
+    report.append(f"       Accuracy:  {results['accuracy']:.4f}")
+    report.append(f"       Recall:    {results['recall']:.4f}")
+    report.append(f"       Precision: {results['precision']:.4f}")
+    report.append(f"       F1 Score:  {results['f1']:.4f}")
+    report.append("")
+    
+    # Calibration Assessment
+    report.append("4. CALIBRATION ASSESSMENT")
+    report.append("-" * 40)
+    report.append("")
+    
+    # ECE
+    cite = VALIDATION_CITATIONS['ece']
+    report.append(f"   4.1 Expected Calibration Error (ECE): {results['ece']:.4f}")
+    ece_interp = 'Well-calibrated' if results['ece'] < 0.05 else 'Adequately calibrated' if results['ece'] < 0.1 else 'Poorly calibrated'
+    report.append(f"       Interpretation: {ece_interp}")
+    report.append(f"       Citation: {cite['authors']} ({cite['year']}). {cite['title']}.")
+    report.append(f"                 {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+    report.append(f"       URL: {cite['url']}")
+    report.append("")
+    
+    # Hosmer-Lemeshow
+    cite = VALIDATION_CITATIONS['hosmer_lemeshow']
+    report.append(f"   4.2 Hosmer-Lemeshow Test:")
+    report.append(f"       Chi-square statistic: {results['hl_chi2']:.4f}")
+    report.append(f"       Degrees of freedom: {results['hl_df']}")
+    report.append(f"       p-value: {results['hl_pvalue']:.4f}")
+    hl_interp = 'Good fit (fail to reject H0)' if results['hl_pvalue'] > 0.05 else 'Poor fit (reject H0)'
+    report.append(f"       Interpretation: {hl_interp}")
+    report.append(f"       Citation: {cite['authors']} ({cite['year']}). {cite['title']}.")
+    report.append(f"                 {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+    report.append(f"       DOI: {cite['url']}")
+    report.append("")
+    
+    # Bootstrap Confidence Intervals
+    report.append("5. BOOTSTRAP CONFIDENCE INTERVALS (95%)")
+    report.append("-" * 40)
+    cite = VALIDATION_CITATIONS['bootstrap_ci']
+    report.append(f"   Citation: {cite['authors']} ({cite['year']}). {cite['title']}. {cite['journal']}.")
+    report.append(f"   DOI: {cite['url']}")
+    report.append("")
+    
+    if 'bootstrap_ci' in results:
+        for metric, ci in results['bootstrap_ci'].items():
+            report.append(f"   {metric.upper()}:")
+            report.append(f"       Mean: {ci['mean']:.4f} (SD: {ci['std']:.4f})")
+            report.append(f"       95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}]")
+            report.append("")
+    
+    # References
+    report.append("6. REFERENCES")
+    report.append("-" * 40)
+    for i, (key, cite) in enumerate(VALIDATION_CITATIONS.items(), 1):
+        report.append(f"   [{i}] {cite['authors']} ({cite['year']}). {cite['title']}.")
+        if cite['journal']:
+            report.append(f"       {cite['journal']}, {cite['volume']}, {cite['pages']}." if cite['volume'] else f"       {cite['journal']}.")
+        if cite['url']:
+            report.append(f"       {cite['url']}")
+        report.append("")
+    
+    report.append("=" * 80)
+    report.append("END OF REPORT")
+    report.append("=" * 80)
+    
+    return "\n".join(report)
+
+
+# ================================================================
 # PROCESS ROOT CAUSE DIAGNOSIS
 # ================================================================
 def calculate_process_indices(df: pd.DataFrame) -> pd.DataFrame:
@@ -1175,7 +1611,7 @@ else:
 # -------------------------------
 # TABS
 # -------------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["🔮 Predict & Diagnose", "📏 Validation", "📊 Model Comparison", "📝 Log Outcome"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Predict & Diagnose", "📏 Validation", "🔬 Advanced Validation", "📊 Model Comparison", "📝 Log Outcome"])
 
 # ================================================================
 # TAB 1: PREDICTION & PROCESS DIAGNOSIS
@@ -1651,9 +2087,393 @@ with tab2:
 
 
 # ================================================================
-# TAB 3: MODEL COMPARISON (NEW IN V3.0)
+# TAB 3: ADVANCED VALIDATION (PEER-REVIEWED METHODS)
 # ================================================================
 with tab3:
+    st.header("🔬 Advanced Model Validation")
+    
+    st.markdown("""
+    This section provides **peer-reviewed validation methods** with academic citations.
+    Each method includes references to the original research papers for citation in academic work.
+    """)
+    
+    if st.button("🧪 Run Advanced Validation Suite"):
+        with st.spinner("Running comprehensive validation analysis..."):
+            try:
+                # Get test predictions
+                X_test_adv, y_test_adv, feats_adv = make_xy(df_test.copy(), thr_label, use_rate_cols, use_multi_defect, use_temporal=True)
+                preds_adv = cal_model.predict_proba(X_test_adv)[:, 1]
+                
+                # Run advanced validation
+                adv_results = run_advanced_validation(y_test_adv, preds_adv, n_bootstrap=500)
+                
+                # Store results for report generation
+                st.session_state['adv_validation_results'] = adv_results
+                st.session_state['adv_validation_y_true'] = y_test_adv
+                st.session_state['adv_validation_y_prob'] = preds_adv
+                
+                # Create sub-tabs for different validation views
+                val_tab1, val_tab2, val_tab3, val_tab4, val_tab5 = st.tabs([
+                    "📊 Discrimination", "📈 Calibration", "📉 Confidence Intervals", 
+                    "📚 Citations", "📄 Download Report"
+                ])
+                
+                # ============================================================
+                # DISCRIMINATION METRICS TAB
+                # ============================================================
+                with val_tab1:
+                    st.subheader("Discrimination Metrics")
+                    st.markdown("*How well the model separates high-scrap from OK runs*")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    # ROC-AUC
+                    with col1:
+                        cite = VALIDATION_CITATIONS['roc_auc']
+                        st.metric("ROC-AUC", f"{adv_results['roc_auc']:.4f}" if adv_results['roc_auc'] else "N/A")
+                        auc_interp = 'Outstanding' if adv_results['roc_auc'] and adv_results['roc_auc'] >= 0.9 else 'Excellent' if adv_results['roc_auc'] and adv_results['roc_auc'] >= 0.8 else 'Acceptable'
+                        st.caption(f"Interpretation: {auc_interp}")
+                        with st.expander("📚 Citation"):
+                            st.markdown(f"**{cite['name']}**")
+                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    
+                    # PR-AUC
+                    with col2:
+                        cite = VALIDATION_CITATIONS['pr_auc']
+                        st.metric("PR-AUC", f"{adv_results['pr_auc']:.4f}" if adv_results['pr_auc'] else "N/A")
+                        st.caption("Better for imbalanced data")
+                        with st.expander("📚 Citation"):
+                            st.markdown(f"**{cite['name']}**")
+                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['pages']}.")
+                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    
+                    # Log Loss
+                    with col3:
+                        cite = VALIDATION_CITATIONS['log_loss']
+                        st.metric("Log Loss", f"{adv_results['log_loss']:.4f}")
+                        st.caption("Lower is better")
+                        with st.expander("📚 Citation"):
+                            st.markdown(f"**{cite['name']}**")
+                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    
+                    # ROC Curve
+                    if adv_results['roc_auc'] is not None:
+                        st.markdown("### ROC Curve")
+                        fig_roc = go.Figure()
+                        fig_roc.add_trace(go.Scatter(
+                            x=adv_results['fpr'], y=adv_results['tpr'],
+                            mode='lines', name=f'ROC (AUC = {adv_results["roc_auc"]:.3f})',
+                            line=dict(color='#ff6b6b', width=2)
+                        ))
+                        fig_roc.add_trace(go.Scatter(
+                            x=[0, 1], y=[0, 1],
+                            mode='lines', name='Random',
+                            line=dict(color='gray', width=1, dash='dash')
+                        ))
+                        fig_roc.update_layout(
+                            title="Receiver Operating Characteristic (ROC) Curve",
+                            xaxis_title="False Positive Rate",
+                            yaxis_title="True Positive Rate",
+                            yaxis=dict(scaleanchor="x", scaleratio=1),
+                            xaxis=dict(constrain='domain'),
+                            width=600, height=500
+                        )
+                        st.plotly_chart(fig_roc, use_container_width=True)
+                    
+                    # Precision-Recall Curve
+                    if adv_results['pr_auc'] is not None:
+                        st.markdown("### Precision-Recall Curve")
+                        fig_pr = go.Figure()
+                        fig_pr.add_trace(go.Scatter(
+                            x=adv_results['recall_curve'], y=adv_results['precision_curve'],
+                            mode='lines', name=f'PR (AUC = {adv_results["pr_auc"]:.3f})',
+                            line=dict(color='#4ecdc4', width=2)
+                        ))
+                        # Add baseline (proportion of positives)
+                        baseline = y_test_adv.mean()
+                        fig_pr.add_trace(go.Scatter(
+                            x=[0, 1], y=[baseline, baseline],
+                            mode='lines', name=f'Baseline ({baseline:.3f})',
+                            line=dict(color='gray', width=1, dash='dash')
+                        ))
+                        fig_pr.update_layout(
+                            title="Precision-Recall Curve",
+                            xaxis_title="Recall",
+                            yaxis_title="Precision",
+                            width=600, height=500
+                        )
+                        st.plotly_chart(fig_pr, use_container_width=True)
+                
+                # ============================================================
+                # CALIBRATION TAB
+                # ============================================================
+                with val_tab2:
+                    st.subheader("Calibration Assessment")
+                    st.markdown("*How well predicted probabilities match actual outcomes*")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    # Brier Score
+                    with col1:
+                        cite = VALIDATION_CITATIONS['brier_score']
+                        st.metric("Brier Score", f"{adv_results['brier_score']:.4f}")
+                        brier_interp = 'Excellent' if adv_results['brier_score'] < 0.1 else 'Good' if adv_results['brier_score'] < 0.2 else 'Fair'
+                        st.caption(f"Interpretation: {brier_interp}")
+                        with st.expander("📚 Citation"):
+                            st.markdown(f"**{cite['name']}**")
+                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    
+                    # ECE
+                    with col2:
+                        cite = VALIDATION_CITATIONS['ece']
+                        st.metric("Expected Calibration Error", f"{adv_results['ece']:.4f}")
+                        ece_interp = 'Well-calibrated' if adv_results['ece'] < 0.05 else 'Adequate' if adv_results['ece'] < 0.1 else 'Poor'
+                        st.caption(f"Interpretation: {ece_interp}")
+                        with st.expander("📚 Citation"):
+                            st.markdown(f"**{cite['name']}**")
+                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+                            st.markdown(f"[URL]({cite['url']})")
+                    
+                    # Hosmer-Lemeshow
+                    with col3:
+                        cite = VALIDATION_CITATIONS['hosmer_lemeshow']
+                        st.metric("Hosmer-Lemeshow p-value", f"{adv_results['hl_pvalue']:.4f}")
+                        hl_interp = 'Good fit ✅' if adv_results['hl_pvalue'] > 0.05 else 'Poor fit ❌'
+                        st.caption(f"Interpretation: {hl_interp}")
+                        with st.expander("📚 Citation"):
+                            st.markdown(f"**{cite['name']}**")
+                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    
+                    # Hosmer-Lemeshow details
+                    st.markdown("### Hosmer-Lemeshow Test Details")
+                    st.markdown(f"**Chi-square statistic:** {adv_results['hl_chi2']:.4f}")
+                    st.markdown(f"**Degrees of freedom:** {adv_results['hl_df']}")
+                    st.markdown(f"**p-value:** {adv_results['hl_pvalue']:.4f}")
+                    if adv_results['hl_pvalue'] > 0.05:
+                        st.success("✅ Fail to reject null hypothesis: Model calibration is adequate")
+                    else:
+                        st.warning("⚠️ Reject null hypothesis: Model may be poorly calibrated")
+                    
+                    # Calibration Curve
+                    st.markdown("### Calibration Curve (Reliability Diagram)")
+                    cite = VALIDATION_CITATIONS['calibration_curve']
+                    with st.expander("📚 Citation"):
+                        st.markdown(f"**{cite['name']}**")
+                        st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
+                        st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    
+                    if adv_results['calibration_prob_true'] is not None:
+                        fig_cal = go.Figure()
+                        fig_cal.add_trace(go.Scatter(
+                            x=adv_results['calibration_prob_pred'], 
+                            y=adv_results['calibration_prob_true'],
+                            mode='lines+markers', name='Model Calibration',
+                            line=dict(color='#ff6b6b', width=2),
+                            marker=dict(size=8)
+                        ))
+                        fig_cal.add_trace(go.Scatter(
+                            x=[0, 1], y=[0, 1],
+                            mode='lines', name='Perfect Calibration',
+                            line=dict(color='gray', width=1, dash='dash')
+                        ))
+                        fig_cal.update_layout(
+                            title="Calibration Curve",
+                            xaxis_title="Mean Predicted Probability",
+                            yaxis_title="Fraction of Positives",
+                            yaxis=dict(scaleanchor="x", scaleratio=1),
+                            xaxis=dict(constrain='domain', range=[0, 1]),
+                            yaxis_range=[0, 1],
+                            width=600, height=500
+                        )
+                        st.plotly_chart(fig_cal, use_container_width=True)
+                        st.caption("Points close to the diagonal indicate good calibration")
+                    
+                    # ECE Bin Details
+                    st.markdown("### ECE Bin Details")
+                    if adv_results['ece_bins']:
+                        ece_df = pd.DataFrame(adv_results['ece_bins'])
+                        st.dataframe(ece_df, use_container_width=True)
+                
+                # ============================================================
+                # CONFIDENCE INTERVALS TAB
+                # ============================================================
+                with val_tab3:
+                    st.subheader("Bootstrap Confidence Intervals")
+                    cite = VALIDATION_CITATIONS['bootstrap_ci']
+                    st.markdown(f"*{cite['description']}*")
+                    
+                    with st.expander("📚 Citation"):
+                        st.markdown(f"**{cite['name']}**")
+                        st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}.")
+                        st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    
+                    st.markdown("### 95% Confidence Intervals (500 bootstrap iterations)")
+                    
+                    if 'bootstrap_ci' in adv_results:
+                        ci_data = []
+                        for metric, ci in adv_results['bootstrap_ci'].items():
+                            ci_data.append({
+                                'Metric': metric.upper().replace('_', ' '),
+                                'Mean': f"{ci['mean']:.4f}",
+                                'Std Dev': f"{ci['std']:.4f}",
+                                '95% CI Lower': f"{ci['ci_lower']:.4f}",
+                                '95% CI Upper': f"{ci['ci_upper']:.4f}",
+                                'CI Width': f"{ci['ci_upper'] - ci['ci_lower']:.4f}"
+                            })
+                        
+                        ci_df = pd.DataFrame(ci_data)
+                        st.dataframe(ci_df, use_container_width=True)
+                        
+                        # Visualization
+                        st.markdown("### Confidence Interval Visualization")
+                        fig_ci = go.Figure()
+                        
+                        metrics = [item['Metric'] for item in ci_data]
+                        means = [adv_results['bootstrap_ci'][m.lower().replace(' ', '_')]['mean'] for m in [item['Metric'] for item in ci_data]]
+                        ci_lowers = [adv_results['bootstrap_ci'][m.lower().replace(' ', '_')]['ci_lower'] for m in [item['Metric'] for item in ci_data]]
+                        ci_uppers = [adv_results['bootstrap_ci'][m.lower().replace(' ', '_')]['ci_upper'] for m in [item['Metric'] for item in ci_data]]
+                        
+                        fig_ci.add_trace(go.Scatter(
+                            x=metrics, y=means,
+                            mode='markers',
+                            marker=dict(size=12, color='#ff6b6b'),
+                            name='Mean',
+                            error_y=dict(
+                                type='data',
+                                symmetric=False,
+                                array=[u - m for u, m in zip(ci_uppers, means)],
+                                arrayminus=[m - l for m, l in zip(means, ci_lowers)],
+                                color='#ff6b6b'
+                            )
+                        ))
+                        
+                        fig_ci.update_layout(
+                            title="Bootstrap 95% Confidence Intervals",
+                            yaxis_title="Score",
+                            yaxis_range=[0, 1.1],
+                            height=400
+                        )
+                        st.plotly_chart(fig_ci, use_container_width=True)
+                
+                # ============================================================
+                # CITATIONS TAB
+                # ============================================================
+                with val_tab4:
+                    st.subheader("📚 Academic Citations")
+                    st.markdown("Use these citations when referencing validation methods in academic work.")
+                    
+                    for key, cite in VALIDATION_CITATIONS.items():
+                        with st.expander(f"**{cite['name']}** ({cite['year']})"):
+                            st.markdown(f"**Authors:** {cite['authors']}")
+                            st.markdown(f"**Year:** {cite['year']}")
+                            st.markdown(f"**Title:** {cite['title']}")
+                            st.markdown(f"**Journal:** {cite['journal']}")
+                            if cite['volume']:
+                                st.markdown(f"**Volume:** {cite['volume']}")
+                            if cite['pages']:
+                                st.markdown(f"**Pages:** {cite['pages']}")
+                            if cite['doi']:
+                                st.markdown(f"**DOI:** {cite['doi']}")
+                            st.markdown(f"**URL:** [{cite['url']}]({cite['url']})")
+                            st.markdown("---")
+                            st.markdown(f"**Description:** {cite['description']}")
+                            
+                            # Copy-paste citation
+                            st.markdown("---")
+                            st.markdown("**APA Citation:**")
+                            apa = f"{cite['authors']} ({cite['year']}). {cite['title']}. *{cite['journal']}*"
+                            if cite['volume']:
+                                apa += f", *{cite['volume']}*"
+                            if cite['pages']:
+                                apa += f", {cite['pages']}"
+                            apa += "."
+                            st.code(apa, language=None)
+                
+                # ============================================================
+                # DOWNLOAD REPORT TAB
+                # ============================================================
+                with val_tab5:
+                    st.subheader("📄 Download Validation Report")
+                    
+                    # Prepare model and dataset info
+                    model_info = {
+                        'type': 'Random Forest Classifier',
+                        'calibration': method,
+                        'n_features': len(feats_adv),
+                        'threshold': thr_label
+                    }
+                    
+                    dataset_info = {
+                        'total_records': len(df_base),
+                        'train_size': len(df_train),
+                        'train_pct': '60%',
+                        'calib_size': len(df_calib),
+                        'calib_pct': '20%',
+                        'test_size': len(df_test),
+                        'test_pct': '20%',
+                        'positive_class': int(y_test_adv.sum()),
+                        'negative_class': int((y_test_adv == 0).sum())
+                    }
+                    
+                    # Generate report
+                    report_text = generate_validation_report(adv_results, model_info, dataset_info)
+                    
+                    # Display preview
+                    st.markdown("### Report Preview")
+                    st.text_area("Validation Report", report_text, height=400)
+                    
+                    # Download button
+                    st.download_button(
+                        label="📥 Download Full Report (.txt)",
+                        data=report_text,
+                        file_name=f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+                    
+                    # Also offer CSV of metrics
+                    st.markdown("### Download Metrics as CSV")
+                    metrics_data = {
+                        'Metric': ['Brier Score', 'Log Loss', 'ROC-AUC', 'PR-AUC', 'ECE', 
+                                   'Hosmer-Lemeshow Chi2', 'Hosmer-Lemeshow p-value',
+                                   'Accuracy', 'Recall', 'Precision', 'F1 Score'],
+                        'Value': [
+                            adv_results['brier_score'],
+                            adv_results['log_loss'],
+                            adv_results['roc_auc'] if adv_results['roc_auc'] else 'N/A',
+                            adv_results['pr_auc'] if adv_results['pr_auc'] else 'N/A',
+                            adv_results['ece'],
+                            adv_results['hl_chi2'],
+                            adv_results['hl_pvalue'],
+                            adv_results['accuracy'],
+                            adv_results['recall'],
+                            adv_results['precision'],
+                            adv_results['f1']
+                        ]
+                    }
+                    metrics_df = pd.DataFrame(metrics_data)
+                    
+                    csv_buffer = metrics_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Metrics (.csv)",
+                        data=csv_buffer,
+                        file_name=f"validation_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                    
+            except Exception as e:
+                st.error(f"❌ Advanced validation failed: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
+
+# ================================================================
+# TAB 4: MODEL COMPARISON (NEW IN V3.0)
+# ================================================================
+with tab4:
     st.header("📊 Dashboard Evolution & Model Comparison")
     
     st.markdown("""
@@ -1910,9 +2730,9 @@ def make_xy(df, thr_label, use_rate_cols,
 
 
 # ================================================================
-# TAB 4: LOG OUTCOME
+# TAB 5: LOG OUTCOME
 # ================================================================
-with tab4:
+with tab5:
     st.header("📝 Log Production Outcome")
     
     if not rolling_enabled:
