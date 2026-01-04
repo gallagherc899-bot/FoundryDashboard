@@ -1,8 +1,13 @@
 # ================================================================
 # 🏭 Foundry Scrap Risk Dashboard with Process Diagnosis
-# VERSION 3.2 - PHM ENHANCEMENT LABORATORY
+# VERSION 3.2.1 - PHM ENHANCEMENT LABORATORY
 # ================================================================
 # 
+# NEW IN V3.2.1:
+# - Fixed class imbalance error with improved threshold fallback strategies
+# - Added data statistics expander to help choose appropriate threshold
+# - More informative error messages with actionable guidance
+#
 # NEW IN V3.2:
 # - PHM Enhancement Toggles (Health Index, Temporal, Uncertainty, Decision)
 # - Factorial Testing Mode (test all 16 combinations)
@@ -48,7 +53,7 @@ from itertools import product
 # Streamlit setup
 # -------------------------------
 st.set_page_config(
-    page_title="Foundry Dashboard v3.2 - PHM Laboratory", 
+    page_title="Foundry Dashboard v3.2.1 - PHM Laboratory", 
     layout="wide"
 )
 
@@ -60,7 +65,7 @@ st.markdown("""
             padding: 15px 25px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #e94560;">
     <h2 style="color: #e94560; margin: 0;">🏭 Foundry Scrap Risk Dashboard</h2>
     <p style="color: #a8d0ff; margin: 5px 0 0 0;">
-        <strong>Version 3.2 - PHM Enhancement Laboratory</strong> | 
+        <strong>Version 3.2.1 - PHM Enhancement Laboratory</strong> | 
         Factorial Testing | Health Index | Temporal Features | Uncertainty Quantification
     </p>
 </div>
@@ -308,7 +313,7 @@ def load_and_clean(csv_path: str) -> pd.DataFrame:
 def smart_split(df: pd.DataFrame, thr_label: float, use_temporal: bool = True):
     """
     Smart data splitting that ensures class balance in all splits.
-    Falls back to stratified random split if temporal split has class imbalance.
+    Uses multiple fallback strategies to guarantee both classes exist.
     """
     df = df.copy()
     
@@ -319,12 +324,31 @@ def smart_split(df: pd.DataFrame, thr_label: float, use_temporal: bool = True):
     
     effective_thr = thr_label
     
-    # If we don't have enough of both classes, use median
+    # If we don't have enough of both classes, try multiple fallback strategies
     if n_pos < 10 or n_neg < 10:
+        # Strategy 1: Try median
         effective_thr = df["scrap_percent"].median()
         y_full = (df["scrap_percent"] > effective_thr).astype(int)
         n_pos = int(y_full.sum())
         n_neg = int((y_full == 0).sum())
+        
+        # Strategy 2: If median doesn't work, try percentiles to find a good split point
+        if n_pos < 10 or n_neg < 10:
+            # Try percentiles from 30th to 70th to find one that gives balanced classes
+            for pct in [50, 40, 60, 35, 65, 30, 70, 25, 75]:
+                effective_thr = df["scrap_percent"].quantile(pct / 100)
+                y_full = (df["scrap_percent"] > effective_thr).astype(int)
+                n_pos = int(y_full.sum())
+                n_neg = int((y_full == 0).sum())
+                if n_pos >= 10 and n_neg >= 10:
+                    break
+        
+        # Strategy 3: If still imbalanced, use mean
+        if n_pos < 10 or n_neg < 10:
+            effective_thr = df["scrap_percent"].mean()
+            y_full = (df["scrap_percent"] > effective_thr).astype(int)
+            n_pos = int(y_full.sum())
+            n_neg = int((y_full == 0).sum())
     
     # Try temporal split first (only if requested AND we have timestamps)
     if use_temporal and 'week_ending' in df.columns:
@@ -437,7 +461,8 @@ def calculate_uncertainty(model, X):
 
 
 def train_model_with_config(df: pd.DataFrame, phm_config: dict, thr_label: float, n_est: int):
-    """Train model with specified PHM configuration."""
+    """Train model with specified PHM configuration. 
+    Robust version that handles class imbalance at any threshold setting."""
     df = df.copy()
     
     # Add PHM features if enabled
@@ -460,15 +485,7 @@ def train_model_with_config(df: pd.DataFrame, phm_config: dict, thr_label: float
     default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
     default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
     
-    # Attach features to all splits
-    for split_df in [df_train, df_calib, df_test]:
-        split_df = split_df.merge(mtbf_train, on="part_id", how="left")
-        split_df["mttf_scrap"] = split_df["mttf_scrap"].fillna(default_mtbf)
-        split_df = split_df.merge(part_freq_train.rename("part_freq"), 
-                                  left_on="part_id", right_index=True, how="left")
-        split_df["part_freq"] = split_df["part_freq"].fillna(default_freq)
-    
-    # Re-merge after modifications
+    # Re-merge after modifications (create new dataframes to avoid mutation issues)
     df_train = df_train.merge(mtbf_train, on="part_id", how="left", suffixes=('', '_y'))
     df_train["mttf_scrap"] = df_train["mttf_scrap"].fillna(default_mtbf)
     df_train = df_train.merge(part_freq_train.rename("part_freq"), 
@@ -496,27 +513,56 @@ def train_model_with_config(df: pd.DataFrame, phm_config: dict, thr_label: float
             if f not in d.columns:
                 d[f] = 0.0
     
-    # Prepare X, y using effective threshold
+    # Prepare X
     X_train = df_train[feats].fillna(0)
-    y_train = (df_train["scrap_percent"] > effective_thr).astype(int)
     X_calib = df_calib[feats].fillna(0)
-    y_calib = (df_calib["scrap_percent"] > effective_thr).astype(int)
     X_test = df_test[feats].fillna(0)
-    y_test = (df_test["scrap_percent"] > effective_thr).astype(int)
     
-    # Check class balance - if still only one class, adjust threshold to median
-    if y_train.nunique() < 2:
-        # Emergency fallback: use median threshold
-        median_thr = df_train["scrap_percent"].median()
-        y_train = (df_train["scrap_percent"] > median_thr).astype(int)
-        y_calib = (df_calib["scrap_percent"] > median_thr).astype(int)
-        y_test = (df_test["scrap_percent"] > median_thr).astype(int)
+    # ROBUST CLASS BALANCE HANDLING
+    # Try the effective threshold from smart_split first
+    y_train = (df_train["scrap_percent"] > effective_thr).astype(int)
+    final_thr = effective_thr
+    
+    # If we don't have both classes, try to find a threshold that works for THIS specific train split
+    if y_train.nunique() < 2 or y_train.sum() < 3 or (y_train == 0).sum() < 3:
+        # Get the actual scrap values in the training set
+        train_scrap = df_train["scrap_percent"].dropna()
         
-        # If still only one class after median threshold, we have a data problem
-        if y_train.nunique() < 2:
-            return None, None, None, {'error': 'Only one class in training data - try adjusting threshold'}
+        if len(train_scrap) < 10:
+            return None, None, None, {'error': 'Insufficient training data after split'}
+        
+        # Try percentile-based thresholds on the TRAINING data specifically
+        found_valid_threshold = False
+        for pct in [50, 45, 55, 40, 60, 35, 65, 30, 70, 25, 75, 20, 80]:
+            try_thr = train_scrap.quantile(pct / 100)
+            y_try = (train_scrap > try_thr).astype(int)
+            n_pos = y_try.sum()
+            n_neg = (y_try == 0).sum()
+            
+            if n_pos >= 3 and n_neg >= 3:
+                final_thr = try_thr
+                found_valid_threshold = True
+                break
+        
+        if not found_valid_threshold:
+            # Last resort: use the mean of the training data
+            final_thr = train_scrap.mean()
+        
+        # Recompute y values with the new threshold
+        y_train = (df_train["scrap_percent"] > final_thr).astype(int)
     
-    # Train
+    # Final check - if we STILL don't have two classes, the data truly has no variability
+    if y_train.nunique() < 2:
+        scrap_vals = df_train["scrap_percent"]
+        return None, None, None, {
+            'error': f'Training data has no variability (all values = {scrap_vals.iloc[0]:.2f}%). Need diverse scrap rates to train.'
+        }
+    
+    # Compute y for calibration and test using the same threshold
+    y_calib = (df_calib["scrap_percent"] > final_thr).astype(int)
+    y_test = (df_test["scrap_percent"] > final_thr).astype(int)
+    
+    # Train the model
     rf = RandomForestClassifier(
         n_estimators=n_est,
         min_samples_leaf=MIN_SAMPLES_LEAF,
@@ -525,7 +571,7 @@ def train_model_with_config(df: pd.DataFrame, phm_config: dict, thr_label: float
         n_jobs=-1,
     ).fit(X_train, y_train)
     
-    # Calibrate
+    # Calibrate if we have enough samples of both classes
     if y_calib.sum() >= 3 and (y_calib == 0).sum() >= 3:
         try:
             model = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
@@ -551,6 +597,7 @@ def train_model_with_config(df: pd.DataFrame, phm_config: dict, thr_label: float
         'calibrated': calibrated,
         'train_samples': len(X_train),
         'test_samples': len(X_test),
+        'effective_threshold': final_thr,  # Track what threshold was actually used
     }
     
     if phm_config.get('uncertainty', False):
@@ -819,6 +866,20 @@ n_parts = df_base["part_id"].nunique()
 n_records = len(df_base)
 st.info(f"✅ Loaded {n_records:,} work orders | {n_parts} unique parts")
 
+# Show data statistics to help with threshold selection
+scrap_stats = df_base["scrap_percent"].describe()
+with st.expander("📊 Scrap Data Statistics (click to expand)"):
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    col_s1.metric("Min Scrap %", f"{scrap_stats['min']:.2f}%")
+    col_s2.metric("Median Scrap %", f"{scrap_stats['50%']:.2f}%")
+    col_s3.metric("Mean Scrap %", f"{scrap_stats['mean']:.2f}%")
+    col_s4.metric("Max Scrap %", f"{scrap_stats['max']:.2f}%")
+    
+    # Show recommended threshold range
+    p25 = df_base["scrap_percent"].quantile(0.25)
+    p75 = df_base["scrap_percent"].quantile(0.75)
+    st.caption(f"💡 **Recommended threshold range:** {p25:.1f}% - {p75:.1f}% (25th-75th percentile) for balanced training classes")
+
 
 # ================================================================
 # TABS
@@ -1010,4 +1071,4 @@ with tab4:
 
 
 st.markdown("---")
-st.caption("🏭 Foundry Dashboard **v3.2** | PHM Laboratory | Campbell Process Mapping")
+st.caption("🏭 Foundry Dashboard **v3.2.1** | PHM Laboratory | Campbell Process Mapping")
