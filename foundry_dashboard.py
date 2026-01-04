@@ -715,8 +715,137 @@ def train_model_with_rolling_window(df_base, df_outcomes, thr_label, use_rate_co
 
 
 # ================================================================
-# MODEL COMPARISON (NEW IN V3.0)
+# MODEL COMPARISON (NEW IN V3.0) - ENHANCED IN V3.1
 # ================================================================
+
+# Version evolution documentation
+VERSION_EVOLUTION = {
+    "v1.0_Original": {
+        "name": "Original Dashboard (Dec 2024)",
+        "description": "Basic Random Forest with time split validation",
+        "features": [
+            "order_quantity",
+            "piece_weight_lbs", 
+            "mttf_scrap",
+            "part_freq",
+            "*_rate defect columns"
+        ],
+        "enhancements": [],
+        "code_sample": '''
+# Original time_split function (no part leakage prevention)
+def time_split(df, train_frac=0.6, calib_frac=0.2):
+    n = len(df)
+    t_end = int(train_frac * n)
+    c_end = int((train_frac + calib_frac) * n)
+    df_train = df.iloc[:t_end].copy()
+    df_calib = df.iloc[t_end:c_end].copy()
+    df_test = df.iloc[c_end:].copy()
+    return df_train, df_calib, df_test
+
+# Original make_xy - only basic features
+def make_xy(df, thr_label, use_rate_cols):
+    feats = ["order_quantity", "piece_weight_lbs", 
+             "mttf_scrap", "part_freq"]
+    if use_rate_cols:
+        feats += [c for c in df.columns if c.endswith("_rate")]
+    X = df[feats].copy()
+    y = (df["scrap%"] > thr_label).astype(int)
+    return X, y, feats
+'''
+    },
+    "v3.0_MultiDefect": {
+        "name": "V3.0 Multi-Defect Intelligence (Jan 2025)",
+        "description": "Added multi-defect feature engineering and Campbell process mapping",
+        "features": [
+            "n_defect_types",
+            "has_multiple_defects",
+            "total_defect_rate",
+            "max_defect_rate",
+            "defect_concentration",
+            "shift_x_tearup (interaction)",
+            "shrink_x_porosity (interaction)",
+            "core_x_sand (interaction)"
+        ],
+        "enhancements": [
+            "Multi-defect detection and alerts",
+            "Campbell (2003) process-defect mapping",
+            "Root cause diagnosis",
+            "Data confidence indicators",
+            "6-2-1 Rolling Window with outcome logging"
+        ],
+        "code_sample": '''
+# V3.0 Multi-Defect Feature Engineering
+def add_multi_defect_features(df: pd.DataFrame) -> pd.DataFrame:
+    defect_cols = [c for c in df.columns if c.endswith("_rate")]
+    
+    # Count of defect types present
+    df['n_defect_types'] = (df[defect_cols] > 0).sum(axis=1)
+    
+    # Binary flag for multiple defects
+    df['has_multiple_defects'] = (df['n_defect_types'] >= 2).astype(int)
+    
+    # Total defect burden
+    df['total_defect_rate'] = df[defect_cols].sum(axis=1)
+    
+    # Maximum single defect rate
+    df['max_defect_rate'] = df[defect_cols].max(axis=1)
+    
+    # Defect concentration ratio
+    df['defect_concentration'] = df['max_defect_rate'] / (df['total_defect_rate'] + 0.001)
+    
+    # Interaction terms for common defect pairs
+    if 'shift_rate' in df.columns and 'tear_up_rate' in df.columns:
+        df['shift_x_tearup'] = df['shift_rate'] * df['tear_up_rate']
+    
+    return df
+'''
+    },
+    "v3.1_Temporal": {
+        "name": "V3.1 Temporal Features Enhancement (Jan 2026)",
+        "description": "Added PHM-based temporal features for trend detection",
+        "features": [
+            "total_defect_rate_trend",
+            "total_defect_rate_roll3",
+            "scrap_percent_trend",
+            "scrap_percent_roll3",
+            "month (seasonality)",
+            "quarter (seasonality)"
+        ],
+        "enhancements": [
+            "Temporal trend detection (rate of change)",
+            "Rolling averages for signal smoothing",
+            "Seasonal pattern capture",
+            "PHM-optimized 5.0% default threshold",
+            "Based on factorial study across 359 parts"
+        ],
+        "code_sample": '''
+# V3.1 Temporal Features (PHM Enhancement)
+def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df = df.sort_values('week_ending').reset_index(drop=True)
+    
+    for col in ['total_defect_rate', 'scrap_percent']:
+        if col not in df.columns:
+            continue
+        
+        # Per-part trend (rate of change)
+        df[f'{col}_trend'] = df.groupby('part_id')[col].diff().fillna(0)
+        
+        # Rolling average (smoothed signal)
+        df[f'{col}_roll3'] = df.groupby('part_id')[col].transform(
+            lambda x: x.rolling(window=3, min_periods=1).mean()
+        )
+    
+    # Seasonal features
+    df['month'] = pd.to_datetime(df['week_ending']).dt.month
+    df['quarter'] = pd.to_datetime(df['week_ending']).dt.quarter
+    
+    return df
+'''
+    }
+}
+
+
 def compare_models_with_without_multi_defect(df_base, thr_label, use_rate_cols, n_est):
     """
     Compare model performance WITH vs WITHOUT multi-defect features.
@@ -737,16 +866,16 @@ def compare_models_with_without_multi_defect(df_base, thr_label, use_rate_cols, 
     df_test_f = attach_train_features(df_test.copy(), mtbf_train, part_freq_train, default_mtbf, default_freq)
     
     # WITHOUT multi-defect
-    X_train_no, y_train_no, feats_no = make_xy(df_train_f.copy(), thr_label, use_rate_cols, use_multi_defect=False)
-    X_calib_no, y_calib_no, _ = make_xy(df_calib_f.copy(), thr_label, use_rate_cols, use_multi_defect=False)
-    X_test_no, y_test_no, _ = make_xy(df_test_f.copy(), thr_label, use_rate_cols, use_multi_defect=False)
+    X_train_no, y_train_no, feats_no = make_xy(df_train_f.copy(), thr_label, use_rate_cols, use_multi_defect=False, use_temporal=False)
+    X_calib_no, y_calib_no, _ = make_xy(df_calib_f.copy(), thr_label, use_rate_cols, use_multi_defect=False, use_temporal=False)
+    X_test_no, y_test_no, _ = make_xy(df_test_f.copy(), thr_label, use_rate_cols, use_multi_defect=False, use_temporal=False)
     
     _, cal_no, _ = train_and_calibrate(X_train_no, y_train_no, X_calib_no, y_calib_no, n_est)
     
     preds_no = cal_no.predict_proba(X_test_no)[:, 1]
     pred_binary_no = (preds_no > 0.5).astype(int)
     
-    results['without'] = {
+    results['v1_original'] = {
         'brier': brier_score_loss(y_test_no, preds_no),
         'accuracy': accuracy_score(y_test_no, pred_binary_no),
         'recall': recall_score(y_test_no, pred_binary_no, zero_division=0),
@@ -755,34 +884,67 @@ def compare_models_with_without_multi_defect(df_base, thr_label, use_rate_cols, 
         'n_features': len(feats_no)
     }
     
-    # WITH multi-defect
-    X_train_yes, y_train_yes, feats_yes = make_xy(df_train_f.copy(), thr_label, use_rate_cols, use_multi_defect=True)
-    X_calib_yes, y_calib_yes, _ = make_xy(df_calib_f.copy(), thr_label, use_rate_cols, use_multi_defect=True)
-    X_test_yes, y_test_yes, _ = make_xy(df_test_f.copy(), thr_label, use_rate_cols, use_multi_defect=True)
+    # WITH multi-defect only (V3.0)
+    X_train_md, y_train_md, feats_md = make_xy(df_train_f.copy(), thr_label, use_rate_cols, use_multi_defect=True, use_temporal=False)
+    X_calib_md, y_calib_md, _ = make_xy(df_calib_f.copy(), thr_label, use_rate_cols, use_multi_defect=True, use_temporal=False)
+    X_test_md, y_test_md, _ = make_xy(df_test_f.copy(), thr_label, use_rate_cols, use_multi_defect=True, use_temporal=False)
     
-    _, cal_yes, _ = train_and_calibrate(X_train_yes, y_train_yes, X_calib_yes, y_calib_yes, n_est)
+    _, cal_md, _ = train_and_calibrate(X_train_md, y_train_md, X_calib_md, y_calib_md, n_est)
     
-    preds_yes = cal_yes.predict_proba(X_test_yes)[:, 1]
-    pred_binary_yes = (preds_yes > 0.5).astype(int)
+    preds_md = cal_md.predict_proba(X_test_md)[:, 1]
+    pred_binary_md = (preds_md > 0.5).astype(int)
     
-    results['with'] = {
-        'brier': brier_score_loss(y_test_yes, preds_yes),
-        'accuracy': accuracy_score(y_test_yes, pred_binary_yes),
-        'recall': recall_score(y_test_yes, pred_binary_yes, zero_division=0),
-        'precision': precision_score(y_test_yes, pred_binary_yes, zero_division=0),
-        'f1': f1_score(y_test_yes, pred_binary_yes, zero_division=0),
-        'n_features': len(feats_yes)
+    results['v3_multidefect'] = {
+        'brier': brier_score_loss(y_test_md, preds_md),
+        'accuracy': accuracy_score(y_test_md, pred_binary_md),
+        'recall': recall_score(y_test_md, pred_binary_md, zero_division=0),
+        'precision': precision_score(y_test_md, pred_binary_md, zero_division=0),
+        'f1': f1_score(y_test_md, pred_binary_md, zero_division=0),
+        'n_features': len(feats_md)
     }
     
-    # Calculate improvements
-    results['improvement'] = {
-        'brier': (results['without']['brier'] - results['with']['brier']) / results['without']['brier'] * 100,
-        'accuracy': (results['with']['accuracy'] - results['without']['accuracy']) * 100,
-        'recall': (results['with']['recall'] - results['without']['recall']) * 100,
-        'precision': (results['with']['precision'] - results['without']['precision']) * 100,
-        'f1': (results['with']['f1'] - results['without']['f1']) * 100,
-        'n_features': results['with']['n_features'] - results['without']['n_features']
+    # WITH multi-defect AND temporal (V3.1)
+    X_train_full, y_train_full, feats_full = make_xy(df_train_f.copy(), thr_label, use_rate_cols, use_multi_defect=True, use_temporal=True)
+    X_calib_full, y_calib_full, _ = make_xy(df_calib_f.copy(), thr_label, use_rate_cols, use_multi_defect=True, use_temporal=True)
+    X_test_full, y_test_full, _ = make_xy(df_test_f.copy(), thr_label, use_rate_cols, use_multi_defect=True, use_temporal=True)
+    
+    _, cal_full, _ = train_and_calibrate(X_train_full, y_train_full, X_calib_full, y_calib_full, n_est)
+    
+    preds_full = cal_full.predict_proba(X_test_full)[:, 1]
+    pred_binary_full = (preds_full > 0.5).astype(int)
+    
+    results['v31_temporal'] = {
+        'brier': brier_score_loss(y_test_full, preds_full),
+        'accuracy': accuracy_score(y_test_full, pred_binary_full),
+        'recall': recall_score(y_test_full, pred_binary_full, zero_division=0),
+        'precision': precision_score(y_test_full, pred_binary_full, zero_division=0),
+        'f1': f1_score(y_test_full, pred_binary_full, zero_division=0),
+        'n_features': len(feats_full)
     }
+    
+    # Calculate improvements from V1 baseline
+    results['improvement_v3'] = {
+        'brier': (results['v1_original']['brier'] - results['v3_multidefect']['brier']) / results['v1_original']['brier'] * 100 if results['v1_original']['brier'] > 0 else 0,
+        'accuracy': (results['v3_multidefect']['accuracy'] - results['v1_original']['accuracy']) * 100,
+        'recall': (results['v3_multidefect']['recall'] - results['v1_original']['recall']) * 100,
+        'precision': (results['v3_multidefect']['precision'] - results['v1_original']['precision']) * 100,
+        'f1': (results['v3_multidefect']['f1'] - results['v1_original']['f1']) * 100,
+        'n_features': results['v3_multidefect']['n_features'] - results['v1_original']['n_features']
+    }
+    
+    results['improvement_v31'] = {
+        'brier': (results['v1_original']['brier'] - results['v31_temporal']['brier']) / results['v1_original']['brier'] * 100 if results['v1_original']['brier'] > 0 else 0,
+        'accuracy': (results['v31_temporal']['accuracy'] - results['v1_original']['accuracy']) * 100,
+        'recall': (results['v31_temporal']['recall'] - results['v1_original']['recall']) * 100,
+        'precision': (results['v31_temporal']['precision'] - results['v1_original']['precision']) * 100,
+        'f1': (results['v31_temporal']['f1'] - results['v1_original']['f1']) * 100,
+        'n_features': results['v31_temporal']['n_features'] - results['v1_original']['n_features']
+    }
+    
+    # For backward compatibility, also include 'without' and 'with' keys
+    results['without'] = results['v1_original']
+    results['with'] = results['v31_temporal']
+    results['improvement'] = results['improvement_v31']
     
     return results
 
@@ -1492,135 +1654,259 @@ with tab2:
 # TAB 3: MODEL COMPARISON (NEW IN V3.0)
 # ================================================================
 with tab3:
-    st.header("📊 Model Comparison: With vs Without Multi-Defect Features")
+    st.header("📊 Dashboard Evolution & Model Comparison")
     
     st.markdown("""
-    This comparison shows the impact of the **Multi-Defect Intelligence** features 
-    introduced in Version 3.0 on model performance.
+    This section shows how the **Foundry Scrap Risk Dashboard** has evolved through versions,
+    comparing performance improvements and the code changes that enabled them.
     """)
     
-    if st.button("🔬 Run Comparison"):
-        with st.spinner("Training both models for comparison..."):
-            try:
-                comparison = compare_models_with_without_multi_defect(
-                    df_base, thr_label, use_rate_cols, n_est
-                )
-                
-                st.markdown("### 📈 Performance Comparison")
-                
-                # Create comparison table
-                comp_data = {
-                    "Metric": ["Brier Score ↓", "Accuracy ↑", "Recall ↑", "Precision ↑", "F1 Score ↑", "# Features"],
-                    "Without Multi-Defect": [
-                        f"{comparison['without']['brier']:.4f}",
-                        f"{comparison['without']['accuracy']:.3f}",
-                        f"{comparison['without']['recall']:.3f}",
-                        f"{comparison['without']['precision']:.3f}",
-                        f"{comparison['without']['f1']:.3f}",
-                        f"{comparison['without']['n_features']}"
-                    ],
-                    "With Multi-Defect (V3.0)": [
-                        f"{comparison['with']['brier']:.4f}",
-                        f"{comparison['with']['accuracy']:.3f}",
-                        f"{comparison['with']['recall']:.3f}",
-                        f"{comparison['with']['precision']:.3f}",
-                        f"{comparison['with']['f1']:.3f}",
-                        f"{comparison['with']['n_features']}"
-                    ],
-                    "Change": [
-                        f"{comparison['improvement']['brier']:+.1f}% {'✅' if comparison['improvement']['brier'] > 0 else '❌'}",
-                        f"{comparison['improvement']['accuracy']:+.1f}% {'✅' if comparison['improvement']['accuracy'] > 0 else '❌'}",
-                        f"{comparison['improvement']['recall']:+.1f}% {'✅' if comparison['improvement']['recall'] > 0 else '❌'}",
-                        f"{comparison['improvement']['precision']:+.1f}% {'✅' if comparison['improvement']['precision'] > 0 else '❌'}",
-                        f"{comparison['improvement']['f1']:+.1f}% {'✅' if comparison['improvement']['f1'] > 0 else '❌'}",
-                        f"+{comparison['improvement']['n_features']}"
+    # Create sub-tabs for different views
+    comp_tab1, comp_tab2, comp_tab3 = st.tabs(["📈 Performance Comparison", "📜 Version Evolution", "💻 Code Comparison"])
+    
+    with comp_tab1:
+        st.subheader("Performance Comparison Across Versions")
+        
+        if st.button("🔬 Run Full Version Comparison"):
+            with st.spinner("Training models for each version configuration..."):
+                try:
+                    comparison = compare_models_with_without_multi_defect(
+                        df_base, thr_label, use_rate_cols, n_est
+                    )
+                    
+                    st.markdown("### 📈 Three-Version Performance Comparison")
+                    
+                    # Create comprehensive comparison table
+                    comp_data = {
+                        "Metric": ["Brier Score ↓", "Accuracy ↑", "Recall ↑", "Precision ↑", "F1 Score ↑", "# Features"],
+                        "V1.0 Original": [
+                            f"{comparison['v1_original']['brier']:.4f}",
+                            f"{comparison['v1_original']['accuracy']:.3f}",
+                            f"{comparison['v1_original']['recall']:.3f}",
+                            f"{comparison['v1_original']['precision']:.3f}",
+                            f"{comparison['v1_original']['f1']:.3f}",
+                            f"{comparison['v1_original']['n_features']}"
+                        ],
+                        "V3.0 Multi-Defect": [
+                            f"{comparison['v3_multidefect']['brier']:.4f}",
+                            f"{comparison['v3_multidefect']['accuracy']:.3f}",
+                            f"{comparison['v3_multidefect']['recall']:.3f}",
+                            f"{comparison['v3_multidefect']['precision']:.3f}",
+                            f"{comparison['v3_multidefect']['f1']:.3f}",
+                            f"{comparison['v3_multidefect']['n_features']}"
+                        ],
+                        "V3.1 Temporal": [
+                            f"{comparison['v31_temporal']['brier']:.4f}",
+                            f"{comparison['v31_temporal']['accuracy']:.3f}",
+                            f"{comparison['v31_temporal']['recall']:.3f}",
+                            f"{comparison['v31_temporal']['precision']:.3f}",
+                            f"{comparison['v31_temporal']['f1']:.3f}",
+                            f"{comparison['v31_temporal']['n_features']}"
+                        ],
+                        "V3.0 vs V1.0": [
+                            f"{comparison['improvement_v3']['brier']:+.1f}%",
+                            f"{comparison['improvement_v3']['accuracy']:+.1f}%",
+                            f"{comparison['improvement_v3']['recall']:+.1f}%",
+                            f"{comparison['improvement_v3']['precision']:+.1f}%",
+                            f"{comparison['improvement_v3']['f1']:+.1f}%",
+                            f"+{comparison['improvement_v3']['n_features']}"
+                        ],
+                        "V3.1 vs V1.0": [
+                            f"{comparison['improvement_v31']['brier']:+.1f}% {'✅' if comparison['improvement_v31']['brier'] > 0 else '❌'}",
+                            f"{comparison['improvement_v31']['accuracy']:+.1f}% {'✅' if comparison['improvement_v31']['accuracy'] > 0 else '❌'}",
+                            f"{comparison['improvement_v31']['recall']:+.1f}% {'✅' if comparison['improvement_v31']['recall'] > 0 else '❌'}",
+                            f"{comparison['improvement_v31']['precision']:+.1f}% {'✅' if comparison['improvement_v31']['precision'] > 0 else '❌'}",
+                            f"{comparison['improvement_v31']['f1']:+.1f}% {'✅' if comparison['improvement_v31']['f1'] > 0 else '❌'}",
+                            f"+{comparison['improvement_v31']['n_features']}"
+                        ]
+                    }
+                    
+                    comp_df = pd.DataFrame(comp_data)
+                    st.dataframe(comp_df, use_container_width=True)
+                    
+                    # Visual comparison - Three versions
+                    st.markdown("### 📊 Visual Comparison")
+                    
+                    fig = go.Figure()
+                    
+                    metrics = ["Accuracy", "Recall", "Precision", "F1 Score"]
+                    v1_vals = [
+                        comparison['v1_original']['accuracy'],
+                        comparison['v1_original']['recall'],
+                        comparison['v1_original']['precision'],
+                        comparison['v1_original']['f1']
                     ]
-                }
-                
-                comp_df = pd.DataFrame(comp_data)
-                st.dataframe(comp_df, use_container_width=True)
-                
-                # Visual comparison
-                st.markdown("### 📊 Visual Comparison")
-                
-                fig = go.Figure()
-                
-                metrics = ["Accuracy", "Recall", "Precision", "F1 Score"]
-                without_vals = [
-                    comparison['without']['accuracy'],
-                    comparison['without']['recall'],
-                    comparison['without']['precision'],
-                    comparison['without']['f1']
-                ]
-                with_vals = [
-                    comparison['with']['accuracy'],
-                    comparison['with']['recall'],
-                    comparison['with']['precision'],
-                    comparison['with']['f1']
-                ]
-                
-                fig.add_trace(go.Bar(
-                    name='Without Multi-Defect',
-                    x=metrics,
-                    y=without_vals,
-                    marker_color='lightgray'
-                ))
-                
-                fig.add_trace(go.Bar(
-                    name='With Multi-Defect (V3.0)',
-                    x=metrics,
-                    y=with_vals,
-                    marker_color='#ff6b6b'
-                ))
-                
-                fig.update_layout(
-                    barmode='group',
-                    title="Model Performance Comparison",
-                    yaxis_title="Score",
-                    yaxis_range=[0, 1]
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Summary
-                st.markdown("### 📋 Summary")
-                
-                improvements = []
-                if comparison['improvement']['brier'] > 0:
-                    improvements.append(f"Brier Score improved by {comparison['improvement']['brier']:.1f}%")
-                if comparison['improvement']['accuracy'] > 0:
-                    improvements.append(f"Accuracy improved by {comparison['improvement']['accuracy']:.1f}%")
-                if comparison['improvement']['recall'] > 0:
-                    improvements.append(f"Recall improved by {comparison['improvement']['recall']:.1f}%")
-                if comparison['improvement']['f1'] > 0:
-                    improvements.append(f"F1 Score improved by {comparison['improvement']['f1']:.1f}%")
-                
-                if improvements:
+                    v3_vals = [
+                        comparison['v3_multidefect']['accuracy'],
+                        comparison['v3_multidefect']['recall'],
+                        comparison['v3_multidefect']['precision'],
+                        comparison['v3_multidefect']['f1']
+                    ]
+                    v31_vals = [
+                        comparison['v31_temporal']['accuracy'],
+                        comparison['v31_temporal']['recall'],
+                        comparison['v31_temporal']['precision'],
+                        comparison['v31_temporal']['f1']
+                    ]
+                    
+                    fig.add_trace(go.Bar(
+                        name='V1.0 Original',
+                        x=metrics,
+                        y=v1_vals,
+                        marker_color='lightgray'
+                    ))
+                    
+                    fig.add_trace(go.Bar(
+                        name='V3.0 Multi-Defect',
+                        x=metrics,
+                        y=v3_vals,
+                        marker_color='#ff9999'
+                    ))
+                    
+                    fig.add_trace(go.Bar(
+                        name='V3.1 Temporal',
+                        x=metrics,
+                        y=v31_vals,
+                        marker_color='#ff6b6b'
+                    ))
+                    
+                    fig.update_layout(
+                        barmode='group',
+                        title="Model Performance Evolution: V1.0 → V3.0 → V3.1",
+                        yaxis_title="Score",
+                        yaxis_range=[0, 1]
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Feature count evolution
+                    st.markdown("### 📊 Feature Evolution")
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Bar(
+                        x=['V1.0 Original', 'V3.0 Multi-Defect', 'V3.1 Temporal'],
+                        y=[comparison['v1_original']['n_features'], 
+                           comparison['v3_multidefect']['n_features'],
+                           comparison['v31_temporal']['n_features']],
+                        marker_color=['lightgray', '#ff9999', '#ff6b6b'],
+                        text=[comparison['v1_original']['n_features'], 
+                              comparison['v3_multidefect']['n_features'],
+                              comparison['v31_temporal']['n_features']],
+                        textposition='auto'
+                    ))
+                    fig2.update_layout(title="Number of Features by Version", yaxis_title="Feature Count")
+                    st.plotly_chart(fig2, use_container_width=True)
+                    
+                    # Summary
+                    st.markdown("### 📋 Evolution Summary")
+                    
+                    total_brier_improvement = comparison['improvement_v31']['brier']
+                    total_recall_improvement = comparison['improvement_v31']['recall']
+                    total_f1_improvement = comparison['improvement_v31']['f1']
+                    
                     st.success(f"""
-✅ **Multi-Defect Features Improve Model Performance**
+**Dashboard Evolution Summary: V1.0 → V3.1**
 
-{chr(10).join(['• ' + imp for imp in improvements])}
+📈 **Total Improvements from Original to Current:**
+- Brier Score: {total_brier_improvement:+.1f}% (lower is better)
+- Recall: {total_recall_improvement:+.1f}% (catching more scrap events)
+- F1 Score: {total_f1_improvement:+.1f}% (overall balance)
+- Features: {comparison['v1_original']['n_features']} → {comparison['v31_temporal']['n_features']} (+{comparison['improvement_v31']['n_features']})
 
-The multi-defect features capture important patterns like:
-- **Defect co-occurrence** (multiple defects on same work order)
-- **Defect interactions** (e.g., Shift × Tear-Up combination)
-- **Overall defect burden** (total and max defect rates)
+🔬 **Key Enhancements:**
+- **V3.0**: Multi-defect feature engineering, Campbell process mapping
+- **V3.1**: Temporal trend detection, PHM-based seasonality features
                     """)
-                else:
-                    st.info("""
-📊 **Results Mixed or No Improvement**
-
-The multi-defect features did not show clear improvement on this dataset split.
-This could be due to:
-- Limited multi-defect cases in test set
-- Existing features already capturing the patterns
-- Need for more data to see the benefit
-                    """)
+                    
+                except Exception as e:
+                    st.error(f"❌ Comparison failed: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    with comp_tab2:
+        st.subheader("📜 Version History & Features")
+        
+        for version_key, version_info in VERSION_EVOLUTION.items():
+            with st.expander(f"**{version_info['name']}**", expanded=(version_key == "v3.1_Temporal")):
+                st.markdown(f"**Description:** {version_info['description']}")
                 
-            except Exception as e:
-                st.error(f"❌ Comparison failed: {e}")
-                import traceback
-                st.code(traceback.format_exc())
+                st.markdown("**Features Added:**")
+                for feat in version_info['features']:
+                    st.markdown(f"- `{feat}`")
+                
+                if version_info['enhancements']:
+                    st.markdown("**Key Enhancements:**")
+                    for enh in version_info['enhancements']:
+                        st.markdown(f"- {enh}")
+    
+    with comp_tab3:
+        st.subheader("💻 Code Comparison")
+        
+        st.markdown("""
+        Compare the key code differences between versions. This shows how the feature engineering
+        evolved from basic features to sophisticated multi-defect and temporal analysis.
+        """)
+        
+        version_select = st.selectbox(
+            "Select Version to View Code:",
+            options=list(VERSION_EVOLUTION.keys()),
+            format_func=lambda x: VERSION_EVOLUTION[x]['name']
+        )
+        
+        if version_select:
+            version_info = VERSION_EVOLUTION[version_select]
+            st.markdown(f"### {version_info['name']}")
+            st.markdown(f"*{version_info['description']}*")
+            st.code(version_info['code_sample'], language='python')
+            
+            # Show side-by-side comparison
+            st.markdown("---")
+            st.markdown("### 📊 Side-by-Side: Original vs Current")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**V1.0 Original (`make_xy`)**")
+                st.code('''
+def make_xy(df, thr_label, use_rate_cols):
+    feats = ["order_quantity", 
+             "piece_weight_lbs", 
+             "mttf_scrap", 
+             "part_freq"]
+    if use_rate_cols:
+        feats += [c for c in df.columns 
+                  if c.endswith("_rate")]
+    X = df[feats].copy()
+    y = (df["scrap%"] > thr_label).astype(int)
+    return X, y, feats
+                ''', language='python')
+            
+            with col2:
+                st.markdown("**V3.1 Current (`make_xy`)**")
+                st.code('''
+def make_xy(df, thr_label, use_rate_cols, 
+            use_multi_defect=True, use_temporal=True):
+    feats = ["order_quantity", "piece_weight_lbs", 
+             "mttf_scrap", "part_freq"]
+    
+    # V3.0: Multi-defect features
+    if use_multi_defect:
+        multi_feats = ["n_defect_types", 
+            "has_multiple_defects", "total_defect_rate",
+            "max_defect_rate", "defect_concentration",
+            "shift_x_tearup", "shrink_x_porosity"]
+        feats += [f for f in multi_feats if f in df]
+    
+    # V3.1: Temporal features
+    if use_temporal and TEMPORAL_FEATURES_ENABLED:
+        temporal_feats = ["total_defect_rate_trend",
+            "total_defect_rate_roll3", "month", "quarter"]
+        feats += [f for f in temporal_feats if f in df]
+    
+    if use_rate_cols:
+        feats += [c for c in df.columns 
+                  if c.endswith("_rate")]
+    return X, y, feats
+                ''', language='python')
 
 
 # ================================================================
@@ -1702,4 +1988,4 @@ with tab4:
 
 
 st.markdown("---")
-st.caption("🏭 Foundry Scrap Risk Dashboard **v3.0 - Multi-Defect Intelligence** | Based on Campbell (2003) | 6-2-1 Rolling Window | Data Confidence Indicators")
+st.caption("🏭 Foundry Scrap Risk Dashboard **v3.1 - Temporal Features Enhancement** | Based on Campbell (2003) + PHM Study | 6-2-1 Rolling Window | Data Confidence Indicators")
