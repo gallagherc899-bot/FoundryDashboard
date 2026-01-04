@@ -2100,9 +2100,9 @@ with tab3:
     if st.button("🧪 Run Advanced Validation Suite"):
         with st.spinner("Running comprehensive validation analysis..."):
             try:
-                # Get test predictions
-                X_test_adv, y_test_adv, feats_adv = make_xy(df_test.copy(), thr_label, use_rate_cols, use_multi_defect, use_temporal=True)
-                preds_adv = cal_model.predict_proba(X_test_adv)[:, 1]
+                # Get test predictions - use the same data as basic validation
+                X_test_adv, y_test_adv, feats_adv = make_xy(df_test_base.copy(), thr_label, use_rate_cols, use_multi_defect, use_temporal=True)
+                preds_adv = cal_model_base.predict_proba(X_test_adv)[:, 1]
                 
                 # Run advanced validation
                 adv_results = run_advanced_validation(y_test_adv, preds_adv, n_bootstrap=500)
@@ -2409,11 +2409,11 @@ with tab3:
                     
                     dataset_info = {
                         'total_records': len(df_base),
-                        'train_size': len(df_train),
+                        'train_size': len(df_train_base),
                         'train_pct': '60%',
-                        'calib_size': len(df_calib),
+                        'calib_size': len(df_calib_base),
                         'calib_pct': '20%',
-                        'test_size': len(df_test),
+                        'test_size': len(df_test_base),
                         'test_pct': '20%',
                         'positive_class': int(y_test_adv.sum()),
                         'negative_class': int((y_test_adv == 0).sum())
