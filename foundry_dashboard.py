@@ -932,6 +932,11 @@ def prepare_part_specific_data(df_full: pd.DataFrame, target_part: str,
     
     df_part = df_part.drop(columns=["temp_label"])
     
+    # Recompute temporal features for the subset (NEW IN V3.1)
+    # This ensures trends and rolling averages are calculated correctly for the subset
+    if TEMPORAL_FEATURES_ENABLED:
+        df_part = add_temporal_features(df_part)
+    
     st.success(f"✅ Dataset prepared: {len(df_part)} samples, Labels: {label_counts.to_dict()}")
     return df_part
 
@@ -1166,6 +1171,30 @@ with tab1:
                     input_dict["shrink_x_shrink_porosity"] = defect_means['shrink_rate'] * defect_means['shrink_porosity_rate']
                 if 'core_rate' in defect_means.index and 'sand_rate' in defect_means.index:
                     input_dict["core_x_sand"] = defect_means['core_rate'] * defect_means['sand_rate']
+            
+            # Add temporal features (NEW IN V3.1)
+            if TEMPORAL_FEATURES_ENABLED:
+                if len(part_history) > 0:
+                    # Use most recent values from part history
+                    latest = part_history.iloc[-1] if len(part_history) > 0 else None
+                    
+                    # Trend features - use last known trend or 0
+                    input_dict["total_defect_rate_trend"] = latest.get('total_defect_rate_trend', 0.0) if latest is not None else 0.0
+                    input_dict["total_defect_rate_roll3"] = latest.get('total_defect_rate_roll3', total_defect) if latest is not None else total_defect
+                    input_dict["scrap_percent_trend"] = latest.get('scrap_percent_trend', 0.0) if latest is not None else 0.0
+                    input_dict["scrap_percent_roll3"] = latest.get('scrap_percent_roll3', 0.0) if latest is not None else 0.0
+                    
+                    # Seasonal features - use current date
+                    input_dict["month"] = datetime.now().month
+                    input_dict["quarter"] = (datetime.now().month - 1) // 3 + 1
+                else:
+                    # No part history - use dataset averages
+                    input_dict["total_defect_rate_trend"] = df_full.get('total_defect_rate_trend', pd.Series([0])).mean()
+                    input_dict["total_defect_rate_roll3"] = df_full.get('total_defect_rate_roll3', pd.Series([0])).mean()
+                    input_dict["scrap_percent_trend"] = df_full.get('scrap_percent_trend', pd.Series([0])).mean()
+                    input_dict["scrap_percent_roll3"] = df_full.get('scrap_percent_roll3', pd.Series([0])).mean()
+                    input_dict["month"] = datetime.now().month
+                    input_dict["quarter"] = (datetime.now().month - 1) // 3 + 1
             
             for dc in defect_cols:
                 input_dict[dc] = defect_means.get(dc, 0.0)
