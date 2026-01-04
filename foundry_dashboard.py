@@ -177,12 +177,40 @@ def _normalize_headers(cols: pd.Index) -> pd.Index:
 
 def _canonical_rename(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
-        "part_id": "part_id", "work_order": "work_order",
-        "work_order_number": "work_order", "work_order_#": "work_order",
-        "order_quantity": "order_quantity", "order_qty": "order_quantity",
-        "scrap%": "scrap_percent", "scrap_percent": "scrap_percent",
-        "piece_weight_lbs": "piece_weight_lbs", "piece_weight": "piece_weight_lbs",
-        "week_ending": "week_ending", "week_end": "week_ending",
+        # Part ID variations
+        "part_id": "part_id", 
+        "partid": "part_id",
+        "part": "part_id",
+        # Work order variations
+        "work_order": "work_order",
+        "work_order_number": "work_order", 
+        "work_order_#": "work_order",
+        "workorder": "work_order",
+        "wo": "work_order",
+        # Order quantity variations
+        "order_quantity": "order_quantity", 
+        "order_qty": "order_quantity",
+        "orderquantity": "order_quantity",
+        "qty": "order_quantity",
+        "quantity": "order_quantity",
+        # Scrap percent variations - THIS IS THE KEY FIX
+        "scrap_percent": "scrap_percent",
+        "scrap": "scrap_percent",  # After normalization, "Scrap%" becomes "scrap"
+        "scrap_": "scrap_percent",  # Sometimes trailing underscore
+        "scrap_pct": "scrap_percent",
+        "scrappercent": "scrap_percent",
+        "scrap_rate": "scrap_percent",
+        # Weight variations
+        "piece_weight_lbs": "piece_weight_lbs", 
+        "piece_weight": "piece_weight_lbs",
+        "pieceweight": "piece_weight_lbs",
+        "weight": "piece_weight_lbs",
+        "weight_lbs": "piece_weight_lbs",
+        # Date variations
+        "week_ending": "week_ending", 
+        "week_end": "week_ending",
+        "weekending": "week_ending",
+        "date": "week_ending",
     }
     df.rename(columns=rename_map, inplace=True)
     return df
@@ -266,8 +294,8 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
 def load_and_clean(csv_path: str) -> pd.DataFrame:
+    """Load and clean CSV data with robust column name handling. No caching to ensure fresh data."""
     df = pd.read_csv(csv_path)
     
     if isinstance(df.columns, pd.MultiIndex):
@@ -879,6 +907,21 @@ with st.expander("📊 Scrap Data Statistics (click to expand)"):
     p25 = df_base["scrap_percent"].quantile(0.25)
     p75 = df_base["scrap_percent"].quantile(0.75)
     st.caption(f"💡 **Recommended threshold range:** {p25:.1f}% - {p75:.1f}% (25th-75th percentile) for balanced training classes")
+    
+    # Debug info if scrap data looks wrong
+    if scrap_stats['max'] == 0:
+        st.warning("⚠️ **Data Issue Detected:** All scrap values are 0. Check column mapping below.")
+        
+        # Show raw columns for debugging
+        raw_df = pd.read_csv(csv_path, nrows=5)
+        st.markdown("**Original CSV columns:**")
+        st.code(", ".join(raw_df.columns.tolist()))
+        
+        st.markdown("**After normalization:**")
+        st.code(", ".join(df_base.columns.tolist()))
+        
+        st.markdown("**First 5 rows of scrap_percent:**")
+        st.write(df_base["scrap_percent"].head())
 
 
 # ================================================================
