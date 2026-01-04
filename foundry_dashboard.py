@@ -311,19 +311,22 @@ def smart_split(df: pd.DataFrame, thr_label: float, use_temporal: bool = True):
     Falls back to stratified random split if temporal split has class imbalance.
     """
     df = df.copy()
-    y_full = (df["scrap_percent"] > thr_label).astype(int)
     
-    # Check if we have both classes in the full dataset
+    # First determine effective threshold that guarantees both classes
+    y_full = (df["scrap_percent"] > thr_label).astype(int)
     n_pos = int(y_full.sum())
     n_neg = int((y_full == 0).sum())
     
     effective_thr = thr_label
-    if n_pos < 5 or n_neg < 5:
-        # Not enough samples of both classes - use median as threshold
+    
+    # If we don't have enough of both classes, use median
+    if n_pos < 10 or n_neg < 10:
         effective_thr = df["scrap_percent"].median()
         y_full = (df["scrap_percent"] > effective_thr).astype(int)
+        n_pos = int(y_full.sum())
+        n_neg = int((y_full == 0).sum())
     
-    # Try temporal split first
+    # Try temporal split first (only if requested AND we have timestamps)
     if use_temporal and 'week_ending' in df.columns:
         df_sorted = df.sort_values("week_ending").reset_index(drop=True)
         n = len(df_sorted)
@@ -335,12 +338,14 @@ def smart_split(df: pd.DataFrame, thr_label: float, use_temporal: bool = True):
         df_test = df_sorted.iloc[calib_end:].copy()
         
         # Check class balance in training set
-        y_train = (df_train["scrap_percent"] > effective_thr).astype(int)
-        if y_train.nunique() >= 2 and y_train.sum() >= 3 and (y_train == 0).sum() >= 3:
+        y_train_check = (df_train["scrap_percent"] > effective_thr).astype(int)
+        if y_train_check.nunique() >= 2 and y_train_check.sum() >= 5 and (y_train_check == 0).sum() >= 5:
             return df_train, df_calib, df_test, effective_thr
+        # If temporal split fails balance check, fall through to stratified
     
-    # Fall back to stratified random split
+    # Use stratified random split to guarantee class balance
     try:
+        # Stratified split ensures both classes in each split
         df_train_calib, df_test = train_test_split(
             df, test_size=0.2, stratify=y_full, random_state=RANDOM_STATE
         )
@@ -348,14 +353,25 @@ def smart_split(df: pd.DataFrame, thr_label: float, use_temporal: bool = True):
         df_train, df_calib = train_test_split(
             df_train_calib, test_size=0.25, stratify=y_train_calib, random_state=RANDOM_STATE
         )
-        return df_train.copy(), df_calib.copy(), df_test.copy(), effective_thr
-    except:
-        # Last resort: simple random split
-        df_shuffled = df.sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
-        n = len(df_shuffled)
-        train_end = int(n * 0.6)
-        calib_end = int(n * 0.8)
-        return df_shuffled.iloc[:train_end].copy(), df_shuffled.iloc[train_end:calib_end].copy(), df_shuffled.iloc[calib_end:].copy(), effective_thr
+        
+        # Verify we actually have both classes
+        y_train_final = (df_train["scrap_percent"] > effective_thr).astype(int)
+        if y_train_final.nunique() >= 2:
+            return df_train.copy(), df_calib.copy(), df_test.copy(), effective_thr
+    except Exception as e:
+        pass  # Fall through to shuffle split
+    
+    # Last resort: shuffle and split, then verify
+    df_shuffled = df.sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
+    n = len(df_shuffled)
+    train_end = int(n * 0.6)
+    calib_end = int(n * 0.8)
+    
+    df_train = df_shuffled.iloc[:train_end].copy()
+    df_calib = df_shuffled.iloc[train_end:calib_end].copy()
+    df_test = df_shuffled.iloc[calib_end:].copy()
+    
+    return df_train, df_calib, df_test, effective_thr
 
 
 def compute_mtbf_on_train(df_train: pd.DataFrame, thr_label: float) -> pd.DataFrame:
@@ -488,9 +504,17 @@ def train_model_with_config(df: pd.DataFrame, phm_config: dict, thr_label: float
     X_test = df_test[feats].fillna(0)
     y_test = (df_test["scrap_percent"] > effective_thr).astype(int)
     
-    # Check class balance
+    # Check class balance - if still only one class, adjust threshold to median
     if y_train.nunique() < 2:
-        return None, None, None, {'error': 'Only one class in training data'}
+        # Emergency fallback: use median threshold
+        median_thr = df_train["scrap_percent"].median()
+        y_train = (df_train["scrap_percent"] > median_thr).astype(int)
+        y_calib = (df_calib["scrap_percent"] > median_thr).astype(int)
+        y_test = (df_test["scrap_percent"] > median_thr).astype(int)
+        
+        # If still only one class after median threshold, we have a data problem
+        if y_train.nunique() < 2:
+            return None, None, None, {'error': 'Only one class in training data - try adjusting threshold'}
     
     # Train
     rf = RandomForestClassifier(
