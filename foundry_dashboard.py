@@ -68,8 +68,8 @@ st.markdown("""
             padding: 10px 20px; border-radius: 10px; margin-bottom: 20px;">
     <h2 style="color: white; margin: 0;">🏭 Foundry Scrap Risk Dashboard</h2>
     <p style="color: #a8d0ff; margin: 5px 0 0 0;">
-        <strong>Version 3.3 - Reliability & Availability Metrics</strong> | 
-        6-2-1 Rolling Window | Campbell Process Mapping | PHM Optimized | TRUE MTTS | R(t) & A(t)
+        <strong>Version 3.3 - Reliability & Availability Metrics + RQ1 Validation</strong> | 
+        6-2-1 Rolling Window | Campbell Process Mapping | PHM Optimized | TRUE MTTS | R(t) & A(t) | SPC Comparison
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -984,6 +984,680 @@ def display_reliability_dashboard(reliability_df: pd.DataFrame,
                 st.warning(f"⚠️ Below availability target ({AVAILABILITY_TARGET:.0%})")
     
     return reliability_df
+
+
+# ================================================================
+# SPC (STATISTICAL PROCESS CONTROL) ANALYSIS (NEW IN V3.3)
+# For RQ1 Validation: MTTS+ML vs Traditional SPC Comparison
+# ================================================================
+#
+# THEORETICAL BASIS:
+#
+# Traditional SPC uses control charts to detect process shifts:
+#   - X-bar chart: Monitors process mean
+#   - R chart: Monitors process range/variation
+#   - CUSUM: Cumulative sum for detecting small shifts
+#   - EWMA: Exponentially weighted moving average
+#
+# SPC Prediction Approach:
+#   - Control limit violations signal potential quality issues
+#   - Points outside ±3σ indicate "out of control" process
+#   - Western Electric rules detect non-random patterns
+#
+# References:
+#   Montgomery, D.C. (2012). Introduction to Statistical Quality Control.
+#   Wheeler, D.J. (1995). Advanced Topics in Statistical Process Control.
+# ================================================================
+
+def compute_spc_control_limits(data: pd.Series, n_sigma: float = 3.0) -> dict:
+    """
+    Compute standard SPC control limits for a data series.
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        Time-ordered process measurements
+    n_sigma : float
+        Number of standard deviations for control limits (default: 3)
+    
+    Returns:
+    --------
+    dict with:
+        - mean: Process mean (centerline)
+        - std: Process standard deviation
+        - ucl: Upper Control Limit (mean + n_sigma * std)
+        - lcl: Lower Control Limit (mean - n_sigma * std)
+        - uwl: Upper Warning Limit (mean + 2 * std)
+        - lwl: Lower Warning Limit (mean - 2 * std)
+    """
+    mean = data.mean()
+    std = data.std()
+    
+    return {
+        'mean': mean,
+        'std': std,
+        'ucl': mean + n_sigma * std,
+        'lcl': max(0, mean - n_sigma * std),  # Scrap can't be negative
+        'uwl': mean + 2 * std,
+        'lwl': max(0, mean - 2 * std),
+        'n_sigma': n_sigma
+    }
+
+
+def compute_moving_range(data: pd.Series) -> pd.Series:
+    """
+    Compute moving range for individuals chart (MR chart).
+    
+    MR_i = |X_i - X_{i-1}|
+    """
+    return data.diff().abs()
+
+
+def compute_xbar_r_limits(data: pd.Series, subgroup_size: int = 5) -> dict:
+    """
+    Compute X-bar and R chart limits for subgrouped data.
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        Individual measurements
+    subgroup_size : int
+        Size of rational subgroups
+    
+    Returns:
+    --------
+    dict with X-bar and R chart limits
+    """
+    # Control chart constants (for subgroup sizes 2-10)
+    A2 = {2: 1.880, 3: 1.023, 4: 0.729, 5: 0.577, 6: 0.483, 7: 0.419, 8: 0.373, 9: 0.337, 10: 0.308}
+    D3 = {2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0.076, 8: 0.136, 9: 0.184, 10: 0.223}
+    D4 = {2: 3.267, 3: 2.574, 4: 2.282, 5: 2.114, 6: 2.004, 7: 1.924, 8: 1.864, 9: 1.816, 10: 1.777}
+    
+    n = min(subgroup_size, 10)
+    
+    # Create subgroups
+    n_complete = len(data) // n
+    subgroups = [data.iloc[i*n:(i+1)*n] for i in range(n_complete)]
+    
+    if len(subgroups) < 2:
+        # Fall back to individuals chart
+        return compute_spc_control_limits(data)
+    
+    # Calculate subgroup means and ranges
+    xbar = pd.Series([sg.mean() for sg in subgroups])
+    R = pd.Series([sg.max() - sg.min() for sg in subgroups])
+    
+    # Grand mean and average range
+    xbar_bar = xbar.mean()
+    R_bar = R.mean()
+    
+    return {
+        'xbar_bar': xbar_bar,
+        'R_bar': R_bar,
+        'xbar_ucl': xbar_bar + A2[n] * R_bar,
+        'xbar_lcl': max(0, xbar_bar - A2[n] * R_bar),
+        'r_ucl': D4[n] * R_bar,
+        'r_lcl': D3[n] * R_bar,
+        'subgroup_means': xbar,
+        'subgroup_ranges': R,
+        'subgroup_size': n
+    }
+
+
+def compute_cusum(data: pd.Series, target: float = None, k: float = 0.5, h: float = 5.0) -> pd.DataFrame:
+    """
+    Compute CUSUM (Cumulative Sum) chart values.
+    
+    CUSUM is sensitive to small, persistent shifts in the process mean.
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        Process measurements
+    target : float
+        Target value (default: process mean)
+    k : float
+        Slack value (typically 0.5 * shift to detect, in σ units)
+    h : float
+        Decision interval (typically 4-5 σ units)
+    
+    Returns:
+    --------
+    pd.DataFrame with columns:
+        - value: Original data
+        - cusum_pos: Upper CUSUM (detects upward shifts)
+        - cusum_neg: Lower CUSUM (detects downward shifts)
+        - signal: Boolean indicating CUSUM signal
+    """
+    if target is None:
+        target = data.mean()
+    
+    std = data.std()
+    K = k * std  # Slack value in original units
+    H = h * std  # Decision interval in original units
+    
+    cusum_pos = np.zeros(len(data))
+    cusum_neg = np.zeros(len(data))
+    signals = np.zeros(len(data), dtype=bool)
+    
+    for i, x in enumerate(data):
+        if i == 0:
+            cusum_pos[i] = max(0, x - target - K)
+            cusum_neg[i] = max(0, target - x - K)
+        else:
+            cusum_pos[i] = max(0, cusum_pos[i-1] + x - target - K)
+            cusum_neg[i] = max(0, cusum_neg[i-1] + target - x - K)
+        
+        signals[i] = (cusum_pos[i] > H) or (cusum_neg[i] > H)
+    
+    return pd.DataFrame({
+        'value': data.values,
+        'cusum_pos': cusum_pos,
+        'cusum_neg': cusum_neg,
+        'signal': signals,
+        'H': H
+    })
+
+
+def compute_ewma(data: pd.Series, lambda_param: float = 0.2, L: float = 3.0) -> pd.DataFrame:
+    """
+    Compute EWMA (Exponentially Weighted Moving Average) chart values.
+    
+    EWMA is good for detecting small shifts and handles autocorrelated data.
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        Process measurements
+    lambda_param : float
+        Smoothing parameter (0 < λ ≤ 1), typically 0.05-0.25
+    L : float
+        Width of control limits in sigma units
+    
+    Returns:
+    --------
+    pd.DataFrame with EWMA values and control limits
+    """
+    mean = data.mean()
+    std = data.std()
+    
+    ewma = np.zeros(len(data))
+    ucl = np.zeros(len(data))
+    lcl = np.zeros(len(data))
+    
+    for i, x in enumerate(data):
+        if i == 0:
+            ewma[i] = lambda_param * x + (1 - lambda_param) * mean
+        else:
+            ewma[i] = lambda_param * x + (1 - lambda_param) * ewma[i-1]
+        
+        # Time-varying control limits
+        factor = np.sqrt(lambda_param / (2 - lambda_param) * (1 - (1 - lambda_param)**(2*(i+1))))
+        ucl[i] = mean + L * std * factor
+        lcl[i] = max(0, mean - L * std * factor)
+    
+    signals = (ewma > ucl) | (ewma < lcl)
+    
+    return pd.DataFrame({
+        'value': data.values,
+        'ewma': ewma,
+        'ucl': ucl,
+        'lcl': lcl,
+        'centerline': mean,
+        'signal': signals
+    })
+
+
+def detect_western_electric_rules(data: pd.Series, limits: dict) -> pd.DataFrame:
+    """
+    Apply Western Electric rules for detecting non-random patterns.
+    
+    Rules:
+    1. One point beyond 3σ
+    2. Two of three consecutive points beyond 2σ (same side)
+    3. Four of five consecutive points beyond 1σ (same side)
+    4. Eight consecutive points on same side of centerline
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        Process measurements
+    limits : dict
+        Control limits from compute_spc_control_limits
+    
+    Returns:
+    --------
+    pd.DataFrame with rule violations for each point
+    """
+    mean = limits['mean']
+    std = limits['std']
+    
+    violations = pd.DataFrame({
+        'value': data.values,
+        'rule1': False,  # Beyond 3σ
+        'rule2': False,  # 2 of 3 beyond 2σ
+        'rule3': False,  # 4 of 5 beyond 1σ
+        'rule4': False,  # 8 consecutive same side
+        'any_violation': False
+    })
+    
+    for i in range(len(data)):
+        x = data.iloc[i]
+        
+        # Rule 1: Point beyond 3σ
+        if abs(x - mean) > 3 * std:
+            violations.loc[i, 'rule1'] = True
+        
+        # Rule 2: 2 of 3 beyond 2σ (same side)
+        if i >= 2:
+            window = data.iloc[i-2:i+1]
+            above_2sigma = (window > mean + 2 * std).sum()
+            below_2sigma = (window < mean - 2 * std).sum()
+            if above_2sigma >= 2 or below_2sigma >= 2:
+                violations.loc[i, 'rule2'] = True
+        
+        # Rule 3: 4 of 5 beyond 1σ (same side)
+        if i >= 4:
+            window = data.iloc[i-4:i+1]
+            above_1sigma = (window > mean + std).sum()
+            below_1sigma = (window < mean - std).sum()
+            if above_1sigma >= 4 or below_1sigma >= 4:
+                violations.loc[i, 'rule3'] = True
+        
+        # Rule 4: 8 consecutive same side
+        if i >= 7:
+            window = data.iloc[i-7:i+1]
+            all_above = (window > mean).all()
+            all_below = (window < mean).all()
+            if all_above or all_below:
+                violations.loc[i, 'rule4'] = True
+    
+    violations['any_violation'] = violations[['rule1', 'rule2', 'rule3', 'rule4']].any(axis=1)
+    
+    return violations
+
+
+def compute_process_capability(data: pd.Series, lsl: float = 0, usl: float = None) -> dict:
+    """
+    Compute process capability indices Cp, Cpk, Pp, Ppk.
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        Process measurements
+    lsl : float
+        Lower Specification Limit (default: 0 for scrap)
+    usl : float
+        Upper Specification Limit (your scrap threshold)
+    
+    Returns:
+    --------
+    dict with capability indices
+    """
+    if usl is None:
+        usl = data.mean() + 3 * data.std()
+    
+    mean = data.mean()
+    std = data.std()
+    
+    # Cp: Potential capability (how capable process COULD be if centered)
+    cp = (usl - lsl) / (6 * std) if std > 0 else 0
+    
+    # Cpk: Actual capability (accounts for centering)
+    cpu = (usl - mean) / (3 * std) if std > 0 else 0
+    cpl = (mean - lsl) / (3 * std) if std > 0 else 0
+    cpk = min(cpu, cpl)
+    
+    # Interpretation
+    if cpk >= 1.33:
+        interpretation = "Capable (Cpk ≥ 1.33)"
+    elif cpk >= 1.0:
+        interpretation = "Marginally Capable (1.0 ≤ Cpk < 1.33)"
+    else:
+        interpretation = "Not Capable (Cpk < 1.0)"
+    
+    return {
+        'cp': cp,
+        'cpk': cpk,
+        'cpu': cpu,
+        'cpl': cpl,
+        'mean': mean,
+        'std': std,
+        'lsl': lsl,
+        'usl': usl,
+        'interpretation': interpretation
+    }
+
+
+def spc_based_prediction(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """
+    Generate predictions using traditional SPC methods.
+    
+    This creates a "SPC-only" baseline model for comparison with MTTS+ML.
+    
+    Prediction Logic:
+    - If current run shows control chart violation → predict HIGH risk
+    - If CUSUM signals → predict HIGH risk
+    - If Cpk < 1.0 for recent runs → predict HIGH risk
+    - Otherwise → predict LOW risk
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Data with 'scrap_percent' and 'part_id'
+    threshold : float
+        Scrap threshold for binary classification
+    
+    Returns:
+    --------
+    pd.DataFrame with SPC-based predictions
+    """
+    df = df.copy()
+    df = df.sort_values(['part_id', 'week_ending']).reset_index(drop=True)
+    
+    # Initialize prediction columns
+    df['spc_prediction'] = 0
+    df['spc_probability'] = 0.0
+    df['control_violation'] = False
+    df['cusum_signal'] = False
+    df['ewma_signal'] = False
+    df['trend_signal'] = False
+    
+    # Process each part separately
+    for part_id, group in df.groupby('part_id'):
+        if len(group) < 3:
+            continue
+        
+        idx = group.index.tolist()
+        scrap_data = group['scrap_percent']
+        
+        # Compute control limits from historical data
+        limits = compute_spc_control_limits(scrap_data)
+        
+        # Compute CUSUM
+        cusum_df = compute_cusum(scrap_data, target=threshold)
+        
+        # Compute EWMA
+        ewma_df = compute_ewma(scrap_data)
+        
+        # Western Electric rules
+        we_violations = detect_western_electric_rules(scrap_data, limits)
+        
+        # For each observation, make prediction based on SPC signals
+        for i, row_idx in enumerate(idx):
+            # Control limit violation
+            if scrap_data.iloc[i] > limits['ucl']:
+                df.loc[row_idx, 'control_violation'] = True
+            
+            # CUSUM signal
+            if cusum_df.iloc[i]['signal']:
+                df.loc[row_idx, 'cusum_signal'] = True
+            
+            # EWMA signal
+            if ewma_df.iloc[i]['signal']:
+                df.loc[row_idx, 'ewma_signal'] = True
+            
+            # Trend detection (3 consecutive increases)
+            if i >= 2:
+                if (scrap_data.iloc[i] > scrap_data.iloc[i-1] > scrap_data.iloc[i-2]):
+                    df.loc[row_idx, 'trend_signal'] = True
+            
+            # Combine signals for prediction
+            # SPC predicts NEXT run will exceed threshold if current signals detected
+            n_signals = sum([
+                df.loc[row_idx, 'control_violation'],
+                df.loc[row_idx, 'cusum_signal'],
+                df.loc[row_idx, 'ewma_signal'],
+                df.loc[row_idx, 'trend_signal'],
+                we_violations.iloc[i]['any_violation']
+            ])
+            
+            # Simple probability based on number of signals
+            df.loc[row_idx, 'spc_probability'] = min(0.95, 0.3 + n_signals * 0.15)
+            df.loc[row_idx, 'spc_prediction'] = 1 if n_signals >= 2 else 0
+    
+    return df
+
+
+def compare_spc_vs_mtts_ml(df: pd.DataFrame, threshold: float, 
+                           y_true: pd.Series, spc_preds: pd.Series, 
+                           ml_preds: pd.Series, ml_proba: pd.Series,
+                           spc_proba: pd.Series) -> dict:
+    """
+    Compare SPC-based predictions vs MTTS+ML predictions.
+    
+    This is the core comparison for RQ1 validation.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Original data
+    threshold : float
+        Scrap threshold
+    y_true : pd.Series
+        Actual binary outcomes (1 = exceeded threshold)
+    spc_preds : pd.Series
+        SPC-based binary predictions
+    ml_preds : pd.Series
+        MTTS+ML binary predictions
+    ml_proba : pd.Series
+        MTTS+ML probability predictions
+    spc_proba : pd.Series
+        SPC probability predictions
+    
+    Returns:
+    --------
+    dict with comprehensive comparison metrics
+    """
+    results = {
+        'spc': {},
+        'mtts_ml': {},
+        'improvement': {},
+        'hypothesis_test': {}
+    }
+    
+    # SPC Metrics
+    results['spc']['accuracy'] = accuracy_score(y_true, spc_preds)
+    results['spc']['recall'] = recall_score(y_true, spc_preds, zero_division=0)
+    results['spc']['precision'] = precision_score(y_true, spc_preds, zero_division=0)
+    results['spc']['f1'] = f1_score(y_true, spc_preds, zero_division=0)
+    results['spc']['brier'] = brier_score_loss(y_true, spc_proba)
+    
+    try:
+        results['spc']['roc_auc'] = roc_auc_score(y_true, spc_proba)
+    except:
+        results['spc']['roc_auc'] = 0.5
+    
+    # MTTS+ML Metrics
+    results['mtts_ml']['accuracy'] = accuracy_score(y_true, ml_preds)
+    results['mtts_ml']['recall'] = recall_score(y_true, ml_preds, zero_division=0)
+    results['mtts_ml']['precision'] = precision_score(y_true, ml_preds, zero_division=0)
+    results['mtts_ml']['f1'] = f1_score(y_true, ml_preds, zero_division=0)
+    results['mtts_ml']['brier'] = brier_score_loss(y_true, ml_proba)
+    
+    try:
+        results['mtts_ml']['roc_auc'] = roc_auc_score(y_true, ml_proba)
+    except:
+        results['mtts_ml']['roc_auc'] = 0.5
+    
+    # Improvement calculations
+    for metric in ['accuracy', 'recall', 'precision', 'f1', 'roc_auc']:
+        spc_val = results['spc'][metric]
+        ml_val = results['mtts_ml'][metric]
+        if spc_val > 0:
+            results['improvement'][metric] = ((ml_val - spc_val) / spc_val) * 100
+        else:
+            results['improvement'][metric] = 0
+    
+    # Brier score (lower is better)
+    spc_brier = results['spc']['brier']
+    ml_brier = results['mtts_ml']['brier']
+    if spc_brier > 0:
+        results['improvement']['brier'] = ((spc_brier - ml_brier) / spc_brier) * 100
+    else:
+        results['improvement']['brier'] = 0
+    
+    # Hypothesis test for RQ1: Is MTTS+ML recall significantly better?
+    # Using McNemar's test for paired binary predictions
+    # Contingency table: SPC correct vs ML correct
+    
+    spc_correct = (spc_preds == y_true)
+    ml_correct = (ml_preds == y_true)
+    
+    # b = SPC wrong, ML right; c = SPC right, ML wrong
+    b = ((~spc_correct) & ml_correct).sum()
+    c = (spc_correct & (~ml_correct)).sum()
+    
+    # McNemar's test statistic
+    if b + c > 0:
+        mcnemar_stat = ((abs(b - c) - 1) ** 2) / (b + c)
+        mcnemar_pvalue = 1 - stats.chi2.cdf(mcnemar_stat, df=1)
+    else:
+        mcnemar_stat = 0
+        mcnemar_pvalue = 1.0
+    
+    results['hypothesis_test']['mcnemar_stat'] = mcnemar_stat
+    results['hypothesis_test']['mcnemar_pvalue'] = mcnemar_pvalue
+    results['hypothesis_test']['b_spc_wrong_ml_right'] = int(b)
+    results['hypothesis_test']['c_spc_right_ml_wrong'] = int(c)
+    results['hypothesis_test']['significant'] = mcnemar_pvalue < 0.05
+    
+    # Check if improvement meets threshold (15% for RQ1)
+    recall_improvement = results['improvement']['recall']
+    results['hypothesis_test']['meets_15pct_threshold'] = recall_improvement >= 15.0
+    results['hypothesis_test']['recall_improvement_pct'] = recall_improvement
+    
+    return results
+
+
+def create_spc_charts(df: pd.DataFrame, part_id: str = None) -> dict:
+    """
+    Create all SPC charts for visualization.
+    
+    Returns dict of Plotly figures for each chart type.
+    """
+    if part_id:
+        data = df[df['part_id'] == part_id]['scrap_percent']
+        title_suffix = f" - Part {part_id}"
+    else:
+        data = df['scrap_percent']
+        title_suffix = " - All Parts"
+    
+    if len(data) < 5:
+        return {}
+    
+    charts = {}
+    
+    # 1. X-bar (Individuals) Chart
+    limits = compute_spc_control_limits(data)
+    
+    fig_xbar = go.Figure()
+    fig_xbar.add_trace(go.Scatter(
+        y=data.values,
+        mode='lines+markers',
+        name='Scrap %',
+        line=dict(color='blue')
+    ))
+    fig_xbar.add_hline(y=limits['mean'], line_dash="solid", line_color="green",
+                       annotation_text=f"CL={limits['mean']:.2f}%")
+    fig_xbar.add_hline(y=limits['ucl'], line_dash="dash", line_color="red",
+                       annotation_text=f"UCL={limits['ucl']:.2f}%")
+    fig_xbar.add_hline(y=limits['lcl'], line_dash="dash", line_color="red",
+                       annotation_text=f"LCL={limits['lcl']:.2f}%")
+    fig_xbar.add_hline(y=limits['uwl'], line_dash="dot", line_color="orange",
+                       annotation_text=f"UWL={limits['uwl']:.2f}%")
+    fig_xbar.update_layout(
+        title=f"X-bar (Individuals) Control Chart{title_suffix}",
+        xaxis_title="Observation",
+        yaxis_title="Scrap %",
+        hovermode='x unified'
+    )
+    charts['xbar'] = fig_xbar
+    
+    # 2. Moving Range Chart
+    mr = compute_moving_range(data)
+    mr_mean = mr.mean()
+    mr_ucl = 3.267 * mr_mean  # D4 for n=2
+    
+    fig_mr = go.Figure()
+    fig_mr.add_trace(go.Scatter(
+        y=mr.values,
+        mode='lines+markers',
+        name='Moving Range',
+        line=dict(color='purple')
+    ))
+    fig_mr.add_hline(y=mr_mean, line_dash="solid", line_color="green",
+                     annotation_text=f"CL={mr_mean:.2f}")
+    fig_mr.add_hline(y=mr_ucl, line_dash="dash", line_color="red",
+                     annotation_text=f"UCL={mr_ucl:.2f}")
+    fig_mr.update_layout(
+        title=f"Moving Range Chart{title_suffix}",
+        xaxis_title="Observation",
+        yaxis_title="Moving Range",
+        hovermode='x unified'
+    )
+    charts['mr'] = fig_mr
+    
+    # 3. CUSUM Chart
+    cusum_df = compute_cusum(data)
+    
+    fig_cusum = go.Figure()
+    fig_cusum.add_trace(go.Scatter(
+        y=cusum_df['cusum_pos'],
+        mode='lines',
+        name='CUSUM+ (Upper)',
+        line=dict(color='red')
+    ))
+    fig_cusum.add_trace(go.Scatter(
+        y=-cusum_df['cusum_neg'],
+        mode='lines',
+        name='CUSUM- (Lower)',
+        line=dict(color='blue')
+    ))
+    fig_cusum.add_hline(y=cusum_df['H'].iloc[0], line_dash="dash", line_color="red",
+                        annotation_text=f"H={cusum_df['H'].iloc[0]:.2f}")
+    fig_cusum.add_hline(y=-cusum_df['H'].iloc[0], line_dash="dash", line_color="blue")
+    fig_cusum.update_layout(
+        title=f"CUSUM Chart{title_suffix}",
+        xaxis_title="Observation",
+        yaxis_title="Cumulative Sum",
+        hovermode='x unified'
+    )
+    charts['cusum'] = fig_cusum
+    
+    # 4. EWMA Chart
+    ewma_df = compute_ewma(data)
+    
+    fig_ewma = go.Figure()
+    fig_ewma.add_trace(go.Scatter(
+        y=ewma_df['ewma'],
+        mode='lines',
+        name='EWMA',
+        line=dict(color='blue', width=2)
+    ))
+    fig_ewma.add_trace(go.Scatter(
+        y=ewma_df['ucl'],
+        mode='lines',
+        name='UCL',
+        line=dict(color='red', dash='dash')
+    ))
+    fig_ewma.add_trace(go.Scatter(
+        y=ewma_df['lcl'],
+        mode='lines',
+        name='LCL',
+        line=dict(color='red', dash='dash')
+    ))
+    fig_ewma.add_hline(y=ewma_df['centerline'].iloc[0], line_dash="solid", line_color="green",
+                       annotation_text=f"CL={ewma_df['centerline'].iloc[0]:.2f}%")
+    fig_ewma.update_layout(
+        title=f"EWMA Chart{title_suffix}",
+        xaxis_title="Observation",
+        yaxis_title="EWMA Value",
+        hovermode='x unified'
+    )
+    charts['ewma'] = fig_ewma
+    
+    return charts
 
 
 def get_multi_defect_analysis(df_row: pd.Series, defect_cols: list) -> dict:
@@ -2682,7 +3356,15 @@ else:
 # -------------------------------
 # TABS
 # -------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔮 Predict & Diagnose", "📏 Validation", "🔬 Advanced Validation", "📊 Model Comparison", "⚙️ Reliability & Availability", "📝 Log Outcome"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "🔮 Predict & Diagnose", 
+    "📏 Validation", 
+    "🔬 Advanced Validation", 
+    "📊 Model Comparison", 
+    "📈 SPC vs MTTS+ML (RQ1)",
+    "⚙️ Reliability & Availability", 
+    "📝 Log Outcome"
+])
 
 # ================================================================
 # TAB 1: PREDICTION & PROCESS DIAGNOSIS
@@ -4069,9 +4751,545 @@ def make_xy(df, thr_label, use_rate_cols,
 
 
 # ================================================================
-# TAB 5: RELIABILITY & AVAILABILITY (NEW IN V3.3)
+# TAB 5: SPC vs MTTS+ML COMPARISON (RQ1 VALIDATION)
 # ================================================================
 with tab5:
+    st.header("📈 RQ1 Validation: SPC vs MTTS+ML Comparison")
+    
+    st.markdown("""
+    **Research Question 1:** *Does MTTS-integrated ML improve scrap prediction recall by ≥15% over SPC baselines?*
+    
+    **Hypothesis H1:** MTTS integration will improve prediction recall by ≥15% (α=0.05) versus SPC-only models.
+    
+    This tab provides direct comparison between:
+    - **Traditional SPC Methods**: Control charts, CUSUM, EWMA, Western Electric rules
+    - **MTTS+ML Framework**: Random Forest with reliability-based features
+    """)
+    
+    # Create sub-tabs
+    spc_tab1, spc_tab2, spc_tab3, spc_tab4 = st.tabs([
+        "📊 SPC Control Charts",
+        "🔬 Head-to-Head Comparison",
+        "📋 RQ1 Validation Report",
+        "📚 SPC Theory"
+    ])
+    
+    with spc_tab1:
+        st.subheader("📊 Traditional SPC Control Charts")
+        
+        st.markdown("""
+        These are the standard Statistical Process Control charts used in traditional quality management.
+        They form the **baseline** against which MTTS+ML is compared.
+        """)
+        
+        # Part selector
+        part_ids_for_spc = ['All Parts'] + sorted(df_base['part_id'].unique().tolist())
+        selected_spc_part = st.selectbox(
+            "Select Part for SPC Analysis:",
+            part_ids_for_spc,
+            key="spc_part_selector"
+        )
+        
+        if st.button("📈 Generate SPC Charts", key="gen_spc_charts"):
+            with st.spinner("Computing SPC control charts..."):
+                try:
+                    if selected_spc_part == 'All Parts':
+                        spc_data = df_base.copy()
+                        charts = create_spc_charts(spc_data, part_id=None)
+                    else:
+                        spc_data = df_base[df_base['part_id'] == selected_spc_part].copy()
+                        charts = create_spc_charts(df_base, part_id=selected_spc_part)
+                    
+                    if len(charts) > 0:
+                        # Display charts
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            if 'xbar' in charts:
+                                st.plotly_chart(charts['xbar'], use_container_width=True)
+                            if 'cusum' in charts:
+                                st.plotly_chart(charts['cusum'], use_container_width=True)
+                        
+                        with col2:
+                            if 'mr' in charts:
+                                st.plotly_chart(charts['mr'], use_container_width=True)
+                            if 'ewma' in charts:
+                                st.plotly_chart(charts['ewma'], use_container_width=True)
+                        
+                        # Process Capability
+                        st.markdown("---")
+                        st.subheader("📐 Process Capability Analysis")
+                        
+                        scrap_series = spc_data['scrap_percent'] if selected_spc_part == 'All Parts' else df_base[df_base['part_id'] == selected_spc_part]['scrap_percent']
+                        
+                        capability = compute_process_capability(scrap_series, lsl=0, usl=thr_label)
+                        
+                        cap_col1, cap_col2, cap_col3, cap_col4 = st.columns(4)
+                        
+                        with cap_col1:
+                            st.metric("Cp (Potential)", f"{capability['cp']:.3f}")
+                        with cap_col2:
+                            st.metric("Cpk (Actual)", f"{capability['cpk']:.3f}")
+                        with cap_col3:
+                            st.metric("Process Mean", f"{capability['mean']:.2f}%")
+                        with cap_col4:
+                            st.metric("Process Std", f"{capability['std']:.2f}%")
+                        
+                        # Interpretation
+                        if capability['cpk'] >= 1.33:
+                            st.success(f"✅ **{capability['interpretation']}** - Process is capable of meeting {thr_label}% threshold")
+                        elif capability['cpk'] >= 1.0:
+                            st.warning(f"⚠️ **{capability['interpretation']}** - Process needs improvement")
+                        else:
+                            st.error(f"❌ **{capability['interpretation']}** - Process cannot reliably meet {thr_label}% threshold")
+                        
+                        # Western Electric Rules
+                        st.markdown("---")
+                        st.subheader("🚨 Western Electric Rule Violations")
+                        
+                        limits = compute_spc_control_limits(scrap_series)
+                        violations = detect_western_electric_rules(scrap_series, limits)
+                        
+                        rule_counts = {
+                            'Rule 1 (Beyond 3σ)': violations['rule1'].sum(),
+                            'Rule 2 (2/3 beyond 2σ)': violations['rule2'].sum(),
+                            'Rule 3 (4/5 beyond 1σ)': violations['rule3'].sum(),
+                            'Rule 4 (8 consecutive same side)': violations['rule4'].sum()
+                        }
+                        
+                        rule_col1, rule_col2, rule_col3, rule_col4 = st.columns(4)
+                        for i, (rule, count) in enumerate(rule_counts.items()):
+                            with [rule_col1, rule_col2, rule_col3, rule_col4][i]:
+                                st.metric(rule, count)
+                        
+                        total_violations = violations['any_violation'].sum()
+                        st.info(f"**Total observations with violations:** {total_violations} of {len(violations)} ({100*total_violations/len(violations):.1f}%)")
+                        
+                    else:
+                        st.warning("Not enough data to generate SPC charts (minimum 5 observations required)")
+                        
+                except Exception as e:
+                    st.error(f"Error generating SPC charts: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    with spc_tab2:
+        st.subheader("🔬 Head-to-Head: SPC vs MTTS+ML")
+        
+        st.markdown("""
+        This comparison directly tests **RQ1** by evaluating both methods on the same test data.
+        
+        **SPC Prediction Method:**
+        - Uses control limit violations, CUSUM signals, EWMA signals
+        - Predicts HIGH risk if ≥2 signals detected
+        
+        **MTTS+ML Prediction Method:**
+        - Uses Random Forest with reliability features
+        - Incorporates MTTS, hazard rate, degradation trajectory
+        """)
+        
+        if st.button("🚀 Run Head-to-Head Comparison", key="run_comparison"):
+            with st.spinner("Training models and computing predictions..."):
+                try:
+                    # Prepare data
+                    df_comparison = df_base.copy()
+                    
+                    # Add MTTS features
+                    if MTTS_FEATURES_ENABLED:
+                        df_comparison = add_mtts_features(df_comparison, thr_label)
+                        df_comparison = compute_remaining_useful_life_proxy(df_comparison, thr_label)
+                    
+                    # Time-based split
+                    df_train_cmp, df_calib_cmp, df_test_cmp = time_split_621(df_comparison)
+                    
+                    # Compute MTBF for features
+                    mtbf_cmp = compute_mtbf_on_train(df_train_cmp, thr_label)
+                    freq_cmp = df_train_cmp["part_id"].value_counts(normalize=True)
+                    default_mtbf_cmp = float(mtbf_cmp["mttf_scrap"].median()) if len(mtbf_cmp) else 1.0
+                    default_freq_cmp = float(freq_cmp.median()) if len(freq_cmp) else 0.0
+                    
+                    df_train_cmp = attach_train_features(df_train_cmp, mtbf_cmp, freq_cmp, default_mtbf_cmp, default_freq_cmp)
+                    df_calib_cmp = attach_train_features(df_calib_cmp, mtbf_cmp, freq_cmp, default_mtbf_cmp, default_freq_cmp)
+                    df_test_cmp = attach_train_features(df_test_cmp, mtbf_cmp, freq_cmp, default_mtbf_cmp, default_freq_cmp)
+                    
+                    # === SPC-BASED PREDICTIONS ===
+                    df_test_spc = spc_based_prediction(df_test_cmp, thr_label)
+                    
+                    # === MTTS+ML PREDICTIONS ===
+                    # Get features including MTTS
+                    X_train_ml, y_train_ml, feats_ml = make_xy(df_train_cmp, thr_label, use_rate_cols, use_multi_defect)
+                    X_calib_ml, y_calib_ml, _ = make_xy(df_calib_cmp, thr_label, use_rate_cols, use_multi_defect)
+                    X_test_ml, y_test_ml, _ = make_xy(df_test_cmp, thr_label, use_rate_cols, use_multi_defect)
+                    
+                    # Add MTTS features to ML model
+                    mtts_features = ['mtts_runs', 'hazard_rate', 'reliability_score', 
+                                     'runs_since_last_failure', 'degradation_velocity',
+                                     'cycle_hazard_indicator', 'rul_proxy']
+                    for feat in mtts_features:
+                        if feat in df_train_cmp.columns and feat not in X_train_ml.columns:
+                            X_train_ml[feat] = df_train_cmp[feat].values[:len(X_train_ml)]
+                            X_calib_ml[feat] = df_calib_cmp[feat].values[:len(X_calib_ml)]
+                            X_test_ml[feat] = df_test_cmp[feat].values[:len(X_test_ml)]
+                    
+                    X_train_ml = X_train_ml.fillna(0)
+                    X_calib_ml = X_calib_ml.fillna(0)
+                    X_test_ml = X_test_ml.fillna(0)
+                    
+                    # Train ML model
+                    rf_cmp, cal_cmp, method_cmp = train_and_calibrate(
+                        X_train_ml, y_train_ml, X_calib_ml, y_calib_ml, n_est
+                    )
+                    
+                    # Get ML predictions
+                    ml_proba = cal_cmp.predict_proba(X_test_ml)[:, 1]
+                    ml_preds = (ml_proba > 0.5).astype(int)
+                    
+                    # Get SPC predictions (aligned with test set)
+                    spc_proba = df_test_spc['spc_probability'].values[:len(y_test_ml)]
+                    spc_preds = df_test_spc['spc_prediction'].values[:len(y_test_ml)]
+                    
+                    # === COMPARISON ===
+                    comparison_results = compare_spc_vs_mtts_ml(
+                        df_test_cmp, thr_label,
+                        y_test_ml, 
+                        pd.Series(spc_preds), 
+                        pd.Series(ml_preds),
+                        pd.Series(ml_proba),
+                        pd.Series(spc_proba)
+                    )
+                    
+                    # Store results
+                    st.session_state['rq1_comparison'] = comparison_results
+                    
+                    # === DISPLAY RESULTS ===
+                    st.success("✅ Comparison complete!")
+                    
+                    st.markdown("### 📊 Performance Metrics Comparison")
+                    
+                    # Create comparison table
+                    metrics_table = pd.DataFrame({
+                        'Metric': ['Accuracy', 'Recall', 'Precision', 'F1 Score', 'ROC-AUC', 'Brier Score'],
+                        'SPC Only': [
+                            f"{comparison_results['spc']['accuracy']:.1%}",
+                            f"{comparison_results['spc']['recall']:.1%}",
+                            f"{comparison_results['spc']['precision']:.1%}",
+                            f"{comparison_results['spc']['f1']:.1%}",
+                            f"{comparison_results['spc']['roc_auc']:.3f}",
+                            f"{comparison_results['spc']['brier']:.4f}"
+                        ],
+                        'MTTS+ML': [
+                            f"{comparison_results['mtts_ml']['accuracy']:.1%}",
+                            f"{comparison_results['mtts_ml']['recall']:.1%}",
+                            f"{comparison_results['mtts_ml']['precision']:.1%}",
+                            f"{comparison_results['mtts_ml']['f1']:.1%}",
+                            f"{comparison_results['mtts_ml']['roc_auc']:.3f}",
+                            f"{comparison_results['mtts_ml']['brier']:.4f}"
+                        ],
+                        'Improvement': [
+                            f"{comparison_results['improvement']['accuracy']:+.1f}%",
+                            f"{comparison_results['improvement']['recall']:+.1f}%",
+                            f"{comparison_results['improvement']['precision']:+.1f}%",
+                            f"{comparison_results['improvement']['f1']:+.1f}%",
+                            f"{comparison_results['improvement']['roc_auc']:+.1f}%",
+                            f"{comparison_results['improvement']['brier']:+.1f}%"
+                        ]
+                    })
+                    
+                    st.dataframe(metrics_table, use_container_width=True)
+                    
+                    # Visual comparison
+                    st.markdown("### 📈 Visual Comparison")
+                    
+                    fig_compare = go.Figure()
+                    
+                    metrics = ['Accuracy', 'Recall', 'Precision', 'F1 Score']
+                    spc_values = [comparison_results['spc']['accuracy'], 
+                                  comparison_results['spc']['recall'],
+                                  comparison_results['spc']['precision'],
+                                  comparison_results['spc']['f1']]
+                    ml_values = [comparison_results['mtts_ml']['accuracy'],
+                                 comparison_results['mtts_ml']['recall'],
+                                 comparison_results['mtts_ml']['precision'],
+                                 comparison_results['mtts_ml']['f1']]
+                    
+                    fig_compare.add_trace(go.Bar(
+                        name='SPC Only',
+                        x=metrics,
+                        y=[v * 100 for v in spc_values],
+                        marker_color='lightgray'
+                    ))
+                    
+                    fig_compare.add_trace(go.Bar(
+                        name='MTTS+ML',
+                        x=metrics,
+                        y=[v * 100 for v in ml_values],
+                        marker_color='steelblue'
+                    ))
+                    
+                    fig_compare.update_layout(
+                        title="SPC vs MTTS+ML Performance Comparison",
+                        yaxis_title="Score (%)",
+                        barmode='group',
+                        yaxis=dict(range=[0, 100])
+                    )
+                    
+                    st.plotly_chart(fig_compare, use_container_width=True)
+                    
+                    # Hypothesis Test Results
+                    st.markdown("### 🧪 Hypothesis Test Results (RQ1)")
+                    
+                    recall_improvement = comparison_results['hypothesis_test']['recall_improvement_pct']
+                    meets_threshold = comparison_results['hypothesis_test']['meets_15pct_threshold']
+                    mcnemar_p = comparison_results['hypothesis_test']['mcnemar_pvalue']
+                    significant = comparison_results['hypothesis_test']['significant']
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric(
+                            "Recall Improvement",
+                            f"{recall_improvement:+.1f}%",
+                            delta="✓ Meets 15% threshold" if meets_threshold else "✗ Below 15% threshold"
+                        )
+                    
+                    with col2:
+                        st.metric(
+                            "McNemar's p-value",
+                            f"{mcnemar_p:.4f}",
+                            delta="✓ Significant (p<0.05)" if significant else "✗ Not significant"
+                        )
+                    
+                    with col3:
+                        h1_result = "SUPPORTED" if (meets_threshold and significant) else "NOT SUPPORTED"
+                        st.metric("H1 Status", h1_result)
+                    
+                    # Interpretation box
+                    if meets_threshold and significant:
+                        st.success(f"""
+                        ✅ **RQ1 VALIDATED - H1 SUPPORTED**
+                        
+                        The MTTS+ML framework shows a **{recall_improvement:.1f}% improvement** in recall over traditional SPC methods.
+                        
+                        - This exceeds the 15% threshold specified in H1
+                        - The improvement is statistically significant (p = {mcnemar_p:.4f})
+                        - McNemar's test confirms the difference is not due to chance
+                        
+                        **Conclusion:** Integrating MTTS reliability metrics with machine learning significantly improves 
+                        scrap prediction compared to traditional SPC methods.
+                        """)
+                    elif meets_threshold:
+                        st.warning(f"""
+                        ⚠️ **RQ1 PARTIALLY VALIDATED**
+                        
+                        The MTTS+ML framework shows a **{recall_improvement:.1f}% improvement** in recall (meets 15% threshold),
+                        but the improvement is not statistically significant (p = {mcnemar_p:.4f}).
+                        
+                        This may be due to limited test sample size. Consider:
+                        - Collecting more data
+                        - Using cross-validation for more robust comparison
+                        """)
+                    else:
+                        st.error(f"""
+                        ❌ **RQ1 NOT VALIDATED - H1 NOT SUPPORTED**
+                        
+                        The MTTS+ML framework shows only **{recall_improvement:.1f}% improvement** in recall.
+                        
+                        This does not meet the 15% improvement threshold specified in H1.
+                        
+                        **Possible reasons:**
+                        - The current dataset may not have enough temporal patterns
+                        - SPC methods may already be capturing most predictive information
+                        - Consider adjusting the scrap threshold or feature engineering
+                        """)
+                    
+                except Exception as e:
+                    st.error(f"Error in comparison: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    with spc_tab3:
+        st.subheader("📋 RQ1 Validation Report")
+        
+        st.markdown("""
+        Generate a formal validation report for your research paper/dissertation.
+        """)
+        
+        if 'rq1_comparison' in st.session_state:
+            results = st.session_state['rq1_comparison']
+            
+            report_text = f"""
+================================================================================
+RQ1 VALIDATION REPORT
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+================================================================================
+
+RESEARCH QUESTION 1:
+Does MTTS-integrated ML improve scrap prediction recall by ≥15% over SPC baselines?
+
+HYPOTHESIS H1:
+MTTS integration will improve prediction recall by ≥15% (α=0.05) versus SPC-only models.
+
+--------------------------------------------------------------------------------
+METHODOLOGY
+--------------------------------------------------------------------------------
+
+SPC Baseline Method:
+- X-bar/Individuals control chart (±3σ limits)
+- CUSUM chart (k=0.5, h=5.0)
+- EWMA chart (λ=0.2, L=3.0)
+- Western Electric rules for pattern detection
+- Prediction: HIGH risk if ≥2 signals detected
+
+MTTS+ML Method:
+- Random Forest classifier (n_estimators={n_est})
+- Calibrated using sigmoid/isotonic regression
+- Features: SPC rates + MTTS reliability features
+- MTTS features: mtts_runs, hazard_rate, degradation_velocity, etc.
+
+Data Split: 6-2-1 temporal split (60% train, 20% calibration, 20% test)
+
+--------------------------------------------------------------------------------
+RESULTS
+--------------------------------------------------------------------------------
+
+Performance Metrics:
+                    SPC Only        MTTS+ML         Improvement
+Accuracy:           {results['spc']['accuracy']:.1%}            {results['mtts_ml']['accuracy']:.1%}            {results['improvement']['accuracy']:+.1f}%
+Recall:             {results['spc']['recall']:.1%}            {results['mtts_ml']['recall']:.1%}            {results['improvement']['recall']:+.1f}%
+Precision:          {results['spc']['precision']:.1%}            {results['mtts_ml']['precision']:.1%}            {results['improvement']['precision']:+.1f}%
+F1 Score:           {results['spc']['f1']:.1%}            {results['mtts_ml']['f1']:.1%}            {results['improvement']['f1']:+.1f}%
+ROC-AUC:            {results['spc']['roc_auc']:.3f}           {results['mtts_ml']['roc_auc']:.3f}           {results['improvement']['roc_auc']:+.1f}%
+Brier Score:        {results['spc']['brier']:.4f}          {results['mtts_ml']['brier']:.4f}          {results['improvement']['brier']:+.1f}%
+
+Statistical Test:
+- McNemar's Chi-square: {results['hypothesis_test']['mcnemar_stat']:.4f}
+- p-value: {results['hypothesis_test']['mcnemar_pvalue']:.4f}
+- Significant at α=0.05: {'Yes' if results['hypothesis_test']['significant'] else 'No'}
+
+Contingency:
+- Cases where SPC wrong, ML right: {results['hypothesis_test']['b_spc_wrong_ml_right']}
+- Cases where SPC right, ML wrong: {results['hypothesis_test']['c_spc_right_ml_wrong']}
+
+--------------------------------------------------------------------------------
+HYPOTHESIS TEST RESULTS
+--------------------------------------------------------------------------------
+
+H1 Criterion 1 - Recall Improvement ≥15%:
+- Observed improvement: {results['hypothesis_test']['recall_improvement_pct']:.1f}%
+- Criterion met: {'YES ✓' if results['hypothesis_test']['meets_15pct_threshold'] else 'NO ✗'}
+
+H1 Criterion 2 - Statistical Significance (p<0.05):
+- p-value: {results['hypothesis_test']['mcnemar_pvalue']:.4f}
+- Criterion met: {'YES ✓' if results['hypothesis_test']['significant'] else 'NO ✗'}
+
+FINAL DETERMINATION:
+H1 Status: {'SUPPORTED ✓' if (results['hypothesis_test']['meets_15pct_threshold'] and results['hypothesis_test']['significant']) else 'NOT SUPPORTED ✗'}
+
+--------------------------------------------------------------------------------
+CONCLUSION
+--------------------------------------------------------------------------------
+
+{'The results SUPPORT H1. The MTTS-integrated ML framework demonstrates statistically significant improvement in scrap prediction recall compared to traditional SPC methods, meeting the pre-specified threshold of ≥15% improvement.' if (results['hypothesis_test']['meets_15pct_threshold'] and results['hypothesis_test']['significant']) else 'The results DO NOT SUPPORT H1. While improvements were observed, they did not meet all pre-specified criteria for validation.'}
+
+================================================================================
+END OF REPORT
+================================================================================
+            """
+            
+            st.code(report_text, language=None)
+            
+            # Download button
+            st.download_button(
+                label="📥 Download RQ1 Validation Report",
+                data=report_text,
+                file_name=f"RQ1_validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain"
+            )
+            
+        else:
+            st.info("👆 Run the Head-to-Head Comparison first to generate the validation report.")
+    
+    with spc_tab4:
+        st.subheader("📚 SPC Theory & Methods")
+        
+        st.markdown("""
+        ## Statistical Process Control (SPC) Overview
+        
+        SPC uses statistical methods to monitor and control a process, ensuring it operates at its full potential.
+        
+        ### Control Charts
+        
+        **X-bar Chart (Individuals Chart)**
+        - Monitors process mean
+        - Control Limits: UCL = μ + 3σ, LCL = μ - 3σ
+        - Points outside limits indicate "out of control" process
+        
+        **Moving Range (MR) Chart**
+        - Monitors process variation
+        - MR = |X_i - X_{i-1}|
+        - UCL = 3.267 × MR̄
+        
+        ### Advanced Detection Methods
+        
+        **CUSUM (Cumulative Sum)**
+        - Detects small, persistent shifts in mean
+        - More sensitive than X-bar chart for small shifts
+        - Parameters: k (slack value), h (decision interval)
+        
+        **EWMA (Exponentially Weighted Moving Average)**
+        - Smooths data to detect trends
+        - Good for autocorrelated data
+        - Parameter: λ (smoothing factor, typically 0.1-0.3)
+        
+        ### Western Electric Rules
+        
+        | Rule | Description | Detects |
+        |------|-------------|---------|
+        | 1 | 1 point beyond 3σ | Large shifts |
+        | 2 | 2 of 3 points beyond 2σ (same side) | Medium shifts |
+        | 3 | 4 of 5 points beyond 1σ (same side) | Small shifts |
+        | 4 | 8 consecutive points same side of CL | Process drift |
+        
+        ### Process Capability
+        
+        **Cp (Potential Capability)**
+        $$C_p = \\frac{USL - LSL}{6\\sigma}$$
+        
+        **Cpk (Actual Capability)**
+        $$C_{pk} = \\min\\left(\\frac{USL - \\mu}{3\\sigma}, \\frac{\\mu - LSL}{3\\sigma}\\right)$$
+        
+        | Cpk Value | Interpretation |
+        |-----------|----------------|
+        | ≥ 1.33 | Capable process |
+        | 1.0 - 1.33 | Marginally capable |
+        | < 1.0 | Not capable |
+        
+        ### SPC Limitations for Prediction
+        
+        Traditional SPC is **reactive**, not **predictive**:
+        - Detects shifts AFTER they occur
+        - No forward-looking capability
+        - Doesn't leverage machine learning patterns
+        - Doesn't incorporate reliability degradation
+        
+        **MTTS+ML addresses these limitations by:**
+        - Learning patterns from historical data
+        - Incorporating reliability trajectory (degradation velocity)
+        - Predicting BEFORE threshold exceedance
+        - Quantifying risk probability, not just binary signals
+        
+        ### References
+        
+        1. Montgomery, D.C. (2012). *Introduction to Statistical Quality Control.* 7th ed. Wiley.
+        2. Wheeler, D.J. (1995). *Advanced Topics in Statistical Process Control.* SPC Press.
+        3. AIAG (2010). *Statistical Process Control (SPC) Reference Manual.* 2nd ed.
+        """)
+
+
+# ================================================================
+# TAB 6: RELIABILITY & AVAILABILITY (NEW IN V3.3)
+# ================================================================
+with tab6:
     st.header("⚙️ Reliability & Availability Analysis")
     
     st.markdown("""
@@ -4519,9 +5737,9 @@ with tab5:
 
 
 # ================================================================
-# TAB 6: LOG OUTCOME (was TAB 5)
+# TAB 7: LOG OUTCOME (was TAB 6)
 # ================================================================
-with tab6:
+with tab7:
     st.header("📝 Log Production Outcome")
     
     if not rolling_enabled:
@@ -4597,4 +5815,4 @@ with tab6:
 
 
 st.markdown("---")
-st.caption("🏭 Foundry Scrap Risk Dashboard **v3.3 - Reliability & Availability Metrics** | Based on Campbell (2003) + PHM Study | 6-2-1 Rolling Window | R(t) & A(t) Analysis")
+st.caption("🏭 Foundry Scrap Risk Dashboard **v3.3 - RQ1 Validation + Reliability Metrics** | Based on Campbell (2003) + PHM Study | 6-2-1 Rolling Window | SPC vs MTTS+ML Comparison | R(t) & A(t) Analysis")
