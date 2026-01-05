@@ -478,6 +478,7 @@ def _canonical_rename(df: pd.DataFrame) -> pd.DataFrame:
         "pieces_scrapped": "pieces_scrapped",
         "scrap%": "scrap_percent",
         "scrap_percent": "scrap_percent",
+        "scrap": "scrap_percent",  # Handle normalized 'Scrap%' -> 'scrap'
         "piece_weight_lbs": "piece_weight_lbs",
         "piece_weight": "piece_weight_lbs",
         "week_ending": "week_ending",
@@ -606,6 +607,9 @@ def make_xy(df, thr_label, use_rate_cols, use_multi_defect=True, use_temporal=Tr
 
 def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
     """Train and calibrate Random Forest model."""
+    # Check for class balance
+    n_classes = len(np.unique(y_train))
+    
     rf = RandomForestClassifier(
         n_estimators=n_estimators,
         min_samples_leaf=MIN_SAMPLES_LEAF,
@@ -614,17 +618,18 @@ def train_and_calibrate(X_train, y_train, X_calib, y_calib, n_estimators):
         n_jobs=-1,
     ).fit(X_train, y_train)
     
+    # Check calibration data class balance
     pos = int(y_calib.sum())
     neg = int((y_calib == 0).sum())
     
-    if pos < 3 or neg < 3:
-        return rf, rf, "uncalibrated"
+    if pos < 3 or neg < 3 or n_classes < 2:
+        return rf, rf, "uncalibrated (insufficient class diversity)"
     
     try:
         cal = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3).fit(X_calib, y_calib)
         return rf, cal, "calibrated (sigmoid)"
-    except ValueError:
-        return rf, rf, "uncalibrated"
+    except ValueError as e:
+        return rf, rf, f"uncalibrated ({str(e)[:50]})"
 
 
 def add_mtts_to_splits(df_train, df_calib, df_test, threshold):
@@ -690,16 +695,25 @@ def train_model_with_rolling_window(df_base, thr_label, use_rate_cols, n_est, us
 # ================================================================
 def compute_rq1_validation(y_true, y_pred, y_prob):
     """Compute RQ1 validation metrics."""
+    # Handle edge case of all same class
+    n_classes = len(np.unique(y_true))
+    
     results = {
         'recall': recall_score(y_true, y_pred, zero_division=0),
         'precision': precision_score(y_true, y_pred, zero_division=0),
         'f1': f1_score(y_true, y_pred, zero_division=0),
         'accuracy': accuracy_score(y_true, y_pred),
+        'n_classes': n_classes,
     }
     
-    if len(np.unique(y_true)) > 1:
-        results['roc_auc'] = roc_auc_score(y_true, y_prob)
-        results['pr_auc'] = average_precision_score(y_true, y_prob)
+    # ROC and PR curves only work with both classes present
+    if n_classes > 1 and len(np.unique(y_prob)) > 1:
+        try:
+            results['roc_auc'] = roc_auc_score(y_true, y_prob)
+            results['pr_auc'] = average_precision_score(y_true, y_prob)
+        except ValueError:
+            results['roc_auc'] = None
+            results['pr_auc'] = None
     else:
         results['roc_auc'] = None
         results['pr_auc'] = None
@@ -831,6 +845,11 @@ def compute_spc_baseline_performance(df, threshold):
     # SPC uses ±3σ control limits
     mean_scrap = df['scrap_percent'].mean()
     std_scrap = df['scrap_percent'].std()
+    
+    # Handle edge case of zero std
+    if std_scrap == 0 or pd.isna(std_scrap):
+        std_scrap = 0.01  # Small non-zero value
+    
     ucl = mean_scrap + 3 * std_scrap
     lcl = max(0, mean_scrap - 3 * std_scrap)
     
@@ -1023,7 +1042,14 @@ with tab1:
         st.subheader("Validation Results Summary")
         
         # Compute model predictions on test set
-        y_prob = cal_model_base.predict_proba(X_test)[:, 1]
+        # Handle edge case where model only has one class
+        proba_output = cal_model_base.predict_proba(X_test)
+        if proba_output.shape[1] == 2:
+            y_prob = proba_output[:, 1]
+        else:
+            # Single class case - use the probability directly or default
+            y_prob = proba_output[:, 0] if proba_output.shape[1] == 1 else np.zeros(len(X_test))
+            st.warning("⚠️ Model may have insufficient class diversity in training data. Results may be limited.")
         y_pred = (y_prob >= 0.5).astype(int)
         
         # RQ1 Validation
@@ -1505,24 +1531,28 @@ with tab2:
 with tab3:
     st.header("📏 Model Performance Metrics")
     
-    # Compute metrics on test set
-    y_prob = cal_model_base.predict_proba(X_test)[:, 1]
-    y_pred = (y_prob >= 0.5).astype(int)
+    # Compute metrics on test set - handle single class edge case
+    proba_output_tab3 = cal_model_base.predict_proba(X_test)
+    if proba_output_tab3.shape[1] == 2:
+        y_prob_tab3 = proba_output_tab3[:, 1]
+    else:
+        y_prob_tab3 = proba_output_tab3[:, 0] if proba_output_tab3.shape[1] == 1 else np.zeros(len(X_test))
+    y_pred_tab3 = (y_prob_tab3 >= 0.5).astype(int)
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Test Accuracy", f"{accuracy_score(y_test, y_pred)*100:.1f}%")
+        st.metric("Test Accuracy", f"{accuracy_score(y_test, y_pred_tab3)*100:.1f}%")
     with col2:
-        st.metric("Test Recall", f"{recall_score(y_test, y_pred, zero_division=0)*100:.1f}%")
+        st.metric("Test Recall", f"{recall_score(y_test, y_pred_tab3, zero_division=0)*100:.1f}%")
     with col3:
-        st.metric("Test Precision", f"{precision_score(y_test, y_pred, zero_division=0)*100:.1f}%")
+        st.metric("Test Precision", f"{precision_score(y_test, y_pred_tab3, zero_division=0)*100:.1f}%")
     with col4:
-        st.metric("Test F1", f"{f1_score(y_test, y_pred, zero_division=0)*100:.1f}%")
+        st.metric("Test F1", f"{f1_score(y_test, y_pred_tab3, zero_division=0)*100:.1f}%")
     
     # Confusion matrix
     st.markdown("### Confusion Matrix")
-    cm = confusion_matrix(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred_tab3)
     
     fig = go.Figure(data=go.Heatmap(
         z=cm,
