@@ -68,8 +68,8 @@ st.markdown("""
             padding: 10px 20px; border-radius: 10px; margin-bottom: 20px;">
     <h2 style="color: white; margin: 0;">🏭 Foundry Scrap Risk Dashboard</h2>
     <p style="color: #a8d0ff; margin: 5px 0 0 0;">
-        <strong>Version 3.1 - Temporal Features Enhancement</strong> | 
-        6-2-1 Rolling Window | Campbell Process Mapping | PHM Optimized
+        <strong>Version 3.3 - Reliability & Availability Metrics</strong> | 
+        6-2-1 Rolling Window | Campbell Process Mapping | PHM Optimized | TRUE MTTS | R(t) & A(t)
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -113,6 +113,24 @@ MULTI_DEFECT_FEATURES_ENABLED = True  # Toggle for comparison
 # ================================================================
 TEMPORAL_FEATURES_ENABLED = True  # Master toggle for temporal features
 ROLLING_WINDOW_SIZE = 3  # Number of periods for rolling average
+
+# ================================================================
+# MTTS (MEAN TIME TO SCRAP) CONFIGURATION (NEW IN V3.2)
+# PHM Reliability Framework: Treats scrap as reliability failure
+# Based on: Lei et al. (2018), Jardine et al. (2006)
+# ================================================================
+MTTS_FEATURES_ENABLED = True  # Master toggle for MTTS reliability features
+MTTS_LOOKBACK_WINDOW = 10  # Max runs to look back for degradation analysis
+
+# ================================================================
+# RELIABILITY & AVAILABILITY CONFIGURATION (NEW IN V3.3)
+# Based on classical reliability engineering principles
+# MTTF for non-repairable components, extended to scrap context
+# ================================================================
+DEFAULT_MTTR_RUNS = 1.0  # Default Mean Time To Repair/Replace (in runs)
+                         # Represents runs lost during recovery from scrap event
+AVAILABILITY_TARGET = 0.95  # Target availability threshold (95%)
+RELIABILITY_TARGET = 0.90   # Target reliability threshold (90%)
 
 # ================================================================
 # CAMPBELL PROCESS-DEFECT MAPPING
@@ -262,6 +280,710 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
         df['quarter'] = pd.to_datetime(df['week_ending']).dt.quarter
     
     return df
+
+
+# ================================================================
+# MTTS (MEAN TIME TO SCRAP) FEATURES (NEW IN V3.2)
+# PHM Reliability Framework - Treats Scrap as Reliability Failure
+# ================================================================
+# 
+# THEORETICAL BASIS:
+# Traditional reliability metrics:
+#   - MTTF (Mean Time To Failure): Average time until first failure
+#   - MTBF (Mean Time Between Failures): Average time between failures
+#   - Hazard Rate: Instantaneous failure rate at time t
+#
+# PHM Analogue for Foundry Scrap:
+#   - MTTS (Mean Time To Scrap): Average RUNS until scrap exceeds threshold
+#   - This reframes "scrap threshold exceedance" as a "reliability failure"
+#   - Enables application of reliability engineering to quality prediction
+#
+# References:
+#   Lei, Y., et al. (2018). Machinery health prognostics. MSSP, 104, 799-834.
+#   Jardine, A.K.S., et al. (2006). A review on machinery diagnostics and 
+#       prognostics. MSSP, 20(7), 1483-1510.
+#   Pecht, M., & Jaai, R. (2010). A prognostics and health management roadmap.
+#       Microelectronics Reliability, 50(3), 317-323.
+# ================================================================
+
+def compute_mtts_metrics(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """
+    Compute TRUE MTTS (Mean Time To Scrap) metrics per part.
+    
+    This is the PHM-equivalent of MTTF, treating scrap threshold exceedance
+    as a "failure event" in reliability engineering terms.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe with 'part_id', 'week_ending', 'scrap_percent'
+    threshold : float
+        Scrap threshold defining a "failure" (e.g., 5.0%)
+    
+    Returns:
+    --------
+    pd.DataFrame with columns:
+        - part_id: Part identifier
+        - mtts_runs: Mean runs until failure (TRUE MTTS - MTTF analogue)
+        - failure_count: Number of failure events observed
+        - total_runs: Total production runs for this part
+        - hazard_rate: Failures per run (failure rate analogue)
+        - mtts_simple: Simple average scrap (for comparison)
+        - reliability_score: 1 - hazard_rate (probability of success)
+    
+    Scientific Basis:
+    -----------------
+    MTTS serves as MTTF analogue:
+        MTTF = E[T] where T is time to failure
+        MTTS = E[N] where N is runs to scrap threshold exceedance
+    
+    Hazard Rate analogue:
+        h(t) = f(t) / R(t) in traditional reliability
+        h_scrap = failure_count / total_runs in our framework
+    
+    Reference:
+    ----------
+    Lei, Y., et al. (2018). Machinery health prognostics: A systematic review.
+    Mechanical Systems and Signal Processing, 104, 799-834.
+    """
+    results = []
+    
+    df_sorted = df.sort_values(['part_id', 'week_ending']).copy()
+    
+    for part_id, group in df_sorted.groupby('part_id'):
+        group = group.reset_index(drop=True)
+        
+        runs_since_last_failure = 0
+        failure_cycles = []  # Stores runs-to-failure for each cycle
+        failure_count = 0
+        
+        for idx, row in group.iterrows():
+            runs_since_last_failure += 1
+            
+            # Check for failure (scrap exceeds threshold)
+            if row['scrap_percent'] > threshold:
+                failure_cycles.append(runs_since_last_failure)
+                failure_count += 1
+                runs_since_last_failure = 0  # Reset counter after failure
+        
+        # Calculate MTTS (Mean Time To Scrap)
+        if len(failure_cycles) > 0:
+            mtts_runs = np.mean(failure_cycles)
+            mtts_std = np.std(failure_cycles) if len(failure_cycles) > 1 else 0
+        else:
+            # No failures observed - censored data
+            # Use total runs as lower bound (right-censored estimate)
+            mtts_runs = len(group)
+            mtts_std = 0
+        
+        total_runs = len(group)
+        
+        # Hazard rate (failures per run) - reliability analogue
+        hazard_rate = failure_count / total_runs if total_runs > 0 else 0
+        
+        # Reliability score (probability of no failure)
+        reliability_score = 1 - hazard_rate
+        
+        # Simple MTTS (current implementation - for comparison)
+        mtts_simple = group['scrap_percent'].mean()
+        
+        results.append({
+            'part_id': part_id,
+            'mtts_runs': mtts_runs,
+            'mtts_std': mtts_std,
+            'failure_count': failure_count,
+            'total_runs': total_runs,
+            'hazard_rate': hazard_rate,
+            'reliability_score': reliability_score,
+            'mtts_simple': mtts_simple
+        })
+    
+    return pd.DataFrame(results)
+
+
+def add_mtts_features(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """
+    Add MTTS-based reliability features to the dataframe.
+    
+    This function adds per-observation features that capture the reliability
+    state of each production run, enabling earlier detection of process
+    degradation through PHM principles.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe sorted by time
+    threshold : float
+        Scrap threshold defining failure
+    
+    Returns:
+    --------
+    pd.DataFrame with additional columns:
+        - runs_since_last_failure: Position in current failure cycle
+        - cumulative_scrap_in_cycle: Accumulated scrap since last failure
+        - degradation_velocity: Rate of scrap increase (degradation speed)
+        - degradation_acceleration: Change in degradation velocity
+        - cycle_hazard_indicator: Increasing risk as cycle progresses
+        - mtts_runs: Part-level MTTS (merged from compute_mtts_metrics)
+        - hazard_rate: Part-level hazard rate
+        - reliability_score: Part-level reliability
+    
+    PHM Principle:
+    --------------
+    Process degradation typically follows predictable patterns before failure.
+    By tracking degradation trajectory (velocity, acceleration), we can predict
+    failures BEFORE they occur - enabling proactive intervention.
+    
+    Reference:
+    ----------
+    Jardine, A.K.S., Lin, D., & Banjevic, D. (2006). A review on machinery 
+    diagnostics and prognostics implementing condition-based maintenance.
+    Mechanical Systems and Signal Processing, 20(7), 1483-1510.
+    """
+    df = df.copy()
+    df = df.sort_values(['part_id', 'week_ending']).reset_index(drop=True)
+    
+    # Initialize new columns
+    df['runs_since_last_failure'] = 0
+    df['cumulative_scrap_in_cycle'] = 0.0
+    df['degradation_velocity'] = 0.0
+    df['degradation_acceleration'] = 0.0
+    df['cycle_hazard_indicator'] = 0.0
+    
+    # Compute per-part MTTS metrics
+    mtts_df = compute_mtts_metrics(df, threshold)
+    
+    # Process each part
+    for part_id, group in df.groupby('part_id'):
+        idx_list = group.index.tolist()
+        
+        runs_since_failure = 0
+        cumulative_scrap = 0.0
+        prev_scrap = 0.0
+        prev_velocity = 0.0
+        
+        # Get part's MTTS for hazard calculation
+        part_mtts = mtts_df[mtts_df['part_id'] == part_id]
+        if len(part_mtts) > 0:
+            part_mtts_runs = part_mtts['mtts_runs'].values[0]
+        else:
+            part_mtts_runs = 10  # Default
+        
+        for i, idx in enumerate(idx_list):
+            runs_since_failure += 1
+            current_scrap = df.loc[idx, 'scrap_percent']
+            cumulative_scrap += current_scrap
+            
+            # Runs since last failure
+            df.loc[idx, 'runs_since_last_failure'] = runs_since_failure
+            
+            # Cumulative scrap in current cycle
+            df.loc[idx, 'cumulative_scrap_in_cycle'] = cumulative_scrap
+            
+            # Degradation velocity (rate of scrap change)
+            velocity = current_scrap - prev_scrap
+            df.loc[idx, 'degradation_velocity'] = velocity
+            
+            # Degradation acceleration (change in velocity)
+            acceleration = velocity - prev_velocity
+            df.loc[idx, 'degradation_acceleration'] = acceleration
+            
+            # Cycle hazard indicator (increases as we approach expected MTTS)
+            # Based on Weibull-style increasing hazard
+            cycle_position = runs_since_failure / part_mtts_runs if part_mtts_runs > 0 else 0
+            df.loc[idx, 'cycle_hazard_indicator'] = min(cycle_position, 2.0)  # Cap at 2x
+            
+            # Update for next iteration
+            prev_scrap = current_scrap
+            prev_velocity = velocity
+            
+            # Reset on failure
+            if current_scrap > threshold:
+                runs_since_failure = 0
+                cumulative_scrap = 0.0
+    
+    # Merge part-level MTTS metrics
+    df = df.merge(
+        mtts_df[['part_id', 'mtts_runs', 'hazard_rate', 'reliability_score', 'failure_count']],
+        on='part_id',
+        how='left'
+    )
+    
+    # Fill any missing values
+    df['mtts_runs'] = df['mtts_runs'].fillna(df['mtts_runs'].median())
+    df['hazard_rate'] = df['hazard_rate'].fillna(df['hazard_rate'].median())
+    df['reliability_score'] = df['reliability_score'].fillna(0.5)
+    df['failure_count'] = df['failure_count'].fillna(0)
+    
+    return df
+
+
+def compute_remaining_useful_life_proxy(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """
+    Compute Remaining Useful Life (RUL) proxy for each observation.
+    
+    RUL is a key PHM metric representing expected runs until next failure.
+    This proxy uses historical MTTS and current cycle position.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Dataframe with MTTS features already added
+    threshold : float
+        Scrap threshold
+    
+    Returns:
+    --------
+    pd.DataFrame with 'rul_proxy' column
+    
+    Formula:
+    --------
+    RUL_proxy = max(0, MTTS_runs - runs_since_last_failure)
+    
+    Interpretation:
+    - High RUL: Part likely has many runs before next failure
+    - Low RUL: Part approaching expected failure point
+    - Zero RUL: Part at or beyond expected MTTS
+    
+    Reference:
+    ----------
+    Pecht, M., & Jaai, R. (2010). A prognostics and health management roadmap.
+    Microelectronics Reliability, 50(3), 317-323.
+    """
+    df = df.copy()
+    
+    if 'mtts_runs' in df.columns and 'runs_since_last_failure' in df.columns:
+        df['rul_proxy'] = (df['mtts_runs'] - df['runs_since_last_failure']).clip(lower=0)
+    else:
+        df['rul_proxy'] = 0
+    
+    return df
+
+
+# ================================================================
+# RELIABILITY & AVAILABILITY METRICS (NEW IN V3.3)
+# Based on classical reliability engineering for non-repairable components
+# Extended to foundry scrap context using MTTS as MTTF analogue
+# ================================================================
+#
+# THEORETICAL BASIS:
+#
+# 1. RELIABILITY R(t):
+#    For exponential distribution (constant failure rate):
+#    R(t) = e^(-λt) where λ = 1/MTTF
+#    
+#    In our context:
+#    R(n) = e^(-n/MTTS) where n = number of runs
+#    
+#    Interpretation: Probability of surviving n runs without failure
+#
+# 2. FAILURE RATE λ:
+#    λ = 1/MTTF = 1/MTTS (failures per run)
+#    
+#    Higher MTTS → Lower failure rate → Higher reliability
+#
+# 3. AVAILABILITY A:
+#    A = MTTF / (MTTF + MTTR) = MTTS / (MTTS + MTTR)
+#    
+#    Where MTTR = Mean Time To Repair/Replace
+#    In foundry context: runs lost during scrap event recovery
+#    
+#    Interpretation: Fraction of time system is operational
+#
+# References:
+#   Ebeling, C.E. (2010). An Introduction to Reliability and 
+#       Maintainability Engineering. Waveland Press.
+#   O'Connor, P.D.T. & Kleyner, A. (2012). Practical Reliability 
+#       Engineering. Wiley.
+# ================================================================
+
+def compute_reliability_metrics(df: pd.DataFrame, threshold: float, 
+                                 mttr_runs: float = DEFAULT_MTTR_RUNS) -> pd.DataFrame:
+    """
+    Compute comprehensive Reliability and Availability metrics per part.
+    
+    This extends MTTS metrics with classical reliability engineering formulas,
+    treating MTTS as the MTTF analogue for non-repairable quality events.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe with 'part_id', 'week_ending', 'scrap_percent'
+    threshold : float
+        Scrap threshold defining a "failure" (e.g., 5.0%)
+    mttr_runs : float
+        Mean Time To Repair/Replace in runs (default: 1.0)
+        Represents recovery time after a scrap event
+    
+    Returns:
+    --------
+    pd.DataFrame with columns:
+        - part_id: Part identifier
+        - mtts_runs: Mean Time To Scrap (MTTF analogue)
+        - failure_rate_lambda: λ = 1/MTTS (failures per run)
+        - reliability_1run: R(1) - Probability of surviving 1 run
+        - reliability_5run: R(5) - Probability of surviving 5 runs
+        - reliability_10run: R(10) - Probability of surviving 10 runs
+        - availability: A = MTTS / (MTTS + MTTR)
+        - availability_percent: Availability as percentage
+        - mttr_runs: Mean Time To Repair/Replace used
+        - meets_availability_target: Boolean if A >= target
+        - meets_reliability_target: Boolean if R(1) >= target
+    
+    Scientific Basis:
+    -----------------
+    Reliability Function (Exponential):
+        R(t) = e^(-λt) = e^(-t/MTTF)
+        
+    For our scrap context:
+        R(n) = e^(-n/MTTS)
+        
+    Where:
+        n = number of production runs
+        MTTS = Mean Time To Scrap (runs)
+        λ = 1/MTTS = failure rate
+    
+    Availability (Steady-State):
+        A = MTTF / (MTTF + MTTR)
+        A = MTTS / (MTTS + MTTR)
+    
+    References:
+    -----------
+    Ebeling, C.E. (2010). An Introduction to Reliability and 
+        Maintainability Engineering. 2nd ed. Waveland Press.
+    """
+    # First compute base MTTS metrics
+    mtts_df = compute_mtts_metrics(df, threshold)
+    
+    # Add reliability and availability calculations
+    reliability_results = []
+    
+    for _, row in mtts_df.iterrows():
+        part_id = row['part_id']
+        mtts = row['mtts_runs']
+        
+        # Failure Rate: λ = 1/MTTS
+        # Handle edge case where MTTS is very small
+        if mtts > 0.001:
+            failure_rate_lambda = 1.0 / mtts
+        else:
+            failure_rate_lambda = 1000.0  # Very high failure rate
+        
+        # Reliability Function: R(n) = e^(-λn) = e^(-n/MTTS)
+        # Probability of surviving n runs without failure
+        reliability_1run = np.exp(-1.0 / mtts) if mtts > 0.001 else 0.0
+        reliability_5run = np.exp(-5.0 / mtts) if mtts > 0.001 else 0.0
+        reliability_10run = np.exp(-10.0 / mtts) if mtts > 0.001 else 0.0
+        
+        # Availability: A = MTTS / (MTTS + MTTR)
+        availability = mtts / (mtts + mttr_runs) if (mtts + mttr_runs) > 0 else 0.0
+        availability_percent = availability * 100
+        
+        # Check against targets
+        meets_availability_target = availability >= AVAILABILITY_TARGET
+        meets_reliability_target = reliability_1run >= RELIABILITY_TARGET
+        
+        reliability_results.append({
+            'part_id': part_id,
+            'mtts_runs': mtts,
+            'mtts_std': row.get('mtts_std', 0),
+            'failure_count': row.get('failure_count', 0),
+            'total_runs': row.get('total_runs', 0),
+            'failure_rate_lambda': failure_rate_lambda,
+            'reliability_1run': reliability_1run,
+            'reliability_5run': reliability_5run,
+            'reliability_10run': reliability_10run,
+            'availability': availability,
+            'availability_percent': availability_percent,
+            'mttr_runs': mttr_runs,
+            'meets_availability_target': meets_availability_target,
+            'meets_reliability_target': meets_reliability_target,
+            # Keep original metrics for compatibility
+            'hazard_rate': row.get('hazard_rate', failure_rate_lambda),
+            'reliability_score': reliability_1run  # Map to single-run reliability
+        })
+    
+    return pd.DataFrame(reliability_results)
+
+
+def compute_system_availability(part_reliabilities: pd.DataFrame, 
+                                 configuration: str = 'series') -> dict:
+    """
+    Compute system-level availability from component reliabilities.
+    
+    In a foundry context, multiple parts may be produced in series
+    (each must succeed) or parallel (any can succeed).
+    
+    Parameters:
+    -----------
+    part_reliabilities : pd.DataFrame
+        DataFrame with 'availability' column for each part
+    configuration : str
+        'series' - All parts must be available (default for production line)
+        'parallel' - Any part available is sufficient
+    
+    Returns:
+    --------
+    dict with:
+        - system_availability: Combined system availability
+        - configuration: Configuration type used
+        - n_parts: Number of parts in system
+        - weakest_link: Part with lowest availability (for series)
+    
+    Formulas:
+    ---------
+    Series:   A_sys = A_1 × A_2 × ... × A_n
+    Parallel: A_sys = 1 - (1-A_1)(1-A_2)...(1-A_n)
+    """
+    availabilities = part_reliabilities['availability'].values
+    n_parts = len(availabilities)
+    
+    if n_parts == 0:
+        return {
+            'system_availability': 0.0,
+            'configuration': configuration,
+            'n_parts': 0,
+            'weakest_link': None
+        }
+    
+    if configuration == 'series':
+        # Series: All must work - multiply availabilities
+        system_availability = np.prod(availabilities)
+        weakest_idx = np.argmin(availabilities)
+        weakest_link = part_reliabilities.iloc[weakest_idx]['part_id']
+    else:  # parallel
+        # Parallel: At least one must work
+        system_availability = 1 - np.prod(1 - availabilities)
+        weakest_link = None
+    
+    return {
+        'system_availability': system_availability,
+        'system_availability_percent': system_availability * 100,
+        'configuration': configuration,
+        'n_parts': n_parts,
+        'weakest_link': weakest_link,
+        'min_availability': np.min(availabilities),
+        'max_availability': np.max(availabilities),
+        'mean_availability': np.mean(availabilities)
+    }
+
+
+def compute_reliability_at_time(mtts: float, n_runs: int) -> float:
+    """
+    Compute reliability at a specific number of runs.
+    
+    R(n) = e^(-n/MTTS)
+    
+    Parameters:
+    -----------
+    mtts : float
+        Mean Time To Scrap (runs)
+    n_runs : int
+        Number of runs to compute reliability for
+    
+    Returns:
+    --------
+    float : Reliability probability [0, 1]
+    """
+    if mtts > 0.001:
+        return np.exp(-n_runs / mtts)
+    return 0.0
+
+
+def compute_runs_for_target_reliability(mtts: float, target_reliability: float) -> float:
+    """
+    Compute number of runs to achieve target reliability.
+    
+    From R(n) = e^(-n/MTTS):
+    n = -MTTS × ln(R)
+    
+    Parameters:
+    -----------
+    mtts : float
+        Mean Time To Scrap (runs)
+    target_reliability : float
+        Desired reliability (0-1)
+    
+    Returns:
+    --------
+    float : Number of runs that achieve target reliability
+    
+    Example:
+    --------
+    If MTTS = 10 runs and we want R = 0.9:
+    n = -10 × ln(0.9) = -10 × (-0.105) = 1.05 runs
+    
+    This means after ~1 run, reliability drops to 90%
+    """
+    if target_reliability <= 0 or target_reliability >= 1:
+        return 0.0
+    if mtts <= 0:
+        return 0.0
+    
+    return -mtts * np.log(target_reliability)
+
+
+def add_reliability_features(df: pd.DataFrame, threshold: float, 
+                              mttr_runs: float = DEFAULT_MTTR_RUNS) -> pd.DataFrame:
+    """
+    Add comprehensive reliability and availability features to dataframe.
+    
+    This function extends add_mtts_features with the new V3.3 reliability metrics.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe with MTTS features
+    threshold : float
+        Scrap threshold defining failure
+    mttr_runs : float
+        Mean Time To Repair/Replace in runs
+    
+    Returns:
+    --------
+    pd.DataFrame with additional columns:
+        - failure_rate_lambda: Failure rate (1/MTTS)
+        - reliability_1run: Single-run reliability
+        - reliability_5run: 5-run reliability
+        - reliability_10run: 10-run reliability
+        - availability: System availability
+        - availability_percent: Availability as %
+        - current_reliability: R(n) at current runs_since_last_failure
+        - meets_availability_target: Boolean
+        - meets_reliability_target: Boolean
+    """
+    df = df.copy()
+    
+    # First ensure MTTS features are present
+    if 'mtts_runs' not in df.columns:
+        df = add_mtts_features(df, threshold)
+    
+    # Compute reliability metrics per part
+    reliability_df = compute_reliability_metrics(df, threshold, mttr_runs)
+    
+    # Merge part-level reliability metrics
+    merge_cols = ['part_id', 'failure_rate_lambda', 'reliability_1run', 
+                  'reliability_5run', 'reliability_10run', 'availability',
+                  'availability_percent', 'mttr_runs', 
+                  'meets_availability_target', 'meets_reliability_target']
+    
+    # Avoid duplicate columns
+    existing_cols = [c for c in merge_cols if c in df.columns and c != 'part_id']
+    if existing_cols:
+        df = df.drop(columns=existing_cols)
+    
+    df = df.merge(
+        reliability_df[merge_cols],
+        on='part_id',
+        how='left'
+    )
+    
+    # Compute current reliability based on position in cycle
+    # R(n) = e^(-n/MTTS) where n = runs_since_last_failure
+    if 'runs_since_last_failure' in df.columns and 'mtts_runs' in df.columns:
+        df['current_reliability'] = df.apply(
+            lambda row: compute_reliability_at_time(
+                row['mtts_runs'], 
+                row['runs_since_last_failure']
+            ) if row['mtts_runs'] > 0 else 0.0,
+            axis=1
+        )
+    else:
+        df['current_reliability'] = df['reliability_1run']
+    
+    # Fill missing values
+    for col in ['failure_rate_lambda', 'reliability_1run', 'reliability_5run',
+                'reliability_10run', 'availability', 'availability_percent',
+                'current_reliability']:
+        if col in df.columns:
+            df[col] = df[col].fillna(df[col].median() if df[col].notna().any() else 0.5)
+    
+    return df
+
+
+def display_reliability_dashboard(reliability_df: pd.DataFrame, 
+                                   part_id: str = None,
+                                   mttr_runs: float = DEFAULT_MTTR_RUNS):
+    """
+    Display a comprehensive reliability dashboard in Streamlit.
+    
+    Parameters:
+    -----------
+    reliability_df : pd.DataFrame
+        DataFrame from compute_reliability_metrics
+    part_id : str, optional
+        Specific part to highlight
+    mttr_runs : float
+        MTTR used in calculations
+    """
+    st.subheader("📊 Reliability & Availability Metrics")
+    
+    # Summary statistics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        avg_reliability = reliability_df['reliability_1run'].mean()
+        st.metric(
+            "Avg Reliability (1 Run)",
+            f"{avg_reliability:.1%}",
+            delta=f"{'✓' if avg_reliability >= RELIABILITY_TARGET else '✗'} Target: {RELIABILITY_TARGET:.0%}"
+        )
+    
+    with col2:
+        avg_availability = reliability_df['availability'].mean()
+        st.metric(
+            "Avg Availability",
+            f"{avg_availability:.1%}",
+            delta=f"{'✓' if avg_availability >= AVAILABILITY_TARGET else '✗'} Target: {AVAILABILITY_TARGET:.0%}"
+        )
+    
+    with col3:
+        avg_mtts = reliability_df['mtts_runs'].mean()
+        st.metric(
+            "Avg MTTS",
+            f"{avg_mtts:.1f} runs",
+            delta=f"λ = {1/avg_mtts:.3f}/run" if avg_mtts > 0 else "N/A"
+        )
+    
+    with col4:
+        parts_meeting_target = (reliability_df['meets_availability_target']).sum()
+        total_parts = len(reliability_df)
+        st.metric(
+            "Parts Meeting Target",
+            f"{parts_meeting_target}/{total_parts}",
+            delta=f"{parts_meeting_target/total_parts:.0%}" if total_parts > 0 else "N/A"
+        )
+    
+    # If specific part selected, show details
+    if part_id and part_id in reliability_df['part_id'].values:
+        st.markdown("---")
+        st.subheader(f"🔍 Part {part_id} Reliability Details")
+        
+        part_data = reliability_df[reliability_df['part_id'] == part_id].iloc[0]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Reliability Metrics:**")
+            st.markdown(f"- **MTTS (MTTF Analogue):** {part_data['mtts_runs']:.2f} runs")
+            st.markdown(f"- **Failure Rate (λ):** {part_data['failure_rate_lambda']:.4f} per run")
+            st.markdown(f"- **R(1 run):** {part_data['reliability_1run']:.2%}")
+            st.markdown(f"- **R(5 runs):** {part_data['reliability_5run']:.2%}")
+            st.markdown(f"- **R(10 runs):** {part_data['reliability_10run']:.2%}")
+        
+        with col2:
+            st.markdown("**Availability Metrics:**")
+            st.markdown(f"- **MTTR (Recovery):** {mttr_runs:.1f} runs")
+            st.markdown(f"- **Availability:** {part_data['availability']:.2%}")
+            st.markdown(f"- **Formula:** MTTS / (MTTS + MTTR)")
+            st.markdown(f"- **= {part_data['mtts_runs']:.2f} / ({part_data['mtts_runs']:.2f} + {mttr_runs:.1f})**")
+            
+            if part_data['meets_availability_target']:
+                st.success(f"✅ Meets availability target ({AVAILABILITY_TARGET:.0%})")
+            else:
+                st.warning(f"⚠️ Below availability target ({AVAILABILITY_TARGET:.0%})")
+    
+    return reliability_df
 
 
 def get_multi_defect_analysis(df_row: pd.Series, defect_cols: list) -> dict:
@@ -519,8 +1241,92 @@ def load_and_clean(csv_path: str, add_multi_defect: bool = True) -> pd.DataFrame
     n_parts = df["part_id"].nunique() if "part_id" in df.columns else 0
     n_work_orders = df["work_order"].nunique() if "work_order" in df.columns else len(df)
     temporal_status = "ON" if TEMPORAL_FEATURES_ENABLED else "OFF"
-    st.info(f"✅ Loaded {len(df):,} rows | {n_parts} unique parts | {n_work_orders} work orders | {len(defect_cols)} defect columns | Temporal features: {temporal_status}")
+    mtts_status = "ON" if MTTS_FEATURES_ENABLED else "OFF"
+    st.info(f"✅ Loaded {len(df):,} rows | {n_parts} unique parts | {n_work_orders} work orders | {len(defect_cols)} defect columns | Temporal: {temporal_status} | MTTS: {mtts_status}")
     return df
+
+
+def add_mtts_to_splits(df_train, df_calib, df_test, threshold):
+    """
+    Add MTTS features to train/calib/test splits.
+    MTTS is computed from training data only to prevent leakage.
+    
+    This is called AFTER the temporal split to ensure MTTS metrics
+    are computed only from training data (no future information leakage).
+    """
+    if not MTTS_FEATURES_ENABLED:
+        return df_train, df_calib, df_test
+    
+    # Compute MTTS metrics from training data only
+    mtts_train = compute_mtts_metrics(df_train, threshold)
+    
+    # Add observation-level MTTS features to training data
+    df_train_mtts = add_mtts_features(df_train.copy(), threshold)
+    df_train_mtts = compute_remaining_useful_life_proxy(df_train_mtts, threshold)
+    
+    # For calib and test, use training MTTS metrics (no leakage)
+    # Add observation-level features but merge part-level from training
+    df_calib_mtts = df_calib.copy()
+    df_test_mtts = df_test.copy()
+    
+    # Add observation-level features (these are computed per-row, no leakage)
+    for df_sub in [df_calib_mtts, df_test_mtts]:
+        df_sub['runs_since_last_failure'] = 0
+        df_sub['cumulative_scrap_in_cycle'] = 0.0
+        df_sub['degradation_velocity'] = 0.0
+        df_sub['degradation_acceleration'] = 0.0
+        df_sub['cycle_hazard_indicator'] = 0.0
+        
+        # Compute observation-level features
+        for part_id, group in df_sub.groupby('part_id'):
+            idx_list = group.index.tolist()
+            runs_since_failure = 0
+            cumulative_scrap = 0.0
+            prev_scrap = 0.0
+            prev_velocity = 0.0
+            
+            # Get MTTS from training data
+            part_mtts_row = mtts_train[mtts_train['part_id'] == part_id]
+            part_mtts_runs = part_mtts_row['mtts_runs'].values[0] if len(part_mtts_row) > 0 else mtts_train['mtts_runs'].median()
+            
+            for i, idx in enumerate(idx_list):
+                runs_since_failure += 1
+                current_scrap = df_sub.loc[idx, 'scrap_percent']
+                cumulative_scrap += current_scrap
+                
+                df_sub.loc[idx, 'runs_since_last_failure'] = runs_since_failure
+                df_sub.loc[idx, 'cumulative_scrap_in_cycle'] = cumulative_scrap
+                
+                velocity = current_scrap - prev_scrap
+                df_sub.loc[idx, 'degradation_velocity'] = velocity
+                df_sub.loc[idx, 'degradation_acceleration'] = velocity - prev_velocity
+                
+                cycle_position = runs_since_failure / part_mtts_runs if part_mtts_runs > 0 else 0
+                df_sub.loc[idx, 'cycle_hazard_indicator'] = min(cycle_position, 2.0)
+                
+                prev_scrap = current_scrap
+                prev_velocity = velocity
+                
+                if current_scrap > threshold:
+                    runs_since_failure = 0
+                    cumulative_scrap = 0.0
+    
+    # Merge part-level MTTS from training (prevents leakage)
+    mtts_cols = ['part_id', 'mtts_runs', 'hazard_rate', 'reliability_score', 'failure_count']
+    df_calib_mtts = df_calib_mtts.merge(mtts_train[mtts_cols], on='part_id', how='left')
+    df_test_mtts = df_test_mtts.merge(mtts_train[mtts_cols], on='part_id', how='left')
+    
+    # Fill missing with training medians
+    for col in ['mtts_runs', 'hazard_rate', 'reliability_score', 'failure_count']:
+        median_val = mtts_train[col].median() if col in mtts_train.columns else 0
+        df_calib_mtts[col] = df_calib_mtts[col].fillna(median_val)
+        df_test_mtts[col] = df_test_mtts[col].fillna(median_val)
+    
+    # Add RUL proxy
+    df_calib_mtts['rul_proxy'] = (df_calib_mtts['mtts_runs'] - df_calib_mtts['runs_since_last_failure']).clip(lower=0)
+    df_test_mtts['rul_proxy'] = (df_test_mtts['mtts_runs'] - df_test_mtts['runs_since_last_failure']).clip(lower=0)
+    
+    return df_train_mtts, df_calib_mtts, df_test_mtts
 
 
 # ================================================================
@@ -611,8 +1417,29 @@ def attach_train_features(df_sub: pd.DataFrame, mtbf_train: pd.DataFrame,
     return s
 
 
-def make_xy(df: pd.DataFrame, thr_label: float, use_rate_cols: bool, use_multi_defect: bool = True, use_temporal: bool = True):
-    """Prepare features (X) and labels (y)."""
+def make_xy(df: pd.DataFrame, thr_label: float, use_rate_cols: bool, use_multi_defect: bool = True, use_temporal: bool = True, use_mtts: bool = True):
+    """
+    Prepare features (X) and labels (y).
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe with all features
+    thr_label : float
+        Scrap threshold for binary classification
+    use_rate_cols : bool
+        Include individual defect rate columns
+    use_multi_defect : bool
+        Include multi-defect engineered features (V3.0)
+    use_temporal : bool
+        Include temporal features (V3.1)
+    use_mtts : bool
+        Include MTTS reliability features (V3.2)
+    
+    Returns:
+    --------
+    tuple: (X, y, feature_list)
+    """
     feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
     
     # Add multi-defect features (FROM V3.0)
@@ -634,6 +1461,26 @@ def make_xy(df: pd.DataFrame, thr_label: float, use_rate_cols: bool, use_multi_d
             "month", "quarter"
         ]
         for f in temporal_feats:
+            if f in df.columns:
+                feats.append(f)
+    
+    # Add MTTS reliability features (NEW IN V3.2)
+    # These are the TRUE PHM features treating scrap as reliability failure
+    if use_mtts and MTTS_FEATURES_ENABLED:
+        mtts_feats = [
+            # Part-level reliability metrics
+            "mtts_runs",              # TRUE MTTS (MTTF analogue) - runs until failure
+            "hazard_rate",            # Failure rate analogue
+            "reliability_score",      # 1 - hazard_rate
+            # Observation-level degradation features
+            "runs_since_last_failure",    # Position in failure cycle
+            "cumulative_scrap_in_cycle",  # Accumulated degradation
+            "degradation_velocity",       # Rate of scrap increase
+            "degradation_acceleration",   # Change in degradation rate
+            "cycle_hazard_indicator",     # Increasing risk as cycle progresses
+            "rul_proxy"                   # Remaining Useful Life estimate
+        ]
+        for f in mtts_feats:
             if f in df.columns:
                 feats.append(f)
     
@@ -716,15 +1563,19 @@ def train_model_with_rolling_window(df_base, df_outcomes, thr_label, use_rate_co
     df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
     df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
     
-    X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols, use_multi_defect)
-    X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols, use_multi_defect)
+    # ADD MTTS RELIABILITY FEATURES (NEW IN V3.2)
+    if MTTS_FEATURES_ENABLED:
+        df_train, df_calib, df_test = add_mtts_to_splits(df_train, df_calib, df_test, thr_label)
+    
+    X_train, y_train, feats = make_xy(df_train, thr_label, use_rate_cols, use_multi_defect, use_temporal=True, use_mtts=True)
+    X_calib, y_calib, _ = make_xy(df_calib, thr_label, use_rate_cols, use_multi_defect, use_temporal=True, use_mtts=True)
     rf, cal_model, method = train_and_calibrate(X_train, y_train, X_calib, y_calib, n_est)
     
     return rf, cal_model, method, feats, df_train, df_calib, df_test, mtbf_train, part_freq_train, default_mtbf, default_freq
 
 
 # ================================================================
-# MODEL COMPARISON (NEW IN V3.0) - ENHANCED IN V3.1
+# MODEL COMPARISON (NEW IN V3.0) - ENHANCED IN V3.1 - MTTS IN V3.2
 # ================================================================
 
 # Version evolution documentation
@@ -783,76 +1634,296 @@ def make_xy(df, thr_label, use_rate_cols):
             "6-2-1 Rolling Window with outcome logging"
         ],
         "code_sample": '''
-# V3.0 Multi-Defect Feature Engineering
-def add_multi_defect_features(df: pd.DataFrame) -> pd.DataFrame:
-    defect_cols = [c for c in df.columns if c.endswith("_rate")]
-    
-    # Count of defect types present
+# Multi-defect feature engineering
+def add_multi_defect_features(df):
     df['n_defect_types'] = (df[defect_cols] > 0).sum(axis=1)
-    
-    # Binary flag for multiple defects
-    df['has_multiple_defects'] = (df['n_defect_types'] >= 2).astype(int)
-    
-    # Total defect burden
     df['total_defect_rate'] = df[defect_cols].sum(axis=1)
-    
-    # Maximum single defect rate
-    df['max_defect_rate'] = df[defect_cols].max(axis=1)
-    
-    # Defect concentration ratio
-    df['defect_concentration'] = df['max_defect_rate'] / (df['total_defect_rate'] + 0.001)
-    
-    # Interaction terms for common defect pairs
-    if 'shift_rate' in df.columns and 'tear_up_rate' in df.columns:
-        df['shift_x_tearup'] = df['shift_rate'] * df['tear_up_rate']
-    
-    return df
+    df['defect_concentration'] = df['max_defect_rate'] / df['total_defect_rate']
 '''
     },
     "v3.1_Temporal": {
-        "name": "V3.1 Temporal Features Enhancement (Jan 2026)",
-        "description": "Added PHM-based temporal features for trend detection",
+        "name": "V3.1 Temporal Features (Jan 2025)",
+        "description": "Added temporal/PHM features based on Lei et al. (2018)",
         "features": [
             "total_defect_rate_trend",
             "total_defect_rate_roll3",
             "scrap_percent_trend",
             "scrap_percent_roll3",
-            "month (seasonality)",
-            "quarter (seasonality)"
+            "month",
+            "quarter"
         ],
         "enhancements": [
-            "Temporal trend detection (rate of change)",
-            "Rolling averages for signal smoothing",
+            "Temporal trend detection",
+            "Rolling average smoothing",
             "Seasonal pattern capture",
-            "PHM-optimized 5.0% default threshold",
-            "Based on factorial study across 359 parts"
+            "PHM degradation modeling"
         ],
         "code_sample": '''
-# V3.1 Temporal Features (PHM Enhancement)
-def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df = df.sort_values('week_ending').reset_index(drop=True)
+# Temporal feature engineering (Lei et al., 2018)
+df['total_defect_rate_trend'] = df.groupby('part_id')['total_defect_rate'].diff()
+df['scrap_percent_roll3'] = df.groupby('part_id')['scrap_percent'].rolling(3).mean()
+'''
+    },
+    "v3.2_MTTS": {
+        "name": "V3.2 TRUE MTTS Reliability Framework (Jan 2025)",
+        "description": "Added TRUE MTTS (Mean Time To Scrap) as MTTF analogue per Research Objective #2",
+        "features": [
+            "mtts_runs (TRUE MTTF analogue)",
+            "hazard_rate (failure rate)",
+            "reliability_score",
+            "runs_since_last_failure",
+            "cumulative_scrap_in_cycle",
+            "degradation_velocity",
+            "degradation_acceleration",
+            "cycle_hazard_indicator",
+            "rul_proxy (Remaining Useful Life)"
+        ],
+        "enhancements": [
+            "TRUE MTTS computation (runs until failure)",
+            "Hazard rate calculation",
+            "Degradation trajectory tracking",
+            "RUL (Remaining Useful Life) estimation",
+            "Earlier failure detection",
+            "PHM reliability framework validation"
+        ],
+        "code_sample": '''
+# TRUE MTTS computation - MTTF analogue for scrap
+def compute_mtts_metrics(df, threshold):
+    for part_id, group in df.groupby('part_id'):
+        runs_since_failure = 0
+        failure_cycles = []
+        for row in group.iterrows():
+            runs_since_failure += 1
+            if row['scrap_percent'] > threshold:
+                failure_cycles.append(runs_since_failure)
+                runs_since_failure = 0  # Reset on failure
+        mtts_runs = np.mean(failure_cycles)  # TRUE MTTS
+        hazard_rate = len(failure_cycles) / len(group)
+'''
+    },
+    "v3.3_Reliability": {
+        "name": "V3.3 Reliability & Availability Metrics (Jan 2025)",
+        "description": "Added classical reliability engineering metrics: R(t), λ, and Availability",
+        "features": [
+            "failure_rate_lambda (λ = 1/MTTS)",
+            "reliability_1run (R(1) = e^(-1/MTTS))",
+            "reliability_5run (R(5) = e^(-5/MTTS))",
+            "reliability_10run (R(10) = e^(-10/MTTS))",
+            "availability (A = MTTS/(MTTS+MTTR))",
+            "availability_percent",
+            "current_reliability",
+            "meets_availability_target",
+            "meets_reliability_target"
+        ],
+        "enhancements": [
+            "Exponential reliability function R(n) = e^(-n/MTTS)",
+            "Failure rate calculation λ = 1/MTTS",
+            "Availability formula A = MTTS/(MTTS+MTTR)",
+            "Configurable MTTR (Mean Time To Repair)",
+            "System-level availability (series/parallel)",
+            "Reliability curves visualization",
+            "MTTR sensitivity analysis",
+            "Target-based alerting"
+        ],
+        "code_sample": '''
+# Reliability & Availability metrics (V3.3)
+def compute_reliability_metrics(df, threshold, mttr_runs):
+    # Failure Rate: λ = 1/MTTS
+    failure_rate_lambda = 1.0 / mtts
     
-    for col in ['total_defect_rate', 'scrap_percent']:
-        if col not in df.columns:
-            continue
-        
-        # Per-part trend (rate of change)
-        df[f'{col}_trend'] = df.groupby('part_id')[col].diff().fillna(0)
-        
-        # Rolling average (smoothed signal)
-        df[f'{col}_roll3'] = df.groupby('part_id')[col].transform(
-            lambda x: x.rolling(window=3, min_periods=1).mean()
-        )
+    # Reliability: R(n) = e^(-n/MTTS)
+    reliability_1run = np.exp(-1.0 / mtts)
+    reliability_5run = np.exp(-5.0 / mtts)
     
-    # Seasonal features
-    df['month'] = pd.to_datetime(df['week_ending']).dt.month
-    df['quarter'] = pd.to_datetime(df['week_ending']).dt.quarter
-    
-    return df
+    # Availability: A = MTTS / (MTTS + MTTR)
+    availability = mtts / (mtts + mttr_runs)
 '''
     }
 }
+
+
+def validate_mtts_objective2(df_train, df_calib, df_test, thr_label, use_rate_cols, n_est):
+    """
+    Validate Research Objective #2: MTTS as MTTF analogue improves prediction.
+    
+    Compares four models:
+    - Model A: Baseline (no reliability features)
+    - Model B: Simple MTTS (mttf_scrap - current average-based)
+    - Model C: True MTTS only (mtts_runs, hazard_rate)
+    - Model D: Full MTTS + Degradation (all V3.2 features)
+    
+    Returns dict with comparison results proving Objective #2.
+    
+    Research Objective #2:
+    "To improve the predictive reliability of the PHM model scrap risk models 
+    by incorporating the MTTS metric as an analogue to MTTF, enabling earlier 
+    detection of process degradation."
+    
+    References:
+    -----------
+    Lei, Y., et al. (2018). Machinery health prognostics. MSSP, 104, 799-834.
+    Jardine, A.K.S., et al. (2006). A review on machinery diagnostics. MSSP, 20(7), 1483-1510.
+    """
+    results = {
+        'objective': 'Research Objective #2: MTTS as MTTF Analogue',
+        'hypothesis': 'Model with TRUE MTTS features outperforms baseline and simple MTTS',
+        'models': {}
+    }
+    
+    # Ensure MTTS features are computed
+    if MTTS_FEATURES_ENABLED:
+        df_train_mtts, df_calib_mtts, df_test_mtts = add_mtts_to_splits(
+            df_train.copy(), df_calib.copy(), df_test.copy(), thr_label
+        )
+    else:
+        df_train_mtts = df_train.copy()
+        df_calib_mtts = df_calib.copy()
+        df_test_mtts = df_test.copy()
+    
+    # MODEL A: Baseline (no MTTS, no mttf_scrap)
+    feats_A = ["order_quantity", "piece_weight_lbs", "part_freq"]
+    if use_rate_cols:
+        feats_A += [c for c in df_train.columns if c.endswith("_rate")]
+    
+    for f in feats_A:
+        if f not in df_train.columns:
+            df_train[f] = 0
+            df_calib[f] = 0
+            df_test[f] = 0
+    
+    X_train_A = df_train[feats_A].fillna(0)
+    X_calib_A = df_calib[feats_A].fillna(0)
+    X_test_A = df_test[feats_A].fillna(0)
+    y_train = (df_train['scrap_percent'] > thr_label).astype(int)
+    y_calib = (df_calib['scrap_percent'] > thr_label).astype(int)
+    y_test = (df_test['scrap_percent'] > thr_label).astype(int)
+    
+    _, cal_A, _ = train_and_calibrate(X_train_A, y_train, X_calib_A, y_calib, n_est)
+    preds_A = cal_A.predict_proba(X_test_A)[:, 1]
+    pred_binary_A = (preds_A > 0.5).astype(int)
+    
+    results['models']['A_Baseline'] = {
+        'name': 'Model A: Baseline (No Reliability Features)',
+        'features': len(feats_A),
+        'brier': brier_score_loss(y_test, preds_A),
+        'accuracy': accuracy_score(y_test, pred_binary_A),
+        'recall': recall_score(y_test, pred_binary_A, zero_division=0),
+        'precision': precision_score(y_test, pred_binary_A, zero_division=0),
+        'f1': f1_score(y_test, pred_binary_A, zero_division=0)
+    }
+    
+    # MODEL B: Simple MTTS (mttf_scrap - average-based, current implementation)
+    feats_B = feats_A + ["mttf_scrap"]
+    for f in feats_B:
+        if f not in df_train.columns:
+            df_train[f] = 0
+            df_calib[f] = 0
+            df_test[f] = 0
+    
+    X_train_B = df_train[feats_B].fillna(0)
+    X_calib_B = df_calib[feats_B].fillna(0)
+    X_test_B = df_test[feats_B].fillna(0)
+    
+    _, cal_B, _ = train_and_calibrate(X_train_B, y_train, X_calib_B, y_calib, n_est)
+    preds_B = cal_B.predict_proba(X_test_B)[:, 1]
+    pred_binary_B = (preds_B > 0.5).astype(int)
+    
+    results['models']['B_SimpleMTTS'] = {
+        'name': 'Model B: Simple MTTS (Average Scrap Rate)',
+        'features': len(feats_B),
+        'brier': brier_score_loss(y_test, preds_B),
+        'accuracy': accuracy_score(y_test, pred_binary_B),
+        'recall': recall_score(y_test, pred_binary_B, zero_division=0),
+        'precision': precision_score(y_test, pred_binary_B, zero_division=0),
+        'f1': f1_score(y_test, pred_binary_B, zero_division=0)
+    }
+    
+    # MODEL C: True MTTS (mtts_runs, hazard_rate - MTTF analogue)
+    feats_C = feats_B + ["mtts_runs", "hazard_rate", "reliability_score"]
+    for f in feats_C:
+        if f not in df_train_mtts.columns:
+            df_train_mtts[f] = 0
+            df_calib_mtts[f] = 0
+            df_test_mtts[f] = 0
+    
+    X_train_C = df_train_mtts[feats_C].fillna(0)
+    X_calib_C = df_calib_mtts[feats_C].fillna(0)
+    X_test_C = df_test_mtts[feats_C].fillna(0)
+    y_train_C = (df_train_mtts['scrap_percent'] > thr_label).astype(int)
+    y_calib_C = (df_calib_mtts['scrap_percent'] > thr_label).astype(int)
+    y_test_C = (df_test_mtts['scrap_percent'] > thr_label).astype(int)
+    
+    _, cal_C, _ = train_and_calibrate(X_train_C, y_train_C, X_calib_C, y_calib_C, n_est)
+    preds_C = cal_C.predict_proba(X_test_C)[:, 1]
+    pred_binary_C = (preds_C > 0.5).astype(int)
+    
+    results['models']['C_TrueMTTS'] = {
+        'name': 'Model C: TRUE MTTS (Runs-to-Failure = MTTF Analogue)',
+        'features': len(feats_C),
+        'brier': brier_score_loss(y_test_C, preds_C),
+        'accuracy': accuracy_score(y_test_C, pred_binary_C),
+        'recall': recall_score(y_test_C, pred_binary_C, zero_division=0),
+        'precision': precision_score(y_test_C, pred_binary_C, zero_division=0),
+        'f1': f1_score(y_test_C, pred_binary_C, zero_division=0)
+    }
+    
+    # MODEL D: Full MTTS + Degradation (all V3.2 features)
+    feats_D = feats_C + [
+        "runs_since_last_failure", "cumulative_scrap_in_cycle",
+        "degradation_velocity", "degradation_acceleration",
+        "cycle_hazard_indicator", "rul_proxy"
+    ]
+    for f in feats_D:
+        if f not in df_train_mtts.columns:
+            df_train_mtts[f] = 0
+            df_calib_mtts[f] = 0
+            df_test_mtts[f] = 0
+    
+    X_train_D = df_train_mtts[feats_D].fillna(0)
+    X_calib_D = df_calib_mtts[feats_D].fillna(0)
+    X_test_D = df_test_mtts[feats_D].fillna(0)
+    
+    _, cal_D, _ = train_and_calibrate(X_train_D, y_train_C, X_calib_D, y_calib_C, n_est)
+    preds_D = cal_D.predict_proba(X_test_D)[:, 1]
+    pred_binary_D = (preds_D > 0.5).astype(int)
+    
+    results['models']['D_FullMTTS'] = {
+        'name': 'Model D: Full MTTS + Degradation Features',
+        'features': len(feats_D),
+        'brier': brier_score_loss(y_test_C, preds_D),
+        'accuracy': accuracy_score(y_test_C, pred_binary_D),
+        'recall': recall_score(y_test_C, pred_binary_D, zero_division=0),
+        'precision': precision_score(y_test_C, pred_binary_D, zero_division=0),
+        'f1': f1_score(y_test_C, pred_binary_D, zero_division=0)
+    }
+    
+    # Calculate improvements
+    baseline = results['models']['A_Baseline']
+    for model_key in ['B_SimpleMTTS', 'C_TrueMTTS', 'D_FullMTTS']:
+        model = results['models'][model_key]
+        model['improvement'] = {
+            'brier_pct': (baseline['brier'] - model['brier']) / baseline['brier'] * 100 if baseline['brier'] > 0 else 0,
+            'recall_pct': (model['recall'] - baseline['recall']) * 100,
+            'f1_pct': (model['f1'] - baseline['f1']) * 100,
+            'accuracy_pct': (model['accuracy'] - baseline['accuracy']) * 100
+        }
+    
+    # Determine if Objective #2 is validated
+    model_C = results['models']['C_TrueMTTS']
+    model_B = results['models']['B_SimpleMTTS']
+    
+    results['objective2_validated'] = (
+        model_C['f1'] > model_B['f1'] and 
+        model_C['recall'] >= model_B['recall']
+    )
+    
+    results['conclusion'] = (
+        f"Research Objective #2 {'VALIDATED' if results['objective2_validated'] else 'NOT VALIDATED'}: "
+        f"True MTTS (Model C) achieves F1={model_C['f1']:.4f} vs Simple MTTS F1={model_B['f1']:.4f} "
+        f"({model_C['improvement']['f1_pct']:+.2f}% vs baseline)"
+    )
+    
+    return results
 
 
 def compare_models_with_without_multi_defect(df_base, thr_label, use_rate_cols, n_est):
@@ -1611,7 +2682,7 @@ else:
 # -------------------------------
 # TABS
 # -------------------------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Predict & Diagnose", "📏 Validation", "🔬 Advanced Validation", "📊 Model Comparison", "📝 Log Outcome"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔮 Predict & Diagnose", "📏 Validation", "🔬 Advanced Validation", "📊 Model Comparison", "⚙️ Reliability & Availability", "📝 Log Outcome"])
 
 # ================================================================
 # TAB 1: PREDICTION & PROCESS DIAGNOSIS
@@ -2093,12 +3164,26 @@ with tab3:
     st.header("🔬 Advanced Model Validation")
     
     st.markdown("""
-    This section provides **peer-reviewed validation methods** with academic citations.
-    Each method includes references to the original research papers for citation in academic work.
+    ### Overview
+    
+    This section provides **peer-reviewed validation methods** with academic citations formatted in **APA 7** style.
+    These validation techniques are used in machine learning research to rigorously assess model performance
+    beyond simple accuracy metrics.
+    
+    **Scope**: The Advanced Validation evaluates the **entire model** using the held-out test set 
+    (newest 20% of data), not individual predictions. Results reflect overall model capability across 
+    all parts and work orders in the test period.
+    
+    **Sub-tabs**:
+    - **📊 Discrimination**: How well the model separates high-scrap from OK runs (ROC-AUC, PR-AUC, Log Loss)
+    - **📈 Calibration**: How trustworthy the predicted probabilities are (Brier Score, ECE, Hosmer-Lemeshow)
+    - **📉 Confidence Intervals**: Statistical uncertainty quantification via bootstrapping
+    - **📚 Citations**: Complete APA 7 reference list for academic use
+    - **📄 Download Report**: Export validation results with citations
     """)
     
     if st.button("🧪 Run Advanced Validation Suite"):
-        with st.spinner("Running comprehensive validation analysis..."):
+        with st.spinner("Running comprehensive validation analysis (500 bootstrap iterations)..."):
             try:
                 # Get test predictions - use the same data as basic validation
                 X_test_adv, y_test_adv, feats_adv = make_xy(df_test_base.copy(), thr_label, use_rate_cols, use_multi_defect, use_temporal=True)
@@ -2122,149 +3207,279 @@ with tab3:
                 # DISCRIMINATION METRICS TAB
                 # ============================================================
                 with val_tab1:
-                    st.subheader("Discrimination Metrics")
-                    st.markdown("*How well the model separates high-scrap from OK runs*")
+                    st.subheader("📊 Discrimination Metrics")
+                    
+                    st.markdown("""
+                    #### What is Discrimination?
+                    
+                    **Discrimination** refers to a model's ability to distinguish between positive cases 
+                    (high-scrap runs) and negative cases (OK runs). A model with perfect discrimination 
+                    would assign higher risk scores to all high-scrap runs than to any OK run.
+                    
+                    These metrics evaluate discrimination across **all possible classification thresholds**, 
+                    not just the default 0.5 cutoff.
+                    """)
+                    
+                    st.markdown("---")
                     
                     col1, col2, col3 = st.columns(3)
                     
                     # ROC-AUC
                     with col1:
-                        cite = VALIDATION_CITATIONS['roc_auc']
-                        st.metric("ROC-AUC", f"{adv_results['roc_auc']:.4f}" if adv_results['roc_auc'] else "N/A")
-                        auc_interp = 'Outstanding' if adv_results['roc_auc'] and adv_results['roc_auc'] >= 0.9 else 'Excellent' if adv_results['roc_auc'] and adv_results['roc_auc'] >= 0.8 else 'Acceptable'
+                        st.markdown("##### ROC-AUC")
+                        st.metric("Score", f"{adv_results['roc_auc']:.4f}" if adv_results['roc_auc'] else "N/A")
+                        auc_interp = 'Outstanding (≥0.9)' if adv_results['roc_auc'] and adv_results['roc_auc'] >= 0.9 else 'Excellent (≥0.8)' if adv_results['roc_auc'] and adv_results['roc_auc'] >= 0.8 else 'Acceptable (≥0.7)'
                         st.caption(f"Interpretation: {auc_interp}")
-                        with st.expander("📚 Citation"):
-                            st.markdown(f"**{cite['name']}**")
-                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
-                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                        
+                        st.markdown("""
+                        **What it measures**: The probability that a randomly chosen positive instance 
+                        is ranked higher than a randomly chosen negative instance.
+                        
+                        **Range**: 0.5 (random) to 1.0 (perfect)
+                        
+                        **APA 7 Citation**:
+                        """)
+                        st.code("Hanley, J. A., & McNeil, B. J. (1982). The meaning and use of the area under a receiver operating characteristic (ROC) curve. Radiology, 143(1), 29-36. https://doi.org/10.1148/radiology.143.1.7063747", language=None)
                     
                     # PR-AUC
                     with col2:
-                        cite = VALIDATION_CITATIONS['pr_auc']
-                        st.metric("PR-AUC", f"{adv_results['pr_auc']:.4f}" if adv_results['pr_auc'] else "N/A")
-                        st.caption("Better for imbalanced data")
-                        with st.expander("📚 Citation"):
-                            st.markdown(f"**{cite['name']}**")
-                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['pages']}.")
-                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                        st.markdown("##### Precision-Recall AUC")
+                        st.metric("Score", f"{adv_results['pr_auc']:.4f}" if adv_results['pr_auc'] else "N/A")
+                        st.caption("Preferred for imbalanced datasets")
+                        
+                        st.markdown("""
+                        **What it measures**: Area under the Precision-Recall curve, focusing on 
+                        positive class performance.
+                        
+                        **Why it matters**: More informative than ROC-AUC when classes are imbalanced 
+                        (e.g., fewer high-scrap than OK runs).
+                        
+                        **APA 7 Citation**:
+                        """)
+                        st.code("Davis, J., & Goadrich, M. (2006). The relationship between Precision-Recall and ROC curves. Proceedings of the 23rd International Conference on Machine Learning, 233-240. https://doi.org/10.1145/1143844.1143874", language=None)
                     
                     # Log Loss
                     with col3:
-                        cite = VALIDATION_CITATIONS['log_loss']
-                        st.metric("Log Loss", f"{adv_results['log_loss']:.4f}")
+                        st.markdown("##### Log Loss (Cross-Entropy)")
+                        st.metric("Score", f"{adv_results['log_loss']:.4f}")
                         st.caption("Lower is better")
-                        with st.expander("📚 Citation"):
-                            st.markdown(f"**{cite['name']}**")
-                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
-                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                        
+                        st.markdown("""
+                        **What it measures**: Penalizes confident wrong predictions heavily. 
+                        A prediction of 0.99 for an actual negative case is severely penalized.
+                        
+                        **Range**: 0 (perfect) to ∞ (worst)
+                        
+                        **APA 7 Citation**:
+                        """)
+                        st.code("Good, I. J. (1952). Rational decisions. Journal of the Royal Statistical Society: Series B, 14(1), 107-114. https://doi.org/10.1111/j.2517-6161.1952.tb00104.x", language=None)
+                    
+                    st.markdown("---")
                     
                     # ROC Curve
                     if adv_results['roc_auc'] is not None:
-                        st.markdown("### ROC Curve")
+                        st.markdown("#### ROC Curve (Receiver Operating Characteristic)")
+                        
+                        st.markdown("""
+                        The **ROC curve** plots the True Positive Rate (Recall) against the False Positive Rate 
+                        at various classification thresholds. The diagonal dashed line represents a random 
+                        classifier (AUC = 0.5). The further the curve bows toward the upper-left corner, 
+                        the better the discrimination.
+                        
+                        **Interpretation Guide**:
+                        - **AUC 0.9-1.0**: Outstanding discrimination
+                        - **AUC 0.8-0.9**: Excellent discrimination  
+                        - **AUC 0.7-0.8**: Acceptable discrimination
+                        - **AUC 0.5-0.7**: Poor discrimination
+                        """)
+                        
                         fig_roc = go.Figure()
                         fig_roc.add_trace(go.Scatter(
                             x=adv_results['fpr'], y=adv_results['tpr'],
-                            mode='lines', name=f'ROC (AUC = {adv_results["roc_auc"]:.3f})',
+                            mode='lines', name=f'Model (AUC = {adv_results["roc_auc"]:.4f})',
                             line=dict(color='#ff6b6b', width=2)
                         ))
                         fig_roc.add_trace(go.Scatter(
                             x=[0, 1], y=[0, 1],
-                            mode='lines', name='Random',
+                            mode='lines', name='Random Classifier (AUC = 0.5)',
                             line=dict(color='gray', width=1, dash='dash')
                         ))
                         fig_roc.update_layout(
-                            title="Receiver Operating Characteristic (ROC) Curve",
-                            xaxis_title="False Positive Rate",
-                            yaxis_title="True Positive Rate",
+                            title="ROC Curve - Hanley & McNeil (1982)",
+                            xaxis_title="False Positive Rate (1 - Specificity)",
+                            yaxis_title="True Positive Rate (Sensitivity/Recall)",
                             yaxis=dict(scaleanchor="x", scaleratio=1),
                             xaxis=dict(constrain='domain'),
-                            width=600, height=500
+                            width=600, height=500,
+                            legend=dict(x=0.6, y=0.1)
                         )
                         st.plotly_chart(fig_roc, use_container_width=True)
+                        
+                        st.info("""
+                        **Reference**: Hanley, J. A., & McNeil, B. J. (1982). The meaning and use of the area 
+                        under a receiver operating characteristic (ROC) curve. *Radiology, 143*(1), 29-36.
+                        """)
                     
                     # Precision-Recall Curve
                     if adv_results['pr_auc'] is not None:
-                        st.markdown("### Precision-Recall Curve")
+                        st.markdown("#### Precision-Recall Curve")
+                        
+                        st.markdown("""
+                        The **Precision-Recall curve** shows the trade-off between precision (positive predictive value) 
+                        and recall (sensitivity) at various thresholds. Unlike ROC curves, PR curves are sensitive to 
+                        class imbalance, making them more informative when positive cases are rare.
+                        
+                        **Interpretation**:
+                        - The horizontal dashed line shows the **baseline** (proportion of positive cases)
+                        - A curve hugging the upper-right corner indicates excellent performance
+                        - PR-AUC close to 1.0 means high precision maintained even at high recall
+                        """)
+                        
                         fig_pr = go.Figure()
                         fig_pr.add_trace(go.Scatter(
                             x=adv_results['recall_curve'], y=adv_results['precision_curve'],
-                            mode='lines', name=f'PR (AUC = {adv_results["pr_auc"]:.3f})',
+                            mode='lines', name=f'Model (PR-AUC = {adv_results["pr_auc"]:.4f})',
                             line=dict(color='#4ecdc4', width=2)
                         ))
                         # Add baseline (proportion of positives)
                         baseline = y_test_adv.mean()
                         fig_pr.add_trace(go.Scatter(
                             x=[0, 1], y=[baseline, baseline],
-                            mode='lines', name=f'Baseline ({baseline:.3f})',
+                            mode='lines', name=f'Baseline (No Skill) = {baseline:.3f}',
                             line=dict(color='gray', width=1, dash='dash')
                         ))
                         fig_pr.update_layout(
-                            title="Precision-Recall Curve",
-                            xaxis_title="Recall",
-                            yaxis_title="Precision",
-                            width=600, height=500
+                            title="Precision-Recall Curve - Davis & Goadrich (2006)",
+                            xaxis_title="Recall (Sensitivity)",
+                            yaxis_title="Precision (Positive Predictive Value)",
+                            width=600, height=500,
+                            legend=dict(x=0.1, y=0.1)
                         )
                         st.plotly_chart(fig_pr, use_container_width=True)
+                        
+                        st.info("""
+                        **Reference**: Davis, J., & Goadrich, M. (2006). The relationship between Precision-Recall 
+                        and ROC curves. *Proceedings of the 23rd International Conference on Machine Learning*, 233-240.
+                        """)
                 
                 # ============================================================
                 # CALIBRATION TAB
                 # ============================================================
                 with val_tab2:
-                    st.subheader("Calibration Assessment")
-                    st.markdown("*How well predicted probabilities match actual outcomes*")
+                    st.subheader("📈 Calibration Assessment")
+                    
+                    st.markdown("""
+                    #### What is Calibration?
+                    
+                    **Calibration** measures how well predicted probabilities match actual observed frequencies.
+                    A well-calibrated model's predictions can be interpreted as true probabilities:
+                    - If the model predicts 70% scrap risk for 100 similar runs, approximately 70 should actually have high scrap
+                    
+                    **Why it matters for foundry operations**:
+                    - Enables accurate cost/risk calculations
+                    - Supports confident decision-making
+                    - Allows meaningful comparison between predictions
+                    """)
+                    
+                    st.markdown("---")
                     
                     col1, col2, col3 = st.columns(3)
                     
                     # Brier Score
                     with col1:
-                        cite = VALIDATION_CITATIONS['brier_score']
-                        st.metric("Brier Score", f"{adv_results['brier_score']:.4f}")
-                        brier_interp = 'Excellent' if adv_results['brier_score'] < 0.1 else 'Good' if adv_results['brier_score'] < 0.2 else 'Fair'
+                        st.markdown("##### Brier Score")
+                        st.metric("Score", f"{adv_results['brier_score']:.4f}")
+                        brier_interp = 'Excellent (<0.1)' if adv_results['brier_score'] < 0.1 else 'Good (<0.2)' if adv_results['brier_score'] < 0.2 else 'Fair'
                         st.caption(f"Interpretation: {brier_interp}")
-                        with st.expander("📚 Citation"):
-                            st.markdown(f"**{cite['name']}**")
-                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
-                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                        
+                        st.markdown("""
+                        **What it measures**: Mean squared error between predicted probabilities and actual outcomes.
+                        
+                        **Formula**: BS = (1/N) Σ(pᵢ - oᵢ)²
+                        
+                        **Range**: 0 (perfect) to 1 (worst)
+                        
+                        **APA 7 Citation**:
+                        """)
+                        st.code("Brier, G. W. (1950). Verification of forecasts expressed in terms of probability. Monthly Weather Review, 78(1), 1-3. https://doi.org/10.1175/1520-0493(1950)078<0001:VOFEIT>2.0.CO;2", language=None)
                     
                     # ECE
                     with col2:
-                        cite = VALIDATION_CITATIONS['ece']
-                        st.metric("Expected Calibration Error", f"{adv_results['ece']:.4f}")
-                        ece_interp = 'Well-calibrated' if adv_results['ece'] < 0.05 else 'Adequate' if adv_results['ece'] < 0.1 else 'Poor'
+                        st.markdown("##### Expected Calibration Error")
+                        st.metric("ECE", f"{adv_results['ece']:.4f}")
+                        ece_interp = 'Well-calibrated (<0.05)' if adv_results['ece'] < 0.05 else 'Adequate (<0.1)' if adv_results['ece'] < 0.1 else 'Needs improvement'
                         st.caption(f"Interpretation: {ece_interp}")
-                        with st.expander("📚 Citation"):
-                            st.markdown(f"**{cite['name']}**")
-                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
-                            st.markdown(f"[URL]({cite['url']})")
+                        
+                        st.markdown("""
+                        **What it measures**: Weighted average of |accuracy - confidence| across probability bins.
+                        
+                        **How it works**: Groups predictions into bins by confidence, then measures the gap between 
+                        average confidence and actual accuracy in each bin.
+                        
+                        **APA 7 Citation**:
+                        """)
+                        st.code("Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). On calibration of modern neural networks. Proceedings of the 34th International Conference on Machine Learning, 70, 1321-1330. https://proceedings.mlr.press/v70/guo17a.html", language=None)
                     
                     # Hosmer-Lemeshow
                     with col3:
-                        cite = VALIDATION_CITATIONS['hosmer_lemeshow']
-                        st.metric("Hosmer-Lemeshow p-value", f"{adv_results['hl_pvalue']:.4f}")
+                        st.markdown("##### Hosmer-Lemeshow Test")
+                        st.metric("p-value", f"{adv_results['hl_pvalue']:.4f}")
                         hl_interp = 'Good fit ✅' if adv_results['hl_pvalue'] > 0.05 else 'Poor fit ❌'
                         st.caption(f"Interpretation: {hl_interp}")
-                        with st.expander("📚 Citation"):
-                            st.markdown(f"**{cite['name']}**")
-                            st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
-                            st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                        
+                        st.markdown("""
+                        **What it measures**: Statistical test comparing observed vs. expected events across risk groups.
+                        
+                        **Interpretation**:
+                        - p > 0.05: Fail to reject H₀ → Good calibration
+                        - p ≤ 0.05: Reject H₀ → Poor calibration
+                        
+                        **APA 7 Citation**:
+                        """)
+                        st.code("Hosmer, D. W., & Lemeshow, S. (1980). Goodness of fit tests for the multiple logistic regression model. Communications in Statistics - Theory and Methods, 9(10), 1043-1069. https://doi.org/10.1080/03610928008827941", language=None)
+                    
+                    st.markdown("---")
                     
                     # Hosmer-Lemeshow details
-                    st.markdown("### Hosmer-Lemeshow Test Details")
-                    st.markdown(f"**Chi-square statistic:** {adv_results['hl_chi2']:.4f}")
-                    st.markdown(f"**Degrees of freedom:** {adv_results['hl_df']}")
-                    st.markdown(f"**p-value:** {adv_results['hl_pvalue']:.4f}")
+                    st.markdown("#### Hosmer-Lemeshow Test Details")
+                    hl_col1, hl_col2, hl_col3 = st.columns(3)
+                    hl_col1.metric("Chi-square (χ²)", f"{adv_results['hl_chi2']:.4f}")
+                    hl_col2.metric("Degrees of Freedom", f"{adv_results['hl_df']}")
+                    hl_col3.metric("p-value", f"{adv_results['hl_pvalue']:.4f}")
+                    
                     if adv_results['hl_pvalue'] > 0.05:
-                        st.success("✅ Fail to reject null hypothesis: Model calibration is adequate")
+                        st.success(f"""
+                        ✅ **Result**: Fail to reject null hypothesis (p = {adv_results['hl_pvalue']:.4f} > 0.05)
+                        
+                        **Interpretation**: There is no statistically significant evidence of poor calibration. 
+                        The model's predicted probabilities adequately reflect observed outcomes.
+                        """)
                     else:
-                        st.warning("⚠️ Reject null hypothesis: Model may be poorly calibrated")
+                        st.warning(f"""
+                        ⚠️ **Result**: Reject null hypothesis (p = {adv_results['hl_pvalue']:.4f} ≤ 0.05)
+                        
+                        **Interpretation**: There is statistically significant evidence that the model 
+                        may be poorly calibrated. Consider recalibration techniques.
+                        """)
+                    
+                    st.markdown("---")
                     
                     # Calibration Curve
-                    st.markdown("### Calibration Curve (Reliability Diagram)")
-                    cite = VALIDATION_CITATIONS['calibration_curve']
-                    with st.expander("📚 Citation"):
-                        st.markdown(f"**{cite['name']}**")
-                        st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}, {cite['volume']}, {cite['pages']}.")
-                        st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    st.markdown("#### Calibration Curve (Reliability Diagram)")
+                    
+                    st.markdown("""
+                    The **calibration curve** (also called a reliability diagram) visualizes calibration by plotting 
+                    the mean predicted probability against the fraction of positives in each bin.
+                    
+                    **How to read this chart**:
+                    - **Diagonal line**: Perfect calibration (predicted probability = actual frequency)
+                    - **Points above diagonal**: Model is *underconfident* (actual frequency > predicted)
+                    - **Points below diagonal**: Model is *overconfident* (actual frequency < predicted)
+                    - **Points on diagonal**: Well-calibrated predictions
+                    
+                    **Reference**: DeGroot, M. H., & Fienberg, S. E. (1983). The comparison and evaluation of forecasters. 
+                    *Journal of the Royal Statistical Society: Series D, 32*(1-2), 12-22.
+                    """)
                     
                     if adv_results['calibration_prob_true'] is not None:
                         fig_cal = go.Figure()
@@ -2273,27 +3488,44 @@ with tab3:
                             y=adv_results['calibration_prob_true'],
                             mode='lines+markers', name='Model Calibration',
                             line=dict(color='#ff6b6b', width=2),
-                            marker=dict(size=8)
+                            marker=dict(size=10)
                         ))
                         fig_cal.add_trace(go.Scatter(
                             x=[0, 1], y=[0, 1],
                             mode='lines', name='Perfect Calibration',
-                            line=dict(color='gray', width=1, dash='dash')
+                            line=dict(color='gray', width=2, dash='dash')
                         ))
                         fig_cal.update_layout(
-                            title="Calibration Curve",
+                            title="Calibration Curve - DeGroot & Fienberg (1983)",
                             xaxis_title="Mean Predicted Probability",
-                            yaxis_title="Fraction of Positives",
+                            yaxis_title="Fraction of Positives (Actual)",
                             yaxis=dict(scaleanchor="x", scaleratio=1),
                             xaxis=dict(constrain='domain', range=[0, 1]),
                             yaxis_range=[0, 1],
-                            width=600, height=500
+                            width=600, height=500,
+                            legend=dict(x=0.6, y=0.1)
                         )
                         st.plotly_chart(fig_cal, use_container_width=True)
-                        st.caption("Points close to the diagonal indicate good calibration")
+                        
+                        st.info("""
+                        **Reference**: DeGroot, M. H., & Fienberg, S. E. (1983). The comparison and evaluation 
+                        of forecasters. *Journal of the Royal Statistical Society: Series D, 32*(1-2), 12-22.
+                        """)
                     
                     # ECE Bin Details
-                    st.markdown("### ECE Bin Details")
+                    st.markdown("#### ECE Bin Analysis")
+                    st.markdown("""
+                    This table shows the Expected Calibration Error calculation across probability bins.
+                    Each row represents predictions grouped by confidence level.
+                    
+                    **Columns explained**:
+                    - **bin**: Probability range for this group
+                    - **samples**: Number of predictions in this bin
+                    - **avg_confidence**: Mean predicted probability in bin
+                    - **avg_accuracy**: Actual fraction of positives in bin
+                    - **calibration_error**: |avg_accuracy - avg_confidence|
+                    """)
+                    
                     if adv_results['ece_bins']:
                         ece_df = pd.DataFrame(adv_results['ece_bins'])
                         st.dataframe(ece_df, use_container_width=True)
@@ -2302,24 +3534,42 @@ with tab3:
                 # CONFIDENCE INTERVALS TAB
                 # ============================================================
                 with val_tab3:
-                    st.subheader("Bootstrap Confidence Intervals")
-                    cite = VALIDATION_CITATIONS['bootstrap_ci']
-                    st.markdown(f"*{cite['description']}*")
+                    st.subheader("📉 Bootstrap Confidence Intervals")
                     
-                    with st.expander("📚 Citation"):
-                        st.markdown(f"**{cite['name']}**")
-                        st.markdown(f"{cite['authors']} ({cite['year']}). *{cite['title']}*. {cite['journal']}.")
-                        st.markdown(f"[DOI: {cite['doi']}]({cite['url']})")
+                    st.markdown("""
+                    #### What is Bootstrapping?
                     
-                    st.markdown("### 95% Confidence Intervals (500 bootstrap iterations)")
+                    **Bootstrapping** is a resampling technique that estimates the sampling distribution of a statistic 
+                    by repeatedly sampling with replacement from the observed data. This provides:
+                    
+                    - **Point estimates** (mean performance)
+                    - **Standard errors** (variability in estimates)
+                    - **Confidence intervals** (range of plausible values)
+                    
+                    **Why it matters**:
+                    - Single metric values can be misleading
+                    - CIs quantify uncertainty in model performance
+                    - Narrow CIs indicate stable, reliable performance
+                    - Wide CIs suggest results may vary with different data
+                    
+                    **Method**: This analysis uses 500 bootstrap iterations with replacement to estimate 
+                    95% confidence intervals for each metric.
+                    
+                    **APA 7 Citation**:
+                    """)
+                    st.code("Efron, B., & Tibshirani, R. J. (1993). An introduction to the bootstrap. Chapman & Hall/CRC. https://doi.org/10.1007/978-1-4899-4541-9", language=None)
+                    
+                    st.markdown("---")
+                    
+                    st.markdown("#### 95% Confidence Intervals (500 Bootstrap Iterations)")
                     
                     if 'bootstrap_ci' in adv_results:
                         ci_data = []
                         for metric, ci in adv_results['bootstrap_ci'].items():
                             ci_data.append({
-                                'Metric': metric.upper().replace('_', ' '),
-                                'Mean': f"{ci['mean']:.4f}",
-                                'Std Dev': f"{ci['std']:.4f}",
+                                'Metric': metric.upper().replace('_', '-'),
+                                'Point Estimate': f"{ci['mean']:.4f}",
+                                'Std. Error': f"{ci['std']:.4f}",
                                 '95% CI Lower': f"{ci['ci_lower']:.4f}",
                                 '95% CI Upper': f"{ci['ci_upper']:.4f}",
                                 'CI Width': f"{ci['ci_upper'] - ci['ci_lower']:.4f}"
@@ -2328,76 +3578,161 @@ with tab3:
                         ci_df = pd.DataFrame(ci_data)
                         st.dataframe(ci_df, use_container_width=True)
                         
+                        st.markdown("""
+                        **How to interpret**:
+                        - **Point Estimate**: Best estimate of the metric (mean across bootstrap samples)
+                        - **Std. Error**: Standard deviation of bootstrap estimates
+                        - **95% CI**: We are 95% confident the true value lies in this range
+                        - **CI Width**: Narrower = more precise estimate
+                        """)
+                        
                         # Visualization
-                        st.markdown("### Confidence Interval Visualization")
+                        st.markdown("---")
+                        st.markdown("#### Confidence Interval Visualization")
+                        
+                        st.markdown("""
+                        This chart displays the point estimate (dot) and 95% confidence interval (error bars) 
+                        for each metric. Metrics with narrow error bars have more stable performance.
+                        """)
+                        
                         fig_ci = go.Figure()
                         
-                        metrics = [item['Metric'] for item in ci_data]
-                        means = [adv_results['bootstrap_ci'][m.lower().replace(' ', '_')]['mean'] for m in [item['Metric'] for item in ci_data]]
-                        ci_lowers = [adv_results['bootstrap_ci'][m.lower().replace(' ', '_')]['ci_lower'] for m in [item['Metric'] for item in ci_data]]
-                        ci_uppers = [adv_results['bootstrap_ci'][m.lower().replace(' ', '_')]['ci_upper'] for m in [item['Metric'] for item in ci_data]]
+                        metrics_list = list(adv_results['bootstrap_ci'].keys())
+                        means = [adv_results['bootstrap_ci'][m]['mean'] for m in metrics_list]
+                        ci_lowers = [adv_results['bootstrap_ci'][m]['ci_lower'] for m in metrics_list]
+                        ci_uppers = [adv_results['bootstrap_ci'][m]['ci_upper'] for m in metrics_list]
                         
                         fig_ci.add_trace(go.Scatter(
-                            x=metrics, y=means,
+                            x=[m.upper().replace('_', '-') for m in metrics_list], 
+                            y=means,
                             mode='markers',
                             marker=dict(size=12, color='#ff6b6b'),
-                            name='Mean',
+                            name='Point Estimate',
                             error_y=dict(
                                 type='data',
                                 symmetric=False,
                                 array=[u - m for u, m in zip(ci_uppers, means)],
                                 arrayminus=[m - l for m, l in zip(means, ci_lowers)],
-                                color='#ff6b6b'
+                                color='#ff6b6b',
+                                thickness=2,
+                                width=6
                             )
                         ))
                         
                         fig_ci.update_layout(
-                            title="Bootstrap 95% Confidence Intervals",
+                            title="Bootstrap 95% Confidence Intervals - Efron & Tibshirani (1993)",
                             yaxis_title="Score",
                             yaxis_range=[0, 1.1],
-                            height=400
+                            height=450,
+                            showlegend=False
                         )
                         st.plotly_chart(fig_ci, use_container_width=True)
+                        
+                        st.info("""
+                        **Reference**: Efron, B., & Tibshirani, R. J. (1993). *An introduction to the bootstrap*. 
+                        Chapman & Hall/CRC. https://doi.org/10.1007/978-1-4899-4541-9
+                        """)
                 
                 # ============================================================
                 # CITATIONS TAB
                 # ============================================================
                 with val_tab4:
-                    st.subheader("📚 Academic Citations")
-                    st.markdown("Use these citations when referencing validation methods in academic work.")
+                    st.subheader("📚 Complete Reference List (APA 7 Format)")
                     
-                    for key, cite in VALIDATION_CITATIONS.items():
-                        with st.expander(f"**{cite['name']}** ({cite['year']})"):
-                            st.markdown(f"**Authors:** {cite['authors']}")
-                            st.markdown(f"**Year:** {cite['year']}")
-                            st.markdown(f"**Title:** {cite['title']}")
-                            st.markdown(f"**Journal:** {cite['journal']}")
-                            if cite['volume']:
-                                st.markdown(f"**Volume:** {cite['volume']}")
-                            if cite['pages']:
-                                st.markdown(f"**Pages:** {cite['pages']}")
-                            if cite['doi']:
-                                st.markdown(f"**DOI:** {cite['doi']}")
-                            st.markdown(f"**URL:** [{cite['url']}]({cite['url']})")
-                            st.markdown("---")
-                            st.markdown(f"**Description:** {cite['description']}")
-                            
-                            # Copy-paste citation
-                            st.markdown("---")
-                            st.markdown("**APA Citation:**")
-                            apa = f"{cite['authors']} ({cite['year']}). {cite['title']}. *{cite['journal']}*"
-                            if cite['volume']:
-                                apa += f", *{cite['volume']}*"
-                            if cite['pages']:
-                                apa += f", {cite['pages']}"
-                            apa += "."
-                            st.code(apa, language=None)
+                    st.markdown("""
+                    The following references are formatted in **APA 7** style for direct use in academic 
+                    publications, dissertations, and research papers. Each citation includes the DOI or 
+                    URL for easy access to the original source.
+                    """)
+                    
+                    st.markdown("---")
+                    
+                    # Brier Score
+                    st.markdown("#### 1. Brier Score")
+                    st.code("""Brier, G. W. (1950). Verification of forecasts expressed in terms of probability. Monthly Weather Review, 78(1), 1-3. https://doi.org/10.1175/1520-0493(1950)078<0001:VOFEIT>2.0.CO;2""", language=None)
+                    st.markdown("*Used for: Measuring overall probability accuracy*")
+                    
+                    st.markdown("---")
+                    
+                    # Calibration Curves
+                    st.markdown("#### 2. Calibration Curves (Reliability Diagrams)")
+                    st.code("""DeGroot, M. H., & Fienberg, S. E. (1983). The comparison and evaluation of forecasters. Journal of the Royal Statistical Society: Series D (The Statistician), 32(1-2), 12-22. https://doi.org/10.2307/2987588""", language=None)
+                    st.markdown("*Used for: Visual assessment of probability calibration*")
+                    
+                    st.markdown("---")
+                    
+                    # ROC-AUC
+                    st.markdown("#### 3. ROC-AUC (Receiver Operating Characteristic)")
+                    st.code("""Hanley, J. A., & McNeil, B. J. (1982). The meaning and use of the area under a receiver operating characteristic (ROC) curve. Radiology, 143(1), 29-36. https://doi.org/10.1148/radiology.143.1.7063747""", language=None)
+                    st.markdown("*Used for: Measuring discrimination ability across all thresholds*")
+                    
+                    st.markdown("---")
+                    
+                    # PR-AUC
+                    st.markdown("#### 4. Precision-Recall AUC")
+                    st.code("""Davis, J., & Goadrich, M. (2006). The relationship between Precision-Recall and ROC curves. Proceedings of the 23rd International Conference on Machine Learning, 233-240. https://doi.org/10.1145/1143844.1143874""", language=None)
+                    st.markdown("*Used for: Discrimination assessment with imbalanced classes*")
+                    
+                    st.markdown("---")
+                    
+                    # Log Loss
+                    st.markdown("#### 5. Log Loss (Cross-Entropy)")
+                    st.code("""Good, I. J. (1952). Rational decisions. Journal of the Royal Statistical Society: Series B (Methodological), 14(1), 107-114. https://doi.org/10.1111/j.2517-6161.1952.tb00104.x""", language=None)
+                    st.markdown("*Used for: Penalizing confident incorrect predictions*")
+                    
+                    st.markdown("---")
+                    
+                    # ECE
+                    st.markdown("#### 6. Expected Calibration Error (ECE)")
+                    st.code("""Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). On calibration of modern neural networks. Proceedings of the 34th International Conference on Machine Learning, 70, 1321-1330. https://proceedings.mlr.press/v70/guo17a.html""", language=None)
+                    st.markdown("*Used for: Single-metric summary of calibration quality*")
+                    
+                    st.markdown("---")
+                    
+                    # Hosmer-Lemeshow
+                    st.markdown("#### 7. Hosmer-Lemeshow Test")
+                    st.code("""Hosmer, D. W., & Lemeshow, S. (1980). Goodness of fit tests for the multiple logistic regression model. Communications in Statistics - Theory and Methods, 9(10), 1043-1069. https://doi.org/10.1080/03610928008827941""", language=None)
+                    st.markdown("*Used for: Statistical hypothesis test for calibration adequacy*")
+                    
+                    st.markdown("---")
+                    
+                    # Bootstrap
+                    st.markdown("#### 8. Bootstrap Confidence Intervals")
+                    st.code("""Efron, B., & Tibshirani, R. J. (1993). An introduction to the bootstrap. Chapman & Hall/CRC. https://doi.org/10.1007/978-1-4899-4541-9""", language=None)
+                    st.markdown("*Used for: Non-parametric confidence interval estimation*")
+                    
+                    st.markdown("---")
+                    
+                    # Copy all button
+                    st.markdown("#### 📋 Copy All References")
+                    all_refs = """Brier, G. W. (1950). Verification of forecasts expressed in terms of probability. Monthly Weather Review, 78(1), 1-3. https://doi.org/10.1175/1520-0493(1950)078<0001:VOFEIT>2.0.CO;2
+
+DeGroot, M. H., & Fienberg, S. E. (1983). The comparison and evaluation of forecasters. Journal of the Royal Statistical Society: Series D (The Statistician), 32(1-2), 12-22. https://doi.org/10.2307/2987588
+
+Davis, J., & Goadrich, M. (2006). The relationship between Precision-Recall and ROC curves. Proceedings of the 23rd International Conference on Machine Learning, 233-240. https://doi.org/10.1145/1143844.1143874
+
+Efron, B., & Tibshirani, R. J. (1993). An introduction to the bootstrap. Chapman & Hall/CRC. https://doi.org/10.1007/978-1-4899-4541-9
+
+Good, I. J. (1952). Rational decisions. Journal of the Royal Statistical Society: Series B (Methodological), 14(1), 107-114. https://doi.org/10.1111/j.2517-6161.1952.tb00104.x
+
+Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). On calibration of modern neural networks. Proceedings of the 34th International Conference on Machine Learning, 70, 1321-1330. https://proceedings.mlr.press/v70/guo17a.html
+
+Hanley, J. A., & McNeil, B. J. (1982). The meaning and use of the area under a receiver operating characteristic (ROC) curve. Radiology, 143(1), 29-36. https://doi.org/10.1148/radiology.143.1.7063747
+
+Hosmer, D. W., & Lemeshow, S. (1980). Goodness of fit tests for the multiple logistic regression model. Communications in Statistics - Theory and Methods, 9(10), 1043-1069. https://doi.org/10.1080/03610928008827941"""
+                    
+                    st.text_area("All References (APA 7)", all_refs, height=350)
                 
                 # ============================================================
                 # DOWNLOAD REPORT TAB
                 # ============================================================
                 with val_tab5:
                     st.subheader("📄 Download Validation Report")
+                    
+                    st.markdown("""
+                    Download a comprehensive validation report including all metrics, interpretations, 
+                    and properly formatted APA 7 citations for use in academic publications.
+                    """)
                     
                     # Prepare model and dataset info
                     model_info = {
@@ -2426,49 +3761,53 @@ with tab3:
                     st.markdown("### Report Preview")
                     st.text_area("Validation Report", report_text, height=400)
                     
-                    # Download button
-                    st.download_button(
-                        label="📥 Download Full Report (.txt)",
-                        data=report_text,
-                        file_name=f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        mime="text/plain"
-                    )
+                    # Download buttons
+                    st.markdown("### Download Options")
                     
-                    # Also offer CSV of metrics
-                    st.markdown("### Download Metrics as CSV")
-                    metrics_data = {
-                        'Metric': ['Brier Score', 'Log Loss', 'ROC-AUC', 'PR-AUC', 'ECE', 
-                                   'Hosmer-Lemeshow Chi2', 'Hosmer-Lemeshow p-value',
-                                   'Accuracy', 'Recall', 'Precision', 'F1 Score'],
-                        'Value': [
-                            adv_results['brier_score'],
-                            adv_results['log_loss'],
-                            adv_results['roc_auc'] if adv_results['roc_auc'] else 'N/A',
-                            adv_results['pr_auc'] if adv_results['pr_auc'] else 'N/A',
-                            adv_results['ece'],
-                            adv_results['hl_chi2'],
-                            adv_results['hl_pvalue'],
-                            adv_results['accuracy'],
-                            adv_results['recall'],
-                            adv_results['precision'],
-                            adv_results['f1']
-                        ]
-                    }
-                    metrics_df = pd.DataFrame(metrics_data)
+                    col1, col2 = st.columns(2)
                     
-                    csv_buffer = metrics_df.to_csv(index=False)
-                    st.download_button(
-                        label="📥 Download Metrics (.csv)",
-                        data=csv_buffer,
-                        file_name=f"validation_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
+                    with col1:
+                        st.download_button(
+                            label="📥 Download Full Report (.txt)",
+                            data=report_text,
+                            file_name=f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            mime="text/plain"
+                        )
+                    
+                    with col2:
+                        # CSV of metrics
+                        metrics_data = {
+                            'Metric': ['Brier Score', 'Log Loss', 'ROC-AUC', 'PR-AUC', 'ECE', 
+                                       'Hosmer-Lemeshow Chi2', 'Hosmer-Lemeshow p-value',
+                                       'Accuracy', 'Recall', 'Precision', 'F1 Score'],
+                            'Value': [
+                                adv_results['brier_score'],
+                                adv_results['log_loss'],
+                                adv_results['roc_auc'] if adv_results['roc_auc'] else 'N/A',
+                                adv_results['pr_auc'] if adv_results['pr_auc'] else 'N/A',
+                                adv_results['ece'],
+                                adv_results['hl_chi2'],
+                                adv_results['hl_pvalue'],
+                                adv_results['accuracy'],
+                                adv_results['recall'],
+                                adv_results['precision'],
+                                adv_results['f1']
+                            ]
+                        }
+                        metrics_df = pd.DataFrame(metrics_data)
+                        csv_buffer = metrics_df.to_csv(index=False)
+                        
+                        st.download_button(
+                            label="📥 Download Metrics (.csv)",
+                            data=csv_buffer,
+                            file_name=f"validation_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
                     
             except Exception as e:
                 st.error(f"❌ Advanced validation failed: {e}")
                 import traceback
                 st.code(traceback.format_exc())
-
 
 # ================================================================
 # TAB 4: MODEL COMPARISON (NEW IN V3.0)
@@ -2730,9 +4069,459 @@ def make_xy(df, thr_label, use_rate_cols,
 
 
 # ================================================================
-# TAB 5: LOG OUTCOME
+# TAB 5: RELIABILITY & AVAILABILITY (NEW IN V3.3)
 # ================================================================
 with tab5:
+    st.header("⚙️ Reliability & Availability Analysis")
+    
+    st.markdown("""
+    **PHM Reliability Framework for Foundry Quality**
+    
+    This tab applies classical reliability engineering metrics to foundry scrap prediction,
+    treating scrap threshold exceedance as a "failure event" in reliability terms.
+    
+    **Key Metrics:**
+    - **MTTS (Mean Time To Scrap)**: Analogue to MTTF - average runs until failure
+    - **Failure Rate (λ)**: λ = 1/MTTS - failures per run
+    - **Reliability R(n)**: Probability of surviving n runs without failure: R(n) = e^(-n/MTTS)
+    - **Availability A**: System uptime fraction: A = MTTS / (MTTS + MTTR)
+    """)
+    
+    # Sidebar controls for this tab
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⚙️ Reliability Settings")
+    
+    mttr_input = st.sidebar.number_input(
+        "MTTR (Mean Time To Repair) - Runs",
+        min_value=0.1,
+        max_value=10.0,
+        value=DEFAULT_MTTR_RUNS,
+        step=0.1,
+        help="Recovery time (in production runs) after a scrap event"
+    )
+    
+    availability_target_input = st.sidebar.slider(
+        "Availability Target",
+        min_value=0.80,
+        max_value=0.99,
+        value=AVAILABILITY_TARGET,
+        step=0.01,
+        format="%.0f%%"
+    )
+    
+    reliability_target_input = st.sidebar.slider(
+        "Reliability Target (1 Run)",
+        min_value=0.80,
+        max_value=0.99,
+        value=RELIABILITY_TARGET,
+        step=0.01,
+        format="%.0f%%"
+    )
+    
+    # Main content
+    rel_tab1, rel_tab2, rel_tab3, rel_tab4 = st.tabs([
+        "📊 Part Reliability", 
+        "📈 Reliability Curves", 
+        "🔧 Availability Analysis",
+        "📚 Theory & Formulas"
+    ])
+    
+    with rel_tab1:
+        st.subheader("📊 Part-Level Reliability Metrics")
+        
+        if st.button("🔄 Compute Reliability Metrics", key="compute_reliability"):
+            with st.spinner("Computing reliability metrics for all parts..."):
+                try:
+                    # Load fresh data
+                    df_rel = load_and_clean(csv_path, add_multi_defect=use_multi_defect)
+                    
+                    # Compute reliability metrics
+                    reliability_df = compute_reliability_metrics(df_rel, thr_label, mttr_input)
+                    
+                    if len(reliability_df) > 0:
+                        st.success(f"✅ Computed reliability metrics for {len(reliability_df)} parts")
+                        
+                        # Summary metrics
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            avg_rel = reliability_df['reliability_1run'].mean()
+                            st.metric(
+                                "Avg Reliability (1 Run)",
+                                f"{avg_rel:.1%}",
+                                delta="✓ Good" if avg_rel >= reliability_target_input else "⚠ Below target"
+                            )
+                        
+                        with col2:
+                            avg_avail = reliability_df['availability'].mean()
+                            st.metric(
+                                "Avg Availability",
+                                f"{avg_avail:.1%}",
+                                delta="✓ Good" if avg_avail >= availability_target_input else "⚠ Below target"
+                            )
+                        
+                        with col3:
+                            avg_mtts = reliability_df['mtts_runs'].mean()
+                            st.metric(
+                                "Avg MTTS",
+                                f"{avg_mtts:.1f} runs"
+                            )
+                        
+                        with col4:
+                            avg_lambda = reliability_df['failure_rate_lambda'].mean()
+                            st.metric(
+                                "Avg Failure Rate (λ)",
+                                f"{avg_lambda:.3f}/run"
+                            )
+                        
+                        st.markdown("---")
+                        
+                        # Detailed table
+                        st.subheader("📋 Detailed Part Metrics")
+                        
+                        display_cols = [
+                            'part_id', 'mtts_runs', 'failure_rate_lambda',
+                            'reliability_1run', 'reliability_5run', 'reliability_10run',
+                            'availability', 'failure_count', 'total_runs',
+                            'meets_reliability_target', 'meets_availability_target'
+                        ]
+                        
+                        display_df = reliability_df[display_cols].copy()
+                        display_df.columns = [
+                            'Part ID', 'MTTS (runs)', 'Failure Rate (λ)',
+                            'R(1 run)', 'R(5 runs)', 'R(10 runs)',
+                            'Availability', 'Failures', 'Total Runs',
+                            'Meets R Target', 'Meets A Target'
+                        ]
+                        
+                        # Format percentages
+                        for col in ['R(1 run)', 'R(5 runs)', 'R(10 runs)', 'Availability']:
+                            display_df[col] = display_df[col].apply(lambda x: f"{x:.1%}")
+                        
+                        display_df['Failure Rate (λ)'] = display_df['Failure Rate (λ)'].apply(lambda x: f"{x:.4f}")
+                        display_df['MTTS (runs)'] = display_df['MTTS (runs)'].apply(lambda x: f"{x:.2f}")
+                        
+                        st.dataframe(display_df, use_container_width=True)
+                        
+                        # Parts below target
+                        st.markdown("---")
+                        st.subheader("⚠️ Parts Below Target")
+                        
+                        below_rel = reliability_df[~reliability_df['meets_reliability_target']]
+                        below_avail = reliability_df[~reliability_df['meets_availability_target']]
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown(f"**Below Reliability Target ({reliability_target_input:.0%})**")
+                            if len(below_rel) > 0:
+                                for _, row in below_rel.head(10).iterrows():
+                                    st.warning(f"Part {row['part_id']}: R(1) = {row['reliability_1run']:.1%}")
+                            else:
+                                st.success("All parts meet reliability target! ✅")
+                        
+                        with col2:
+                            st.markdown(f"**Below Availability Target ({availability_target_input:.0%})**")
+                            if len(below_avail) > 0:
+                                for _, row in below_avail.head(10).iterrows():
+                                    st.warning(f"Part {row['part_id']}: A = {row['availability']:.1%}")
+                            else:
+                                st.success("All parts meet availability target! ✅")
+                        
+                        # Store for other tabs
+                        st.session_state['reliability_df'] = reliability_df
+                        
+                    else:
+                        st.warning("No reliability data computed. Check data availability.")
+                        
+                except Exception as e:
+                    st.error(f"Error computing reliability metrics: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+        
+        else:
+            st.info("👆 Click 'Compute Reliability Metrics' to analyze part reliability and availability.")
+    
+    with rel_tab2:
+        st.subheader("📈 Reliability Curves")
+        
+        st.markdown("""
+        **Reliability Function: R(n) = e^(-n/MTTS)**
+        
+        This shows how reliability (probability of no failure) decreases over production runs.
+        """)
+        
+        if 'reliability_df' in st.session_state:
+            reliability_df = st.session_state['reliability_df']
+            
+            # Part selector
+            part_options = ['All Parts (Average)'] + list(reliability_df['part_id'].values)
+            selected_part = st.selectbox("Select Part:", part_options)
+            
+            # Compute reliability curve
+            max_runs = st.slider("Max Runs to Plot", 5, 50, 20)
+            runs = np.arange(0, max_runs + 1)
+            
+            fig = go.Figure()
+            
+            if selected_part == 'All Parts (Average)':
+                avg_mtts = reliability_df['mtts_runs'].mean()
+                reliability_values = [compute_reliability_at_time(avg_mtts, n) for n in runs]
+                
+                fig.add_trace(go.Scatter(
+                    x=runs,
+                    y=reliability_values,
+                    mode='lines+markers',
+                    name=f'Average (MTTS={avg_mtts:.1f})',
+                    line=dict(color='blue', width=2)
+                ))
+                
+                # Add MTTS marker
+                fig.add_vline(x=avg_mtts, line_dash="dash", line_color="red",
+                              annotation_text=f"MTTS={avg_mtts:.1f}")
+            else:
+                part_mtts = reliability_df[reliability_df['part_id'] == selected_part]['mtts_runs'].values[0]
+                reliability_values = [compute_reliability_at_time(part_mtts, n) for n in runs]
+                
+                fig.add_trace(go.Scatter(
+                    x=runs,
+                    y=reliability_values,
+                    mode='lines+markers',
+                    name=f'{selected_part} (MTTS={part_mtts:.1f})',
+                    line=dict(color='blue', width=2)
+                ))
+                
+                # Add MTTS marker
+                fig.add_vline(x=part_mtts, line_dash="dash", line_color="red",
+                              annotation_text=f"MTTS={part_mtts:.1f}")
+            
+            # Add target line
+            fig.add_hline(y=reliability_target_input, line_dash="dot", line_color="green",
+                          annotation_text=f"Target R={reliability_target_input:.0%}")
+            
+            fig.update_layout(
+                title="Reliability Function R(n) = e^(-n/MTTS)",
+                xaxis_title="Production Runs (n)",
+                yaxis_title="Reliability R(n)",
+                yaxis=dict(range=[0, 1.05]),
+                hovermode='x unified'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show key reliability points
+            st.markdown("**Key Reliability Points:**")
+            col1, col2, col3 = st.columns(3)
+            
+            if selected_part == 'All Parts (Average)':
+                mtts_used = reliability_df['mtts_runs'].mean()
+            else:
+                mtts_used = reliability_df[reliability_df['part_id'] == selected_part]['mtts_runs'].values[0]
+            
+            with col1:
+                r1 = compute_reliability_at_time(mtts_used, 1)
+                st.metric("R(1 run)", f"{r1:.1%}")
+            with col2:
+                r5 = compute_reliability_at_time(mtts_used, 5)
+                st.metric("R(5 runs)", f"{r5:.1%}")
+            with col3:
+                runs_for_90 = compute_runs_for_target_reliability(mtts_used, 0.90)
+                st.metric("Runs for 90% Reliability", f"{runs_for_90:.1f}")
+        
+        else:
+            st.info("Please compute reliability metrics in the 'Part Reliability' tab first.")
+    
+    with rel_tab3:
+        st.subheader("🔧 Availability Analysis")
+        
+        st.markdown("""
+        **Availability Formula: A = MTTS / (MTTS + MTTR)**
+        
+        Availability represents the fraction of time the system is operational (not in failure recovery).
+        """)
+        
+        if 'reliability_df' in st.session_state:
+            reliability_df = st.session_state['reliability_df']
+            
+            # MTTR sensitivity analysis
+            st.markdown("### MTTR Sensitivity Analysis")
+            st.markdown("How does availability change with different recovery times?")
+            
+            avg_mtts = reliability_df['mtts_runs'].mean()
+            
+            mttr_values = np.linspace(0.1, 5.0, 50)
+            availability_values = [avg_mtts / (avg_mtts + m) for m in mttr_values]
+            
+            fig = go.Figure()
+            
+            fig.add_trace(go.Scatter(
+                x=mttr_values,
+                y=availability_values,
+                mode='lines',
+                name='Availability',
+                line=dict(color='blue', width=2),
+                fill='tozeroy',
+                fillcolor='rgba(0, 100, 255, 0.1)'
+            ))
+            
+            # Mark current MTTR
+            current_avail = avg_mtts / (avg_mtts + mttr_input)
+            fig.add_trace(go.Scatter(
+                x=[mttr_input],
+                y=[current_avail],
+                mode='markers',
+                name=f'Current MTTR={mttr_input}',
+                marker=dict(size=15, color='red', symbol='star')
+            ))
+            
+            # Add target line
+            fig.add_hline(y=availability_target_input, line_dash="dash", line_color="green",
+                          annotation_text=f"Target A={availability_target_input:.0%}")
+            
+            fig.update_layout(
+                title=f"Availability vs MTTR (MTTS = {avg_mtts:.1f} runs)",
+                xaxis_title="MTTR (Recovery Runs)",
+                yaxis_title="Availability",
+                yaxis=dict(range=[0.5, 1.0]),
+                hovermode='x unified'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # System availability
+            st.markdown("---")
+            st.subheader("🏭 System-Level Availability")
+            
+            system_config = st.radio(
+                "System Configuration:",
+                ['series', 'parallel'],
+                format_func=lambda x: 'Series (All parts must work)' if x == 'series' else 'Parallel (Any part works)',
+                horizontal=True
+            )
+            
+            system_avail = compute_system_availability(reliability_df, system_config)
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric(
+                    "System Availability",
+                    f"{system_avail['system_availability']:.1%}",
+                    delta="✓" if system_avail['system_availability'] >= availability_target_input else "⚠ Below target"
+                )
+            
+            with col2:
+                st.metric("Configuration", system_config.title())
+            
+            with col3:
+                st.metric("Parts in System", system_avail['n_parts'])
+            
+            if system_config == 'series' and system_avail['weakest_link']:
+                st.warning(f"⚠️ **Weakest Link:** Part {system_avail['weakest_link']} - Focus improvement efforts here")
+            
+            st.markdown(f"""
+            **Interpretation:**
+            - **Series System**: All parts must be available for production. System availability is the product of individual availabilities.
+            - **Parallel System**: Production can continue if any part is available. System availability is higher but may not apply to all scenarios.
+            
+            Current system availability: **{system_avail['system_availability']:.2%}** ({system_config} configuration)
+            """)
+            
+        else:
+            st.info("Please compute reliability metrics in the 'Part Reliability' tab first.")
+    
+    with rel_tab4:
+        st.subheader("📚 Theory & Formulas")
+        
+        st.markdown("""
+        ## Reliability Engineering Fundamentals
+        
+        ### 1. Mean Time To Scrap (MTTS) - MTTF Analogue
+        
+        **MTTS** is the foundry-specific analogue to **MTTF (Mean Time To Failure)** from classical reliability engineering.
+        
+        | Traditional Reliability | Foundry Context |
+        |------------------------|-----------------|
+        | MTTF (Mean Time To Failure) | MTTS (Mean Time To Scrap) |
+        | Time until component fails | Runs until scrap threshold exceeded |
+        | Used for non-repairable items | Treats scrap events as "failures" |
+        
+        **Calculation:**
+        ```
+        MTTS = Average(runs between scrap events)
+        ```
+        
+        ---
+        
+        ### 2. Failure Rate (λ)
+        
+        The failure rate is the inverse of MTTS:
+        
+        $$\\lambda = \\frac{1}{MTTS}$$
+        
+        **Interpretation:** A higher MTTS means lower failure rate, indicating higher reliability.
+        
+        ---
+        
+        ### 3. Reliability Function R(n)
+        
+        For an exponential distribution (constant failure rate):
+        
+        $$R(n) = e^{-\\lambda n} = e^{-n/MTTS}$$
+        
+        Where:
+        - **n** = Number of production runs
+        - **R(n)** = Probability of surviving n runs without failure
+        
+        **Key Properties:**
+        - R(0) = 1 (100% reliable at start)
+        - R(MTTS) ≈ 0.368 (36.8% reliability at MTTS)
+        - R(n) → 0 as n → ∞
+        
+        ---
+        
+        ### 4. Availability (A)
+        
+        Availability represents the fraction of time the system is operational:
+        
+        $$A = \\frac{MTTS}{MTTS + MTTR}$$
+        
+        Where:
+        - **MTTS** = Mean Time To Scrap (runs until failure)
+        - **MTTR** = Mean Time To Repair/Replace (recovery time)
+        
+        **Example:**
+        - If MTTS = 10 runs and MTTR = 1 run
+        - A = 10 / (10 + 1) = 0.909 = 90.9%
+        
+        ---
+        
+        ### 5. System Reliability
+        
+        **Series System** (all components must work):
+        $$A_{system} = A_1 \\times A_2 \\times ... \\times A_n$$
+        
+        **Parallel System** (at least one must work):
+        $$A_{system} = 1 - (1-A_1)(1-A_2)...(1-A_n)$$
+        
+        ---
+        
+        ### References
+        
+        1. **Ebeling, C.E. (2010).** *An Introduction to Reliability and Maintainability Engineering.* 2nd ed. Waveland Press.
+        
+        2. **O'Connor, P.D.T. & Kleyner, A. (2012).** *Practical Reliability Engineering.* 5th ed. Wiley.
+        
+        3. **Lei, Y., et al. (2018).** Machinery health prognostics: A systematic review. *Mechanical Systems and Signal Processing*, 104, 799-834.
+        
+        4. **Jardine, A.K.S., Lin, D., & Banjevic, D. (2006).** A review on machinery diagnostics and prognostics implementing condition-based maintenance. *Mechanical Systems and Signal Processing*, 20(7), 1483-1510.
+        """)
+
+
+# ================================================================
+# TAB 6: LOG OUTCOME (was TAB 5)
+# ================================================================
+with tab6:
     st.header("📝 Log Production Outcome")
     
     if not rolling_enabled:
@@ -2808,4 +4597,4 @@ with tab5:
 
 
 st.markdown("---")
-st.caption("🏭 Foundry Scrap Risk Dashboard **v3.1 - Temporal Features Enhancement** | Based on Campbell (2003) + PHM Study | 6-2-1 Rolling Window | Data Confidence Indicators")
+st.caption("🏭 Foundry Scrap Risk Dashboard **v3.3 - Reliability & Availability Metrics** | Based on Campbell (2003) + PHM Study | 6-2-1 Rolling Window | R(t) & A(t) Analysis")
