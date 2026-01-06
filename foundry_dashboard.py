@@ -68,7 +68,7 @@ st.markdown("""
             padding: 10px 20px; border-radius: 10px; margin-bottom: 20px;">
     <h2 style="color: white; margin: 0;">🏭 Foundry Scrap Risk Dashboard</h2>
     <p style="color: #a8d0ff; margin: 5px 0 0 0;">
-        <strong>Version 3.4 - RQ Validation + Reliability & Availability</strong> | 
+        <strong>Version 3.5 - MTTS Censored Data Fix</strong> | 
         6-2-1 Rolling Window | Campbell Process Mapping | PHM Optimized | TRUE MTTS | R(t) & A(t) | DOE TTE
     </p>
 </div>
@@ -398,16 +398,31 @@ def compute_mtts_metrics(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
                 runs_since_last_failure = 0  # Reset counter after failure
         
         # Calculate MTTS (Mean Time To Scrap)
+        total_runs = len(group)
+        
         if len(failure_cycles) > 0:
             mtts_runs = np.mean(failure_cycles)
             mtts_std = np.std(failure_cycles) if len(failure_cycles) > 1 else 0
+            is_censored = False
         else:
-            # No failures observed - censored data
-            # Use total runs as lower bound (right-censored estimate)
-            mtts_runs = len(group)
+            # No failures observed - RIGHT-CENSORED DATA
+            # For reliability calculations, we need to handle this properly:
+            # - The true MTTS is UNKNOWN but is AT LEAST total_runs
+            # - Using total_runs directly in R(n)=e^(-n/MTTS) underestimates reliability
+            # 
+            # SOLUTION: Use a survival analysis approach for censored data
+            # Lower bound estimate: MTTS >= total_runs + 0.5 (continuity correction)
+            # For reliability display, we indicate this is censored data
+            # 
+            # Alternative: Use MTTS = infinity (no failures = perfect reliability)
+            # This is more intuitive: 0 failures in N runs → R(1) should be high
+            #
+            # We use a large but finite MTTS to avoid infinity issues:
+            # MTTS = total_runs * 10 when zero failures (conservative estimate)
+            # This gives parts with 0 failures appropriately HIGH reliability
+            mtts_runs = total_runs * 10  # Conservative estimate for censored data
             mtts_std = 0
-        
-        total_runs = len(group)
+            is_censored = True
         
         # Hazard rate (failures per run) - reliability analogue
         hazard_rate = failure_count / total_runs if total_runs > 0 else 0
@@ -426,7 +441,8 @@ def compute_mtts_metrics(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
             'total_runs': total_runs,
             'hazard_rate': hazard_rate,
             'reliability_score': reliability_score,
-            'mtts_simple': mtts_simple
+            'mtts_simple': mtts_simple,
+            'is_censored': is_censored  # NEW: Flag for zero-failure parts
         })
     
     return pd.DataFrame(results)
