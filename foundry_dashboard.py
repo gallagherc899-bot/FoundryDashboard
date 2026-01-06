@@ -1154,7 +1154,7 @@ def get_confidence_tier(n: int) -> dict:
         }
 
 
-def identify_part_defects(df: pd.DataFrame, part_id: int) -> list:
+def identify_part_defects(df: pd.DataFrame, part_id) -> list:
     """
     Identify which defect types are present for a given part.
     
@@ -1162,13 +1162,15 @@ def identify_part_defects(df: pd.DataFrame, part_id: int) -> list:
     -----------
     df : pd.DataFrame
         Full dataset
-    part_id : int
+    part_id : str or int
         Target part ID
     
     Returns:
     --------
     List of defect column names where rate > 0
     """
+    # Ensure part_id is string (load_and_clean converts to string)
+    part_id = str(part_id)
     part_data = df[df['part_id'] == part_id]
     present_defects = []
     
@@ -1203,8 +1205,9 @@ def filter_by_weight(df: pd.DataFrame, target_weight: float,
     weight_min = target_weight * (1 - tolerance)
     weight_max = target_weight * (1 + tolerance)
     
-    # Get unique part weights
-    part_weights = df.groupby('part_id')['piece_weight'].first()
+    # Get unique part weights - use piece_weight_lbs (canonical name after load_and_clean)
+    weight_col = 'piece_weight_lbs' if 'piece_weight_lbs' in df.columns else 'piece_weight'
+    part_weights = df.groupby('part_id')[weight_col].first()
     
     matching_parts = part_weights[
         (part_weights >= weight_min) & (part_weights <= weight_max)
@@ -1300,10 +1303,13 @@ def get_pooled_part_details(df: pd.DataFrame, part_ids: list) -> list:
     """
     details = []
     
+    # Use piece_weight_lbs (canonical name after load_and_clean)
+    weight_col = 'piece_weight_lbs' if 'piece_weight_lbs' in df.columns else 'piece_weight'
+    
     for pid in sorted(part_ids):
         part_data = df[df['part_id'] == pid]
         
-        weight = part_data['piece_weight'].iloc[0] if len(part_data) > 0 else 0
+        weight = part_data[weight_col].iloc[0] if len(part_data) > 0 else 0
         runs = len(part_data)
         
         defects = []
@@ -1322,7 +1328,7 @@ def get_pooled_part_details(df: pd.DataFrame, part_ids: list) -> list:
     return details
 
 
-def compute_pooled_prediction(df: pd.DataFrame, part_id: int, 
+def compute_pooled_prediction(df: pd.DataFrame, part_id, 
                                threshold_pct: float) -> dict:
     """
     Compute reliability prediction using hierarchical pooling.
@@ -1336,8 +1342,8 @@ def compute_pooled_prediction(df: pd.DataFrame, part_id: int,
     Parameters:
     -----------
     df : pd.DataFrame
-        Full dataset with columns: part_id, piece_weight, scrap_percent
-    part_id : int
+        Full dataset with columns: part_id, piece_weight_lbs, scrap_percent
+    part_id : str or int
         Target part ID for prediction
     threshold_pct : float
         Scrap threshold percentage defining "failure"
@@ -1355,12 +1361,18 @@ def compute_pooled_prediction(df: pd.DataFrame, part_id: int,
     min_part_data = POOLING_CONFIG['min_part_level_data']
     weight_tolerance = POOLING_CONFIG['weight_tolerance']
     
+    # Use piece_weight_lbs (canonical name after load_and_clean)
+    weight_col = 'piece_weight_lbs' if 'piece_weight_lbs' in df.columns else 'piece_weight'
+    
+    # Ensure part_id is string (load_and_clean converts to string)
+    part_id = str(part_id)
+    
     # Get part-level data
     part_data = df[df['part_id'] == part_id]
     part_n = len(part_data)
     
     # Get target characteristics
-    target_weight = part_data['piece_weight'].iloc[0] if len(part_data) > 0 else 0
+    target_weight = part_data[weight_col].iloc[0] if len(part_data) > 0 else 0
     target_defects = identify_part_defects(df, part_id)
     target_defects_clean = [d.replace('_rate', '').replace('_', ' ').title() 
                             for d in target_defects]
@@ -6057,12 +6069,12 @@ with tab6:
                 help="⚠️ = needs pooling (n<5), ✓ = sufficient data"
             )
             
-            # Extract part ID from selection
-            selected_part_id = int(selected_option.split(' ')[0])
+            # Extract part ID from selection (keep as string since load_and_clean converts to string)
+            selected_part_id = selected_option.split(' ')[0]
         
         with col2:
             # Quick stats for selected part
-            part_n = part_counts[selected_part_id]
+            part_n = part_counts.loc[selected_part_id]
             st.metric("Selected Part Runs", part_n)
             
             if part_n < POOLING_CONFIG['min_part_level_data']:
