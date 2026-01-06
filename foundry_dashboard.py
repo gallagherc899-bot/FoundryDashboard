@@ -2648,7 +2648,7 @@ st.sidebar.header("📂 Data Source")
 csv_path = st.sidebar.text_input("Path to CSV", value="anonymized_parts.csv")
 
 st.sidebar.header("⚙️ Model Controls")
-thr_label = st.sidebar.slider("Scrap % threshold", 1.0, 15.0, DEFAULT_THRESHOLD, 0.5)
+thr_label = st.sidebar.slider("Scrap % threshold", 0.1, 15.0, DEFAULT_THRESHOLD, 0.1)
 use_rate_cols = st.sidebar.checkbox("Include *_rate process features", True)
 n_est = st.sidebar.slider("Number of trees", 50, 300, DEFAULT_ESTIMATORS, 10)
 
@@ -2735,6 +2735,9 @@ with tab1:
 
     if st.button("🎯 Predict Risk & Diagnose Process"):
         try:
+            # Store the part ID in session state for SPC tab to use
+            st.session_state['last_predicted_part'] = part_id_input
+            
             st.cache_data.clear()
             
             st.info("🔄 Retraining model with part-specific dataset...")
@@ -5240,21 +5243,47 @@ with tab8:
         "📥 Download Full Report"
     ])
     
-    # Part selector for analysis
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### SPC Analysis Settings")
-    
     # Get parts with sufficient data
     part_counts = df_base.groupby('part_id').size()
     parts_with_data = part_counts[part_counts >= 5].index.tolist()
     
     if parts_with_data:
-        selected_part_spc = st.sidebar.selectbox(
-            "Select Part for SPC Analysis",
-            options=parts_with_data,
-            index=0,
-            key="spc_part_selector"
-        )
+        # Part selector - INSIDE the tab for visibility
+        st.markdown("### 🔧 Select Part for SPC Analysis")
+        
+        # Try to get the part from tab1 input (if it exists in the data)
+        # Use session state to track the part from prediction tab
+        default_part_idx = 0
+        
+        # Check if part_id_input from tab1 is in the list of parts with data
+        try:
+            if 'part_id_input' in dir() and part_id_input in parts_with_data:
+                default_part_idx = parts_with_data.index(part_id_input)
+        except:
+            pass
+        
+        # Also check session state for last predicted part
+        if 'last_predicted_part' in st.session_state:
+            last_part = st.session_state.get('last_predicted_part')
+            if last_part in parts_with_data:
+                default_part_idx = parts_with_data.index(last_part)
+        
+        spc_col1, spc_col2 = st.columns([2, 3])
+        
+        with spc_col1:
+            selected_part_spc = st.selectbox(
+                "Part ID",
+                options=parts_with_data,
+                index=default_part_idx,
+                key="spc_part_selector",
+                help="Select a part with ≥5 observations for SPC analysis"
+            )
+        
+        with spc_col2:
+            part_record_count = part_counts.get(selected_part_spc, 0)
+            st.info(f"📊 **{selected_part_spc}** has **{part_record_count}** historical records available for SPC analysis")
+        
+        st.markdown("---")
         
         # Filter data for selected part
         df_part = df_base[df_base['part_id'] == selected_part_spc].copy()
@@ -5405,16 +5434,36 @@ with tab8:
                 st.metric("Std Dev (σ)", f"{std_dev:.2f}%")
             with col3:
                 ooc_count = len(ooc_indices)
-                st.metric("Out of Control Points", f"{ooc_count}/{n_observations}")
+                st.metric("Out of Control (UCL)", f"{ooc_count}/{n_observations}")
             with col4:
                 in_control_pct = (n_observations - ooc_count) / n_observations * 100 if n_observations > 0 else 0
                 st.metric("In Control %", f"{in_control_pct:.1f}%")
+            
+            # Add threshold-dependent metrics
+            st.markdown("### Threshold-Based Statistics")
+            st.caption(f"Based on current scrap threshold: **{thr_label}%**")
+            
+            # Count points exceeding threshold
+            exceed_threshold_count = sum(1 for v in scrap_values if v > thr_label)
+            exceed_threshold_pct = (exceed_threshold_count / n_observations * 100) if n_observations > 0 else 0
+            
+            col1b, col2b, col3b, col4b = st.columns(4)
+            
+            with col1b:
+                st.metric("Exceeds Threshold", f"{exceed_threshold_count}/{n_observations}")
+            with col2b:
+                st.metric("Exceedance Rate", f"{exceed_threshold_pct:.1f}%")
+            with col3b:
+                st.metric("Cp (Capability)", f"{cp:.2f}" if cp < 100 else "∞")
+            with col4b:
+                cpk_status = "✅" if cpk >= 1.33 else "⚠️" if cpk >= 1.0 else "❌"
+                st.metric("Cpk (Performance)", f"{cpk:.2f}" if cpk < 100 else "∞", delta=cpk_status)
             
             # Limitation callout
             st.warning("""
             **⚠️ SPC Limitation Demonstrated:**
             
-            The X-bar chart shows {ooc} out-of-control points, but these are detected **AFTER** 
+            The X-bar chart shows {ooc} out-of-control points (exceeding UCL), but these are detected **AFTER** 
             they occur. SPC cannot predict which future production run will exceed the threshold.
             
             **ML Advantage:** The predictive model estimates probability of exceeding the scrap 
