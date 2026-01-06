@@ -5884,6 +5884,9 @@ with tab8:
         with spc_tab5:
             st.subheader("📥 Download Comprehensive Report")
             
+            # Define report_date at the start so it's available throughout
+            report_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
             st.markdown("""
             Generate a comprehensive report including all analysis from this dashboard.
             The report can be used for your dissertation documentation.
@@ -5906,8 +5909,6 @@ with tab8:
             if st.button("📄 Generate Full Report", type="primary"):
                 
                 # Build report content
-                report_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
                 if report_format == "HTML (Recommended)":
                     report_content = f"""
 <!DOCTYPE html>
