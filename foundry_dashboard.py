@@ -1516,6 +1516,157 @@ def compute_part_level_defect_analysis(df: pd.DataFrame, part_id,
     }
 
 
+def compute_enhanced_reliability_metrics(df: pd.DataFrame, threshold: float,
+                                          mttr_runs: float = DEFAULT_MTTR_RUNS,
+                                          use_pooling: bool = True) -> pd.DataFrame:
+    """
+    Compute reliability metrics with automatic pooling for low-data parts.
+    
+    This function extends compute_reliability_metrics by using hierarchical
+    pooling when a part has insufficient data (n < 5).
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Full dataset
+    threshold : float
+        Scrap threshold defining failure
+    mttr_runs : float
+        Mean Time To Repair/Replace in runs
+    use_pooling : bool
+        Whether to use pooling for low-data parts
+    
+    Returns:
+    --------
+    pd.DataFrame with reliability metrics, including pooling info
+    """
+    results = []
+    min_data = POOLING_CONFIG['min_part_level_data']
+    
+    # Get all unique parts
+    part_ids = df['part_id'].unique()
+    
+    for part_id in part_ids:
+        part_data = df[df['part_id'] == part_id]
+        part_n = len(part_data)
+        
+        # Determine if pooling is needed
+        needs_pooling = part_n < min_data and use_pooling
+        
+        if needs_pooling:
+            # Use pooled prediction
+            pooled_result = compute_pooled_prediction(df, part_id, threshold)
+            
+            pooled_n = pooled_result['pooled_n']
+            confidence = pooled_result['confidence']
+            
+            if pooled_result['mtts_runs'] is not None:
+                mtts = pooled_result['mtts_runs']
+                failure_rate = pooled_result['failure_rate']
+                failure_count = pooled_result['failure_count']
+                
+                # Calculate reliability metrics from pooled data
+                reliability_1run = np.exp(-1 / mtts) if mtts > 0 else 0
+                reliability_5run = np.exp(-5 / mtts) if mtts > 0 else 0
+                reliability_10run = np.exp(-10 / mtts) if mtts > 0 else 0
+                
+                # Availability
+                availability = mtts / (mtts + mttr_runs) if (mtts + mttr_runs) > 0 else 0
+                
+                results.append({
+                    'part_id': part_id,
+                    'mtts_runs': mtts,
+                    'failure_rate_lambda': 1 / mtts if mtts > 0 else 0,
+                    'reliability_1run': reliability_1run,
+                    'reliability_5run': reliability_5run,
+                    'reliability_10run': reliability_10run,
+                    'availability': availability,
+                    'availability_percent': availability * 100,
+                    'failure_count': failure_count,
+                    'total_runs': pooled_n,
+                    'part_level_runs': part_n,
+                    'mttr_runs': mttr_runs,
+                    'meets_reliability_target': reliability_1run >= RELIABILITY_TARGET,
+                    'meets_availability_target': availability >= AVAILABILITY_TARGET,
+                    'data_source': 'POOLED',
+                    'confidence_level': confidence['level'],
+                    'pooled_parts': pooled_result['pooled_parts_count'],
+                    'pooling_method': pooled_result['pooling_method']
+                })
+            else:
+                # Pooling failed - insufficient data
+                results.append({
+                    'part_id': part_id,
+                    'mtts_runs': np.nan,
+                    'failure_rate_lambda': np.nan,
+                    'reliability_1run': np.nan,
+                    'reliability_5run': np.nan,
+                    'reliability_10run': np.nan,
+                    'availability': np.nan,
+                    'availability_percent': np.nan,
+                    'failure_count': 0,
+                    'total_runs': part_n,
+                    'part_level_runs': part_n,
+                    'mttr_runs': mttr_runs,
+                    'meets_reliability_target': False,
+                    'meets_availability_target': False,
+                    'data_source': 'INSUFFICIENT',
+                    'confidence_level': 'INSUFFICIENT',
+                    'pooled_parts': 0,
+                    'pooling_method': 'N/A'
+                })
+        else:
+            # Part-level data is sufficient - use standard calculation
+            failure_count = (part_data['scrap_percent'] > threshold).sum()
+            
+            # Calculate MTTS
+            if failure_count > 0:
+                failure_cycles = []
+                runs_since_failure = 0
+                for _, row in part_data.sort_values('week_ending').iterrows():
+                    runs_since_failure += 1
+                    if row['scrap_percent'] > threshold:
+                        failure_cycles.append(runs_since_failure)
+                        runs_since_failure = 0
+                mtts = np.mean(failure_cycles) if failure_cycles else part_n
+            else:
+                mtts = part_n * 10  # Censored data estimate
+            
+            # Calculate reliability metrics
+            reliability_1run = np.exp(-1 / mtts) if mtts > 0 else 0
+            reliability_5run = np.exp(-5 / mtts) if mtts > 0 else 0
+            reliability_10run = np.exp(-10 / mtts) if mtts > 0 else 0
+            
+            # Availability
+            availability = mtts / (mtts + mttr_runs) if (mtts + mttr_runs) > 0 else 0
+            
+            # Determine confidence level
+            conf = get_confidence_tier(part_n)
+            
+            results.append({
+                'part_id': part_id,
+                'mtts_runs': mtts,
+                'failure_rate_lambda': 1 / mtts if mtts > 0 else 0,
+                'reliability_1run': reliability_1run,
+                'reliability_5run': reliability_5run,
+                'reliability_10run': reliability_10run,
+                'availability': availability,
+                'availability_percent': availability * 100,
+                'failure_count': failure_count,
+                'total_runs': part_n,
+                'part_level_runs': part_n,
+                'mttr_runs': mttr_runs,
+                'meets_reliability_target': reliability_1run >= RELIABILITY_TARGET,
+                'meets_availability_target': availability >= AVAILABILITY_TARGET,
+                'data_source': 'PART-LEVEL',
+                'confidence_level': conf['level'],
+                'pooled_parts': 1,
+                'pooling_method': 'N/A (Sufficient Part Data)'
+            })
+    
+    return pd.DataFrame(results)
+
+
 def compute_pooled_prediction(df: pd.DataFrame, part_id, 
                                threshold_pct: float) -> dict:
     """
@@ -6064,14 +6215,37 @@ with tab5:
     with rel_tab1:
         st.subheader("📊 Part-Level Reliability Metrics")
         
+        # Add toggle for pooling
+        use_pooling_rel = st.checkbox(
+            "🔗 Use Hierarchical Pooling for Low-Data Parts",
+            value=True,
+            help="When enabled, parts with < 5 data points will use pooled data from similar parts"
+        )
+        
+        if use_pooling_rel:
+            st.info("🔗 **Pooling Enabled**: Parts with insufficient data (n<5) will use pooled metrics from similar parts based on weight and defect matching.")
+        
         if st.button("🔄 Compute Reliability Metrics", key="compute_reliability"):
             with st.spinner("Computing reliability metrics for all parts..."):
                 try:
                     # Load fresh data
                     df_rel = load_and_clean(csv_path, add_multi_defect=use_multi_defect)
                     
-                    # Compute reliability metrics
-                    reliability_df = compute_reliability_metrics(df_rel, thr_label, mttr_input)
+                    # Use enhanced reliability metrics with pooling
+                    if use_pooling_rel:
+                        reliability_df = compute_enhanced_reliability_metrics(
+                            df_rel, thr_label, mttr_input, use_pooling=True
+                        )
+                    else:
+                        reliability_df = compute_reliability_metrics(df_rel, thr_label, mttr_input)
+                        # Add columns for compatibility
+                        reliability_df['data_source'] = 'PART-LEVEL'
+                        reliability_df['confidence_level'] = reliability_df['total_runs'].apply(
+                            lambda n: get_confidence_tier(n)['level']
+                        )
+                        reliability_df['pooled_parts'] = 1
+                        reliability_df['pooling_method'] = 'N/A'
+                        reliability_df['part_level_runs'] = reliability_df['total_runs']
                     
                     if len(reliability_df) > 0:
                         st.success(f"✅ Computed reliability metrics for {len(reliability_df)} parts")
@@ -6079,8 +6253,11 @@ with tab5:
                         # Summary metrics
                         col1, col2, col3, col4 = st.columns(4)
                         
+                        # Filter to non-NaN values for averages
+                        valid_rel = reliability_df[reliability_df['reliability_1run'].notna()]
+                        
                         with col1:
-                            avg_rel = reliability_df['reliability_1run'].mean()
+                            avg_rel = valid_rel['reliability_1run'].mean() if len(valid_rel) > 0 else 0
                             st.metric(
                                 "Avg Reliability (1 Run)",
                                 f"{avg_rel:.1%}",
@@ -6088,7 +6265,7 @@ with tab5:
                             )
                         
                         with col2:
-                            avg_avail = reliability_df['availability'].mean()
+                            avg_avail = valid_rel['availability'].mean() if len(valid_rel) > 0 else 0
                             st.metric(
                                 "Avg Availability",
                                 f"{avg_avail:.1%}",
@@ -6096,45 +6273,99 @@ with tab5:
                             )
                         
                         with col3:
-                            avg_mtts = reliability_df['mtts_runs'].mean()
+                            avg_mtts = valid_rel['mtts_runs'].mean() if len(valid_rel) > 0 else 0
                             st.metric(
                                 "Avg MTTS",
                                 f"{avg_mtts:.1f} runs"
                             )
                         
                         with col4:
-                            avg_lambda = reliability_df['failure_rate_lambda'].mean()
+                            avg_lambda = valid_rel['failure_rate_lambda'].mean() if len(valid_rel) > 0 else 0
                             st.metric(
                                 "Avg Failure Rate (λ)",
                                 f"{avg_lambda:.3f}/run"
                             )
+                        
+                        # Show data source breakdown if pooling enabled
+                        if use_pooling_rel and 'data_source' in reliability_df.columns:
+                            st.markdown("---")
+                            st.markdown("#### 📊 Data Source Breakdown")
+                            
+                            source_counts = reliability_df['data_source'].value_counts()
+                            
+                            src_col1, src_col2, src_col3 = st.columns(3)
+                            
+                            with src_col1:
+                                part_level_count = source_counts.get('PART-LEVEL', 0)
+                                st.metric("Part-Level (n≥5)", part_level_count,
+                                         delta=f"{part_level_count/len(reliability_df)*100:.1f}%")
+                            
+                            with src_col2:
+                                pooled_count = source_counts.get('POOLED', 0)
+                                st.metric("Pooled (n<5)", pooled_count,
+                                         delta=f"{pooled_count/len(reliability_df)*100:.1f}%")
+                            
+                            with src_col3:
+                                insuff_count = source_counts.get('INSUFFICIENT', 0)
+                                st.metric("Insufficient Data", insuff_count,
+                                         delta=f"{insuff_count/len(reliability_df)*100:.1f}%")
+                            
+                            # Confidence level breakdown
+                            conf_counts = reliability_df['confidence_level'].value_counts()
+                            st.markdown("**Confidence Levels:**")
+                            conf_text = []
+                            for level in ['HIGH', 'MODERATE', 'LOW', 'INSUFFICIENT']:
+                                count = conf_counts.get(level, 0)
+                                pct = count / len(reliability_df) * 100
+                                emoji = {'HIGH': '✅', 'MODERATE': '○', 'LOW': '△', 'INSUFFICIENT': '✗'}.get(level, '')
+                                conf_text.append(f"{emoji} {level}: {count} ({pct:.1f}%)")
+                            st.markdown(" | ".join(conf_text))
                         
                         st.markdown("---")
                         
                         # Detailed table
                         st.subheader("📋 Detailed Part Metrics")
                         
-                        display_cols = [
-                            'part_id', 'mtts_runs', 'failure_rate_lambda',
-                            'reliability_1run', 'reliability_5run', 'reliability_10run',
-                            'availability', 'failure_count', 'total_runs',
-                            'meets_reliability_target', 'meets_availability_target'
-                        ]
+                        # Select columns based on pooling
+                        if use_pooling_rel:
+                            display_cols = [
+                                'part_id', 'mtts_runs', 'failure_rate_lambda',
+                                'reliability_1run', 'reliability_5run', 'reliability_10run',
+                                'availability', 'failure_count', 'part_level_runs', 'total_runs',
+                                'data_source', 'confidence_level'
+                            ]
+                            col_names = [
+                                'Part ID', 'MTTS (runs)', 'Failure Rate (λ)',
+                                'R(1 run)', 'R(5 runs)', 'R(10 runs)',
+                                'Availability', 'Failures', 'Part Runs', 'Total Runs',
+                                'Data Source', 'Confidence'
+                            ]
+                        else:
+                            display_cols = [
+                                'part_id', 'mtts_runs', 'failure_rate_lambda',
+                                'reliability_1run', 'reliability_5run', 'reliability_10run',
+                                'availability', 'failure_count', 'total_runs',
+                                'meets_reliability_target', 'meets_availability_target'
+                            ]
+                            col_names = [
+                                'Part ID', 'MTTS (runs)', 'Failure Rate (λ)',
+                                'R(1 run)', 'R(5 runs)', 'R(10 runs)',
+                                'Availability', 'Failures', 'Total Runs',
+                                'Meets R Target', 'Meets A Target'
+                            ]
                         
-                        display_df = reliability_df[display_cols].copy()
-                        display_df.columns = [
-                            'Part ID', 'MTTS (runs)', 'Failure Rate (λ)',
-                            'R(1 run)', 'R(5 runs)', 'R(10 runs)',
-                            'Availability', 'Failures', 'Total Runs',
-                            'Meets R Target', 'Meets A Target'
-                        ]
+                        display_df = reliability_df[[c for c in display_cols if c in reliability_df.columns]].copy()
+                        display_df.columns = col_names[:len(display_df.columns)]
                         
                         # Format percentages
                         for col in ['R(1 run)', 'R(5 runs)', 'R(10 runs)', 'Availability']:
-                            display_df[col] = display_df[col].apply(lambda x: f"{x:.1%}")
+                            if col in display_df.columns:
+                                display_df[col] = display_df[col].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "N/A")
                         
-                        display_df['Failure Rate (λ)'] = display_df['Failure Rate (λ)'].apply(lambda x: f"{x:.4f}")
-                        display_df['MTTS (runs)'] = display_df['MTTS (runs)'].apply(lambda x: f"{x:.2f}")
+                        if 'Failure Rate (λ)' in display_df.columns:
+                            display_df['Failure Rate (λ)'] = display_df['Failure Rate (λ)'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "N/A")
+                        if 'MTTS (runs)' in display_df.columns:
+                            display_df['MTTS (runs)'] = display_df['MTTS (runs)'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
                         
                         st.dataframe(display_df, use_container_width=True)
                         
@@ -6142,8 +6373,14 @@ with tab5:
                         st.markdown("---")
                         st.subheader("⚠️ Parts Below Target")
                         
-                        below_rel = reliability_df[~reliability_df['meets_reliability_target']]
-                        below_avail = reliability_df[~reliability_df['meets_availability_target']]
+                        below_rel = reliability_df[
+                            (reliability_df['meets_reliability_target'] == False) & 
+                            (reliability_df['reliability_1run'].notna())
+                        ]
+                        below_avail = reliability_df[
+                            (reliability_df['meets_availability_target'] == False) &
+                            (reliability_df['availability'].notna())
+                        ]
                         
                         col1, col2 = st.columns(2)
                         
