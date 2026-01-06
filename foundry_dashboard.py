@@ -222,6 +222,64 @@ van de Schoot, R., et al. (2015). Analyzing small data sets using Bayesian
 """
 
 # ================================================================
+# RELIABILITY DISTRIBUTION FITTING (NEW IN V3.5)
+# Weibull/Exponential fitting for "Zio-style" reliability alignment
+# Based on: Zio (2009), Nelson (2003), Meeker & Escobar (1998)
+# ================================================================
+RELIABILITY_DISTRIBUTION_CONFIG = {
+    'enabled': True,
+    'distributions': ['weibull', 'exponential', 'lognormal'],
+    'default_distribution': 'weibull',
+    'goodness_of_fit_tests': ['ks', 'ad'],  # Kolmogorov-Smirnov, Anderson-Darling
+    'confidence_level': 0.95,
+    'min_samples_for_fit': 10,
+}
+
+# APA 7 References for reliability distribution fitting
+RELIABILITY_DISTRIBUTION_REFERENCES = """
+**Reliability Distribution Fitting - Statistical Basis & References (APA 7 Format)**
+
+**Core Reliability Theory:**
+
+Zio, E. (2009). Reliability engineering: Old problems and new challenges. 
+    *Reliability Engineering & System Safety, 94*(2), 125-141.
+    https://doi.org/10.1016/j.ress.2008.06.002
+
+Nelson, W. (2003). *Applied life data analysis* (2nd ed.). Wiley.
+    https://doi.org/10.1002/0471725234
+
+Meeker, W. Q., & Escobar, L. A. (1998). *Statistical methods for reliability 
+    data*. Wiley.
+
+**Weibull Distribution:**
+
+Weibull, W. (1951). A statistical distribution function of wide applicability. 
+    *Journal of Applied Mechanics, 18*(3), 293-297.
+
+Abernethy, R. B. (2006). *The new Weibull handbook* (5th ed.). Robert B. Abernethy.
+
+Dodson, B. (2006). *The Weibull analysis handbook* (2nd ed.). ASQ Quality Press.
+
+**Goodness-of-Fit Tests:**
+
+Stephens, M. A. (1974). EDF statistics for goodness of fit and some comparisons. 
+    *Journal of the American Statistical Association, 69*(347), 730-737.
+    https://doi.org/10.1080/01621459.1974.10480196
+
+D'Agostino, R. B., & Stephens, M. A. (1986). *Goodness-of-fit techniques*. 
+    Marcel Dekker.
+
+**Model Selection:**
+
+Burnham, K. P., & Anderson, D. R. (2002). *Model selection and multimodel 
+    inference: A practical information-theoretic approach* (2nd ed.). Springer.
+
+Akaike, H. (1974). A new look at the statistical model identification. 
+    *IEEE Transactions on Automatic Control, 19*(6), 716-723.
+    https://doi.org/10.1109/TAC.1974.1100705
+"""
+
+# ================================================================
 # CAMPBELL PROCESS-DEFECT MAPPING
 # Based on Campbell (2003) "Castings Practice: The Ten Rules"
 # ================================================================
@@ -2313,6 +2371,749 @@ def display_pooled_prediction(result: dict, threshold_pct: float,
     # References
     with st.expander("📚 Statistical Basis & References"):
         st.markdown(POOLING_REFERENCES)
+
+
+# ================================================================
+# RELIABILITY DISTRIBUTION FITTING (NEW IN V3.5)
+# "Zio-style" reliability alignment - bridging ML to reliability theory
+# ================================================================
+
+def extract_time_to_scrap(df: pd.DataFrame, part_id, threshold: float) -> list:
+    """
+    Extract time-to-scrap (TTS) cycles for a given part.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Dataset with scrap_percent and week_ending columns
+    part_id : str or int
+        Part ID to analyze
+    threshold : float
+        Scrap threshold defining "failure"
+    
+    Returns:
+    --------
+    list of cycle counts between failures (time-to-scrap values)
+    """
+    part_id = str(part_id)
+    part_df = df[df['part_id'] == part_id].copy()
+    
+    if len(part_df) == 0:
+        return []
+    
+    # Sort by time
+    if 'week_ending' in part_df.columns:
+        part_df = part_df.sort_values('week_ending')
+    
+    # Extract TTS cycles
+    tts_values = []
+    cycles_since_failure = 0
+    
+    for _, row in part_df.iterrows():
+        cycles_since_failure += 1
+        if row['scrap_percent'] > threshold:
+            tts_values.append(cycles_since_failure)
+            cycles_since_failure = 0
+    
+    # Handle right-censored data (last observation without failure)
+    # For now, we don't include censored observations in fitting
+    
+    return tts_values
+
+
+def extract_pooled_time_to_scrap(df: pd.DataFrame, part_ids: list, 
+                                  threshold: float) -> list:
+    """
+    Extract time-to-scrap cycles from multiple pooled parts.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Full dataset
+    part_ids : list
+        List of part IDs to include
+    threshold : float
+        Scrap threshold defining "failure"
+    
+    Returns:
+    --------
+    list of all TTS values from pooled parts
+    """
+    all_tts = []
+    
+    for pid in part_ids:
+        part_tts = extract_time_to_scrap(df, pid, threshold)
+        all_tts.extend(part_tts)
+    
+    return all_tts
+
+
+def fit_weibull(tts_values: list) -> dict:
+    """
+    Fit Weibull distribution to time-to-scrap data.
+    
+    Weibull PDF: f(t) = (β/η) * (t/η)^(β-1) * exp(-(t/η)^β)
+    
+    Parameters:
+    -----------
+    tts_values : list
+        Time-to-scrap values (must have at least 3 values)
+    
+    Returns:
+    --------
+    dict with shape (β), scale (η), and fit statistics
+    """
+    from scipy import stats
+    
+    if len(tts_values) < 3:
+        return {
+            'success': False,
+            'error': 'Insufficient data (need at least 3 TTS values)',
+            'n': len(tts_values)
+        }
+    
+    try:
+        tts_array = np.array(tts_values, dtype=float)
+        tts_array = tts_array[tts_array > 0]  # Remove zeros
+        
+        if len(tts_array) < 3:
+            return {
+                'success': False,
+                'error': 'Insufficient positive TTS values',
+                'n': len(tts_array)
+            }
+        
+        # Fit Weibull (scipy uses 'c' for shape and 'scale' for scale)
+        # Weibull_min is the standard 2-parameter Weibull
+        shape, loc, scale = stats.weibull_min.fit(tts_array, floc=0)
+        
+        # Calculate MTTS from Weibull: E[T] = η * Γ(1 + 1/β)
+        from scipy.special import gamma
+        mtts_weibull = scale * gamma(1 + 1/shape)
+        
+        # Calculate reliability at t=1: R(1) = exp(-(1/η)^β)
+        r_1 = np.exp(-((1/scale)**shape))
+        
+        # Goodness of fit: Kolmogorov-Smirnov test
+        ks_stat, ks_pvalue = stats.kstest(tts_array, 'weibull_min', args=(shape, 0, scale))
+        
+        # Anderson-Darling test
+        ad_result = stats.anderson(tts_array, dist='weibull_min')
+        # Note: AD critical values are for specific significance levels
+        ad_stat = ad_result.statistic
+        
+        # Log-likelihood for AIC/BIC
+        log_likelihood = np.sum(stats.weibull_min.logpdf(tts_array, shape, 0, scale))
+        n = len(tts_array)
+        k = 2  # Number of parameters
+        aic = 2 * k - 2 * log_likelihood
+        bic = k * np.log(n) - 2 * log_likelihood
+        
+        # Interpret shape parameter
+        if shape < 1:
+            failure_pattern = "Decreasing failure rate (infant mortality)"
+        elif shape == 1:
+            failure_pattern = "Constant failure rate (random failures)"
+        elif shape < 2:
+            failure_pattern = "Increasing failure rate (early wear-out)"
+        else:
+            failure_pattern = "Strongly increasing failure rate (wear-out dominant)"
+        
+        return {
+            'success': True,
+            'distribution': 'Weibull',
+            'shape_beta': shape,
+            'scale_eta': scale,
+            'mtts': mtts_weibull,
+            'r_1': r_1,
+            'failure_pattern': failure_pattern,
+            'ks_statistic': ks_stat,
+            'ks_pvalue': ks_pvalue,
+            'ad_statistic': ad_stat,
+            'aic': aic,
+            'bic': bic,
+            'log_likelihood': log_likelihood,
+            'n': n,
+            'tts_values': tts_array.tolist()
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'n': len(tts_values)
+        }
+
+
+def fit_exponential(tts_values: list) -> dict:
+    """
+    Fit Exponential distribution to time-to-scrap data.
+    
+    Exponential PDF: f(t) = λ * exp(-λt)
+    This is Weibull with β=1 (constant failure rate)
+    
+    Parameters:
+    -----------
+    tts_values : list
+        Time-to-scrap values
+    
+    Returns:
+    --------
+    dict with rate (λ), scale (1/λ = MTTS), and fit statistics
+    """
+    from scipy import stats
+    
+    if len(tts_values) < 3:
+        return {
+            'success': False,
+            'error': 'Insufficient data (need at least 3 TTS values)',
+            'n': len(tts_values)
+        }
+    
+    try:
+        tts_array = np.array(tts_values, dtype=float)
+        tts_array = tts_array[tts_array > 0]
+        
+        if len(tts_array) < 3:
+            return {
+                'success': False,
+                'error': 'Insufficient positive TTS values',
+                'n': len(tts_array)
+            }
+        
+        # Fit Exponential
+        loc, scale = stats.expon.fit(tts_array, floc=0)
+        rate_lambda = 1 / scale
+        
+        # MTTS for exponential = 1/λ = scale
+        mtts_exp = scale
+        
+        # R(1) = exp(-λ*1) = exp(-1/scale)
+        r_1 = np.exp(-rate_lambda)
+        
+        # Goodness of fit: K-S test
+        ks_stat, ks_pvalue = stats.kstest(tts_array, 'expon', args=(0, scale))
+        
+        # Log-likelihood for AIC/BIC
+        log_likelihood = np.sum(stats.expon.logpdf(tts_array, 0, scale))
+        n = len(tts_array)
+        k = 1  # Number of parameters (just scale, loc fixed at 0)
+        aic = 2 * k - 2 * log_likelihood
+        bic = k * np.log(n) - 2 * log_likelihood
+        
+        return {
+            'success': True,
+            'distribution': 'Exponential',
+            'rate_lambda': rate_lambda,
+            'scale': scale,
+            'mtts': mtts_exp,
+            'r_1': r_1,
+            'failure_pattern': "Constant failure rate (memoryless)",
+            'ks_statistic': ks_stat,
+            'ks_pvalue': ks_pvalue,
+            'aic': aic,
+            'bic': bic,
+            'log_likelihood': log_likelihood,
+            'n': n,
+            'tts_values': tts_array.tolist()
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'n': len(tts_values)
+        }
+
+
+def fit_lognormal(tts_values: list) -> dict:
+    """
+    Fit Log-Normal distribution to time-to-scrap data.
+    
+    Log-Normal is appropriate when failures result from 
+    multiplicative degradation processes.
+    
+    Parameters:
+    -----------
+    tts_values : list
+        Time-to-scrap values
+    
+    Returns:
+    --------
+    dict with μ, σ parameters and fit statistics
+    """
+    from scipy import stats
+    
+    if len(tts_values) < 3:
+        return {
+            'success': False,
+            'error': 'Insufficient data (need at least 3 TTS values)',
+            'n': len(tts_values)
+        }
+    
+    try:
+        tts_array = np.array(tts_values, dtype=float)
+        tts_array = tts_array[tts_array > 0]
+        
+        if len(tts_array) < 3:
+            return {
+                'success': False,
+                'error': 'Insufficient positive TTS values',
+                'n': len(tts_array)
+            }
+        
+        # Fit Log-Normal
+        shape, loc, scale = stats.lognorm.fit(tts_array, floc=0)
+        
+        # Parameters: shape = σ (standard deviation of log(T))
+        # scale = exp(μ) where μ is the mean of log(T)
+        sigma = shape
+        mu = np.log(scale)
+        
+        # MTTS for lognormal: E[T] = exp(μ + σ²/2)
+        mtts_lognorm = np.exp(mu + (sigma**2)/2)
+        
+        # R(1) = 1 - Φ((ln(1) - μ) / σ) = 1 - Φ(-μ/σ)
+        r_1 = 1 - stats.norm.cdf(-mu / sigma)
+        
+        # K-S test
+        ks_stat, ks_pvalue = stats.kstest(tts_array, 'lognorm', args=(shape, 0, scale))
+        
+        # Log-likelihood for AIC/BIC
+        log_likelihood = np.sum(stats.lognorm.logpdf(tts_array, shape, 0, scale))
+        n = len(tts_array)
+        k = 2
+        aic = 2 * k - 2 * log_likelihood
+        bic = k * np.log(n) - 2 * log_likelihood
+        
+        return {
+            'success': True,
+            'distribution': 'Log-Normal',
+            'mu': mu,
+            'sigma': sigma,
+            'scale': scale,
+            'mtts': mtts_lognorm,
+            'r_1': r_1,
+            'failure_pattern': "Multiplicative degradation process",
+            'ks_statistic': ks_stat,
+            'ks_pvalue': ks_pvalue,
+            'aic': aic,
+            'bic': bic,
+            'log_likelihood': log_likelihood,
+            'n': n,
+            'tts_values': tts_array.tolist()
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'n': len(tts_values)
+        }
+
+
+def compare_distributions(tts_values: list) -> dict:
+    """
+    Compare all three distributions and select the best fit.
+    
+    Parameters:
+    -----------
+    tts_values : list
+        Time-to-scrap values
+    
+    Returns:
+    --------
+    dict with all fits and recommendation
+    """
+    weibull_fit = fit_weibull(tts_values)
+    exponential_fit = fit_exponential(tts_values)
+    lognormal_fit = fit_lognormal(tts_values)
+    
+    fits = {
+        'weibull': weibull_fit,
+        'exponential': exponential_fit,
+        'lognormal': lognormal_fit
+    }
+    
+    # Find best fit by AIC (lower is better)
+    successful_fits = {k: v for k, v in fits.items() if v.get('success', False)}
+    
+    if not successful_fits:
+        return {
+            'fits': fits,
+            'best_fit': None,
+            'recommendation': 'No distribution could be fitted to the data'
+        }
+    
+    best_by_aic = min(successful_fits.items(), key=lambda x: x[1]['aic'])
+    best_by_bic = min(successful_fits.items(), key=lambda x: x[1]['bic'])
+    
+    # Check if Weibull shape ≈ 1 (exponential is simpler)
+    recommendation = []
+    
+    if weibull_fit.get('success'):
+        beta = weibull_fit['shape_beta']
+        if 0.9 < beta < 1.1:
+            recommendation.append("Weibull shape β ≈ 1 suggests Exponential may be adequate (constant failure rate)")
+    
+    if best_by_aic[0] == best_by_bic[0]:
+        recommendation.append(f"Both AIC and BIC favor {best_by_aic[0].title()} distribution")
+    else:
+        recommendation.append(f"AIC favors {best_by_aic[0].title()}, BIC favors {best_by_bic[0].title()}")
+    
+    # Check K-S test results
+    for name, fit in successful_fits.items():
+        if fit['ks_pvalue'] > 0.05:
+            recommendation.append(f"{name.title()}: K-S test p={fit['ks_pvalue']:.3f} (good fit)")
+        else:
+            recommendation.append(f"{name.title()}: K-S test p={fit['ks_pvalue']:.3f} (poor fit, p<0.05)")
+    
+    return {
+        'fits': fits,
+        'best_fit': best_by_aic[0],
+        'best_fit_details': best_by_aic[1],
+        'recommendation': ' | '.join(recommendation),
+        'aic_comparison': {k: v['aic'] for k, v in successful_fits.items()},
+        'bic_comparison': {k: v['bic'] for k, v in successful_fits.items()}
+    }
+
+
+def compute_reliability_curve(fit_result: dict, max_runs: int = 20) -> pd.DataFrame:
+    """
+    Generate reliability curve R(t) from fitted distribution.
+    
+    Parameters:
+    -----------
+    fit_result : dict
+        Result from fit_weibull, fit_exponential, or fit_lognormal
+    max_runs : int
+        Maximum number of runs to compute
+    
+    Returns:
+    --------
+    pd.DataFrame with t, R(t), F(t), h(t) columns
+    """
+    from scipy import stats
+    
+    if not fit_result.get('success'):
+        return pd.DataFrame()
+    
+    t = np.arange(0, max_runs + 1, 0.5)
+    
+    dist = fit_result['distribution']
+    
+    if dist == 'Weibull':
+        shape = fit_result['shape_beta']
+        scale = fit_result['scale_eta']
+        R_t = np.exp(-((t / scale) ** shape))
+        F_t = 1 - R_t
+        # Hazard function h(t) = (β/η) * (t/η)^(β-1)
+        h_t = (shape / scale) * ((t / scale) ** (shape - 1))
+        h_t[0] = h_t[1] if shape < 1 else 0  # Handle t=0
+        
+    elif dist == 'Exponential':
+        rate = fit_result['rate_lambda']
+        R_t = np.exp(-rate * t)
+        F_t = 1 - R_t
+        h_t = np.full_like(t, rate)  # Constant hazard
+        
+    elif dist == 'Log-Normal':
+        mu = fit_result['mu']
+        sigma = fit_result['sigma']
+        # R(t) = 1 - Φ((ln(t) - μ) / σ)
+        with np.errstate(divide='ignore'):
+            z = (np.log(t) - mu) / sigma
+        R_t = 1 - stats.norm.cdf(z)
+        R_t[0] = 1.0  # R(0) = 1
+        F_t = 1 - R_t
+        # Hazard: h(t) = f(t) / R(t)
+        f_t = stats.lognorm.pdf(t, sigma, 0, np.exp(mu))
+        h_t = np.divide(f_t, R_t, where=R_t > 0, out=np.zeros_like(R_t))
+    
+    else:
+        return pd.DataFrame()
+    
+    return pd.DataFrame({
+        't': t,
+        'R_t': R_t,
+        'F_t': F_t,
+        'h_t': h_t
+    })
+
+
+def compare_ml_to_reliability(ml_probability: float, fit_result: dict) -> dict:
+    """
+    Compare ML model's scrap probability to theoretical reliability.
+    
+    Parameters:
+    -----------
+    ml_probability : float
+        Scrap probability from RandomForest (0-1)
+    fit_result : dict
+        Result from distribution fitting
+    
+    Returns:
+    --------
+    dict with comparison metrics
+    """
+    if not fit_result.get('success'):
+        return {
+            'comparison_possible': False,
+            'error': 'No successful distribution fit'
+        }
+    
+    # ML predicts P(scrap) which maps to F(1) = 1 - R(1)
+    ml_failure_prob = ml_probability
+    theoretical_r1 = fit_result['r_1']
+    theoretical_f1 = 1 - theoretical_r1
+    
+    # Absolute difference
+    diff = abs(ml_failure_prob - theoretical_f1)
+    
+    # Relative difference
+    rel_diff = diff / theoretical_f1 * 100 if theoretical_f1 > 0 else 0
+    
+    # Alignment assessment
+    if diff < 0.05:
+        alignment = "Excellent alignment (< 5pp difference)"
+    elif diff < 0.10:
+        alignment = "Good alignment (< 10pp difference)"
+    elif diff < 0.20:
+        alignment = "Moderate alignment (< 20pp difference)"
+    else:
+        alignment = "Poor alignment (≥ 20pp difference)"
+    
+    return {
+        'comparison_possible': True,
+        'ml_failure_prob': ml_failure_prob,
+        'ml_reliability': 1 - ml_failure_prob,
+        'theoretical_f1': theoretical_f1,
+        'theoretical_r1': theoretical_r1,
+        'difference_pp': diff * 100,
+        'relative_difference_pct': rel_diff,
+        'alignment': alignment,
+        'distribution': fit_result['distribution'],
+        'interpretation': f"ML predicts {ml_failure_prob*100:.1f}% failure vs {fit_result['distribution']} {theoretical_f1*100:.1f}%"
+    }
+
+
+def display_reliability_distribution_analysis(df: pd.DataFrame, part_id, 
+                                               threshold: float,
+                                               ml_probability: float = None,
+                                               use_pooling: bool = True):
+    """
+    Display comprehensive reliability distribution analysis in Streamlit.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Full dataset
+    part_id : str or int
+        Part ID to analyze
+    threshold : float
+        Scrap threshold
+    ml_probability : float, optional
+        ML model's predicted scrap probability
+    use_pooling : bool
+        Whether to use pooled data for fitting
+    """
+    st.markdown("### 📐 Reliability Distribution Analysis")
+    st.markdown("*Weibull/Exponential/Log-Normal fitting for Zio-style reliability alignment*")
+    
+    # Extract TTS data
+    if use_pooling:
+        # Get pooled parts
+        pooled_result = compute_pooled_prediction(df, part_id, threshold)
+        if pooled_result['pooled_n'] > 0:
+            tts_values = extract_pooled_time_to_scrap(
+                df, pooled_result['included_part_ids'], threshold
+            )
+            data_source = f"Pooled ({pooled_result['pooled_parts_count']} parts, {pooled_result['pooled_n']} rows)"
+        else:
+            tts_values = extract_time_to_scrap(df, part_id, threshold)
+            data_source = f"Part-Level (Part {part_id})"
+    else:
+        tts_values = extract_time_to_scrap(df, part_id, threshold)
+        data_source = f"Part-Level (Part {part_id})"
+    
+    st.info(f"**Data Source:** {data_source} | **TTS Values Found:** {len(tts_values)}")
+    
+    if len(tts_values) < 3:
+        st.warning(f"⚠️ Insufficient failure data for distribution fitting (need ≥3 TTS values, found {len(tts_values)})")
+        st.markdown("""
+        **Why this happens:**
+        - Part may have very few failures (high reliability)
+        - Insufficient historical data
+        
+        **Recommendations:**
+        - Collect more production data
+        - Use pooled analysis from similar parts
+        - Consider Rule of Three estimation for zero-failure scenarios
+        """)
+        return
+    
+    # Compare all distributions
+    comparison = compare_distributions(tts_values)
+    
+    # Show TTS histogram
+    st.markdown("#### 📊 Time-to-Scrap Distribution")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        fig_hist = px.histogram(
+            x=tts_values,
+            nbins=min(15, len(set(tts_values))),
+            title="Observed Time-to-Scrap Distribution",
+            labels={'x': 'Runs Between Failures', 'y': 'Frequency'}
+        )
+        fig_hist.update_layout(height=300)
+        st.plotly_chart(fig_hist, use_container_width=True)
+    
+    with col2:
+        st.markdown("**Summary Statistics:**")
+        st.markdown(f"- **n:** {len(tts_values)} failures")
+        st.markdown(f"- **Mean:** {np.mean(tts_values):.2f} runs")
+        st.markdown(f"- **Median:** {np.median(tts_values):.2f} runs")
+        st.markdown(f"- **Std Dev:** {np.std(tts_values):.2f} runs")
+        st.markdown(f"- **Min:** {min(tts_values)} runs")
+        st.markdown(f"- **Max:** {max(tts_values)} runs")
+    
+    # Show fitted distributions
+    st.markdown("#### 📈 Distribution Fitting Results")
+    
+    fit_cols = st.columns(3)
+    
+    for i, (name, fit) in enumerate(comparison['fits'].items()):
+        with fit_cols[i]:
+            st.markdown(f"**{name.title()}**")
+            if fit.get('success'):
+                if name == 'weibull':
+                    st.markdown(f"- β (shape): {fit['shape_beta']:.3f}")
+                    st.markdown(f"- η (scale): {fit['scale_eta']:.3f}")
+                elif name == 'exponential':
+                    st.markdown(f"- λ (rate): {fit['rate_lambda']:.4f}")
+                elif name == 'lognormal':
+                    st.markdown(f"- μ: {fit['mu']:.3f}")
+                    st.markdown(f"- σ: {fit['sigma']:.3f}")
+                
+                st.markdown(f"- **MTTS:** {fit['mtts']:.2f} runs")
+                st.markdown(f"- **R(1):** {fit['r_1']*100:.1f}%")
+                st.markdown(f"- AIC: {fit['aic']:.2f}")
+                st.markdown(f"- K-S p: {fit['ks_pvalue']:.3f}")
+                
+                if fit['ks_pvalue'] > 0.05:
+                    st.success("✓ Good fit")
+                else:
+                    st.warning("△ Marginal fit")
+            else:
+                st.error(f"✗ {fit.get('error', 'Fit failed')}")
+    
+    # Best fit recommendation
+    st.markdown("---")
+    st.markdown("#### 🏆 Best Fit Recommendation")
+    
+    if comparison['best_fit']:
+        best = comparison['best_fit_details']
+        st.success(f"**Recommended: {comparison['best_fit'].title()}** (lowest AIC: {best['aic']:.2f})")
+        st.markdown(f"**Failure Pattern:** {best['failure_pattern']}")
+        st.info(comparison['recommendation'])
+        
+        # Reliability curve
+        st.markdown("#### 📉 Reliability Curve R(t)")
+        
+        curve_df = compute_reliability_curve(best, max_runs=20)
+        
+        if len(curve_df) > 0:
+            fig_curve = go.Figure()
+            
+            # Add reliability curve
+            fig_curve.add_trace(go.Scatter(
+                x=curve_df['t'],
+                y=curve_df['R_t'] * 100,
+                mode='lines',
+                name='R(t) - Reliability',
+                line=dict(color='green', width=2)
+            ))
+            
+            # Add failure probability curve
+            fig_curve.add_trace(go.Scatter(
+                x=curve_df['t'],
+                y=curve_df['F_t'] * 100,
+                mode='lines',
+                name='F(t) - Failure CDF',
+                line=dict(color='red', width=2, dash='dash')
+            ))
+            
+            # Add ML prediction point if available
+            if ml_probability is not None:
+                fig_curve.add_trace(go.Scatter(
+                    x=[1],
+                    y=[(1 - ml_probability) * 100],
+                    mode='markers',
+                    name=f'ML Prediction R(1)',
+                    marker=dict(color='blue', size=12, symbol='star')
+                ))
+            
+            # Add MTTS line
+            fig_curve.add_vline(
+                x=best['mtts'],
+                line_dash="dot",
+                line_color="orange",
+                annotation_text=f"MTTS={best['mtts']:.1f}"
+            )
+            
+            fig_curve.update_layout(
+                title=f"{comparison['best_fit'].title()} Reliability Function",
+                xaxis_title="Production Runs (t)",
+                yaxis_title="Percentage",
+                yaxis_range=[0, 105],
+                height=400,
+                legend=dict(x=0.7, y=0.95)
+            )
+            
+            st.plotly_chart(fig_curve, use_container_width=True)
+        
+        # ML comparison if available
+        if ml_probability is not None:
+            st.markdown("#### 🔄 ML vs Theoretical Reliability Comparison")
+            
+            ml_comparison = compare_ml_to_reliability(ml_probability, best)
+            
+            comp_col1, comp_col2, comp_col3 = st.columns(3)
+            
+            with comp_col1:
+                st.metric(
+                    "ML Model R(1)",
+                    f"{ml_comparison['ml_reliability']*100:.1f}%"
+                )
+            
+            with comp_col2:
+                st.metric(
+                    f"{best['distribution']} R(1)",
+                    f"{ml_comparison['theoretical_r1']*100:.1f}%"
+                )
+            
+            with comp_col3:
+                st.metric(
+                    "Difference",
+                    f"{ml_comparison['difference_pp']:.1f}pp",
+                    delta=ml_comparison['alignment']
+                )
+            
+            if ml_comparison['difference_pp'] < 10:
+                st.success(f"✅ **{ml_comparison['alignment']}** - ML model predictions are consistent with {best['distribution']} reliability theory")
+            elif ml_comparison['difference_pp'] < 20:
+                st.info(f"○ **{ml_comparison['alignment']}** - Consider reviewing model assumptions")
+            else:
+                st.warning(f"⚠️ **{ml_comparison['alignment']}** - Significant discrepancy between ML and theoretical reliability")
+    
+    else:
+        st.error("❌ No distribution could be successfully fitted to the data")
+    
+    # References
+    with st.expander("📚 Reliability Distribution References"):
+        st.markdown(RELIABILITY_DISTRIBUTION_REFERENCES)
 
 
 def get_multi_defect_analysis(df_row: pd.Series, defect_cols: list) -> dict:
@@ -6292,10 +7093,11 @@ with tab5:
     )
     
     # Main content
-    rel_tab1, rel_tab2, rel_tab3, rel_tab4 = st.tabs([
+    rel_tab1, rel_tab2, rel_tab3, rel_tab4, rel_tab5 = st.tabs([
         "📊 Part Reliability", 
         "📈 Reliability Curves", 
         "🔧 Availability Analysis",
+        "📐 Distribution Fitting",
         "📚 Theory & Formulas"
     ])
     
@@ -6689,7 +7491,7 @@ with tab5:
         else:
             st.info("Please compute reliability metrics in the 'Part Reliability' tab first.")
     
-    with rel_tab4:
+    with rel_tab5:
         st.subheader("📚 Theory & Formulas")
         
         st.markdown("""
@@ -6775,6 +7577,130 @@ with tab5:
         
         4. **Jardine, A.K.S., Lin, D., & Banjevic, D. (2006).** A review on machinery diagnostics and prognostics implementing condition-based maintenance. *Mechanical Systems and Signal Processing*, 20(7), 1483-1510.
         """)
+    
+    # ================================================================
+    # REL_TAB4: DISTRIBUTION FITTING (NEW IN V3.5)
+    # "Zio-style" reliability alignment
+    # ================================================================
+    with rel_tab4:
+        st.subheader("📐 Reliability Distribution Fitting")
+        
+        st.markdown("""
+        **Weibull / Exponential / Log-Normal Fitting for "Zio-style" Reliability Alignment**
+        
+        This module fits theoretical reliability distributions to your actual time-to-scrap (TTS) data,
+        enabling comparison between ML predictions and classical reliability theory.
+        
+        **Why Distribution Fitting?**
+        - Validates ML predictions against reliability theory (Zio, 2009)
+        - Identifies failure patterns (infant mortality, wear-out, random)
+        - Enables prediction intervals and confidence bounds
+        - Required for formal reliability engineering compliance
+        
+        **Key Parameters:**
+        - **Weibull β (shape)**: β<1 = decreasing hazard, β=1 = constant (exponential), β>1 = increasing hazard
+        - **Weibull η (scale)**: Characteristic life (63.2% failure point)
+        - **MTTS**: Mean Time To Scrap - average runs between failures
+        """)
+        
+        st.markdown("---")
+        
+        # Part selection for distribution analysis
+        try:
+            df_dist = load_and_clean(csv_path, add_multi_defect=use_multi_defect)
+            
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                part_counts_dist = df_dist.groupby('part_id').size()
+                part_ids_dist = sorted(part_counts_dist.index)
+                
+                selected_dist_part = st.selectbox(
+                    "Select Part for Distribution Analysis:",
+                    options=part_ids_dist,
+                    key="dist_part_select"
+                )
+            
+            with col2:
+                use_pooling_dist = st.checkbox(
+                    "Use Pooled Data",
+                    value=True,
+                    help="Use pooled data from similar parts for more robust fitting",
+                    key="dist_pooling"
+                )
+            
+            # ML prediction to compare against (optional)
+            st.markdown("**Optional: Compare with ML Prediction**")
+            
+            ml_prob_col1, ml_prob_col2 = st.columns([1, 3])
+            
+            with ml_prob_col1:
+                include_ml = st.checkbox("Include ML comparison", value=False, key="include_ml_dist")
+            
+            with ml_prob_col2:
+                if include_ml:
+                    ml_prob_input = st.slider(
+                        "ML Scrap Probability (%)",
+                        0.0, 100.0, 50.0, 1.0,
+                        help="Enter the ML model's predicted scrap probability for this part",
+                        key="ml_prob_slider"
+                    ) / 100.0
+                else:
+                    ml_prob_input = None
+            
+            st.markdown("---")
+            
+            if st.button("🔬 Fit Reliability Distributions", type="primary", key="fit_distributions"):
+                with st.spinner("Fitting distributions to TTS data..."):
+                    display_reliability_distribution_analysis(
+                        df_dist,
+                        selected_dist_part,
+                        thr_label,
+                        ml_probability=ml_prob_input,
+                        use_pooling=use_pooling_dist
+                    )
+            
+            # Quick explanation
+            with st.expander("📖 Understanding Distribution Fitting"):
+                st.markdown("""
+                ### What This Analysis Does
+                
+                1. **Extracts Time-to-Scrap (TTS)** values - the number of production runs between failures
+                
+                2. **Fits Three Distributions:**
+                   - **Weibull**: Most flexible, can model increasing/decreasing failure rates
+                   - **Exponential**: Constant failure rate (Weibull with β=1)
+                   - **Log-Normal**: Multiplicative degradation processes
+                
+                3. **Compares Fits** using:
+                   - **K-S Test**: p > 0.05 suggests good fit
+                   - **AIC/BIC**: Lower values = better fit (penalizes complexity)
+                
+                4. **Compares to ML** (optional):
+                   - ML predicts P(scrap next run) ≈ F(1) = 1 - R(1)
+                   - Good alignment validates ML model against theory
+                
+                ### Interpreting Weibull Shape (β)
+                
+                | β Value | Failure Pattern | Foundry Interpretation |
+                |---------|-----------------|------------------------|
+                | β < 1 | Decreasing hazard | "Infant mortality" - early failures, improves with burn-in |
+                | β = 1 | Constant hazard | Random failures - exponential distribution |
+                | 1 < β < 2 | Increasing hazard | Early wear-out beginning |
+                | β > 2 | Strongly increasing | Wear-out dominant - scheduled maintenance needed |
+                
+                ### For Your Foundry
+                
+                A typical sand casting process might show:
+                - **Pattern Making**: β > 2 (wear-out from pattern degradation)
+                - **Random Defects**: β ≈ 1 (sand inclusions, random events)
+                - **New Parts**: β < 1 initially (learning curve)
+                """)
+        
+        except Exception as e:
+            st.error(f"Error loading data for distribution analysis: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 
 
 # ================================================================
