@@ -4385,6 +4385,93 @@ Monitor this process as well, as it contributes significantly to the predicted d
 
             else:
                 st.warning("⚠️ No defect rate columns found in dataset")
+            
+            # ================================================================
+            # POOLED RELIABILITY METRICS (NEW IN V3.5)
+            # Show reliability predictions from pooled similar parts
+            # ================================================================
+            st.markdown("---")
+            st.markdown("### 🔗 Pooled Reliability Analysis")
+            st.caption("*Reliability metrics from similar parts (Weight ±10% + Defect Match)*")
+            
+            try:
+                # Compute pooled prediction for this part
+                pooled_result = compute_pooled_prediction(df_full, part_id_input, thr_label)
+                
+                # Show comparison with ML prediction
+                pool_col1, pool_col2 = st.columns(2)
+                
+                with pool_col1:
+                    st.markdown("#### 📊 ML Model Prediction")
+                    st.markdown(f"- **Scrap Risk:** {scrap_risk:.1f}%")
+                    st.markdown(f"- **Reliability:** {reliability:.1f}%")
+                    st.markdown(f"- **Based on:** {len(df_part)} training samples")
+                    st.markdown(f"- **Method:** RandomForest + Calibration")
+                    st.caption(f"*Data expansion: Weight ±{(weight_tolerance-0.1)*100:.0f}% for ML training*" if 'weight_tolerance' in dir() else "*Using part-specific or similar data*")
+                
+                with pool_col2:
+                    st.markdown("#### 🔗 Pooled Reliability Metrics")
+                    if pooled_result['mtts_runs'] is not None:
+                        st.markdown(f"- **MTTS:** {pooled_result['mtts_runs']:.1f} runs")
+                        st.markdown(f"- **R(1) Next Run:** {pooled_result['reliability_next_run']*100:.1f}%")
+                        st.markdown(f"- **Based on:** {pooled_result['pooled_n']} rows from {pooled_result['pooled_parts_count']} parts")
+                        st.markdown(f"- **Method:** {pooled_result['pooling_method']}")
+                        
+                        # Confidence indicator
+                        conf = pooled_result['confidence']
+                        if conf['level'] == 'HIGH':
+                            st.success(f"✅ {conf['level']} Confidence (n ≥ {conf['threshold_met']})")
+                        elif conf['level'] == 'MODERATE':
+                            st.info(f"○ {conf['level']} Confidence (n ≥ {conf['threshold_met']})")
+                        elif conf['level'] == 'LOW':
+                            st.warning(f"△ {conf['level']} Confidence (n ≥ {conf['threshold_met']})")
+                        else:
+                            st.error(f"✗ {conf['level']}")
+                    else:
+                        st.warning("⚠️ Insufficient data for pooled analysis")
+                
+                # Show key insight if predictions differ significantly
+                if pooled_result['mtts_runs'] is not None:
+                    pooled_reliability_pct = pooled_result['reliability_next_run'] * 100
+                    diff = abs(pooled_reliability_pct - reliability)
+                    
+                    if diff > 10:
+                        st.markdown("---")
+                        st.markdown("#### ⚠️ Prediction Discrepancy Detected")
+                        st.warning(f"""
+The ML model predicts **{reliability:.1f}%** reliability while pooled analysis shows **{pooled_reliability_pct:.1f}%**.
+
+**Why the difference?**
+- **ML Model:** Uses {len(df_part)} samples with weight tolerance expanded up to ±50% for training diversity
+- **Pooled Analysis:** Uses strict ±10% weight + exact defect matching ({pooled_result['pooled_n']} samples)
+
+**Recommendation:** For reliability/availability planning, use the **pooled metrics** (stricter matching = more relevant).
+For defect prediction and ML classification, use the **ML model** (trained on broader dataset).
+                        """)
+                    else:
+                        st.success(f"✅ ML and pooled predictions are consistent (within {diff:.1f}pp)")
+                
+                # Link to pooled tab for full analysis
+                with st.expander("📊 View Full Pooled Analysis"):
+                    st.markdown(f"""
+For complete pooled analysis including:
+- Side-by-side defect predictions (Part-Level vs Pooled)
+- Process diagnosis comparison
+- All parts included in pooling
+
+**→ Go to the "🔗 Pooled Predictions" tab and select Part {part_id_input}**
+                    """)
+                    
+                    # Show included parts
+                    if pooled_result['included_parts_details']:
+                        st.markdown("**Parts included in pooled analysis:**")
+                        parts_summary = [f"{p['part_id']} ({p['runs']} runs)" for p in pooled_result['included_parts_details'][:5]]
+                        st.markdown(", ".join(parts_summary))
+                        if len(pooled_result['included_parts_details']) > 5:
+                            st.caption(f"... and {len(pooled_result['included_parts_details']) - 5} more parts")
+                
+            except Exception as pool_e:
+                st.warning(f"⚠️ Could not compute pooled analysis: {pool_e}")
 
         except Exception as e:
             st.error(f"❌ Prediction failed: {e}")
