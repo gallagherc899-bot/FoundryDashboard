@@ -1328,6 +1328,194 @@ def get_pooled_part_details(df: pd.DataFrame, part_ids: list) -> list:
     return details
 
 
+def compute_pooled_defect_analysis(df: pd.DataFrame, part_ids: list, 
+                                    threshold_pct: float) -> dict:
+    """
+    Compute defect rate statistics and process diagnosis from pooled data.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Full dataset
+    part_ids : list
+        List of part IDs included in pooled analysis
+    threshold_pct : float
+        Scrap threshold percentage
+    
+    Returns:
+    --------
+    dict with defect statistics and process diagnosis
+    """
+    # Filter to pooled parts
+    pooled_df = df[df['part_id'].isin([str(p) for p in part_ids])]
+    
+    if len(pooled_df) == 0:
+        return {
+            'defect_stats': [],
+            'process_diagnosis': [],
+            'top_defects': [],
+            'scrap_rate': 0,
+            'avg_scrap_pct': 0
+        }
+    
+    # Get defect columns
+    defect_cols = [c for c in df.columns if c.endswith('_rate') and c in DEFECT_RATE_COLUMNS]
+    
+    # Calculate defect statistics
+    defect_stats = []
+    for col in defect_cols:
+        if col in pooled_df.columns:
+            rates = pooled_df[col]
+            mean_rate = rates.mean()
+            std_rate = rates.std()
+            max_rate = rates.max()
+            pct_nonzero = (rates > 0).mean() * 100
+            
+            defect_name = col.replace('_rate', '').replace('_', ' ').title()
+            
+            defect_stats.append({
+                'Defect': defect_name,
+                'Defect_Code': col,
+                'Mean Rate (%)': mean_rate * 100,
+                'Std Dev (%)': std_rate * 100 if not pd.isna(std_rate) else 0,
+                'Max Rate (%)': max_rate * 100,
+                'Occurrence (%)': pct_nonzero,
+                'CI_Lower': max(0, (mean_rate - 1.96 * std_rate / np.sqrt(len(pooled_df)))) * 100 if len(pooled_df) > 1 else 0,
+                'CI_Upper': (mean_rate + 1.96 * std_rate / np.sqrt(len(pooled_df))) * 100 if len(pooled_df) > 1 else mean_rate * 100 * 2
+            })
+    
+    defect_stats_df = pd.DataFrame(defect_stats).sort_values('Mean Rate (%)', ascending=False)
+    
+    # Calculate process diagnosis from top defects
+    top_defects = defect_stats_df.head(10).copy()
+    top_defects['Predicted Rate (%)'] = top_defects['Mean Rate (%)']  # For compatibility with diagnose_root_causes
+    
+    process_scores = {}
+    for _, row in top_defects.iterrows():
+        defect_code = row['Defect_Code']
+        rate = row['Mean Rate (%)']
+        
+        if defect_code in DEFECT_TO_PROCESS:
+            processes = DEFECT_TO_PROCESS[defect_code]
+            contribution = rate / len(processes) if len(processes) > 0 else 0.0
+            
+            for process in processes:
+                if process not in process_scores:
+                    process_scores[process] = 0.0
+                process_scores[process] += contribution
+    
+    process_diagnosis = []
+    for process, score in sorted(process_scores.items(), key=lambda x: x[1], reverse=True):
+        process_diagnosis.append({
+            'Process': process,
+            'Contribution (%)': score,
+            'Description': PROCESS_DEFECT_MAP.get(process, {}).get('description', '')
+        })
+    
+    # Overall scrap statistics
+    scrap_rate = (pooled_df['scrap_percent'] > threshold_pct).mean() * 100
+    avg_scrap_pct = pooled_df['scrap_percent'].mean()
+    
+    return {
+        'defect_stats': defect_stats_df.to_dict('records'),
+        'process_diagnosis': process_diagnosis,
+        'top_defects': top_defects.to_dict('records'),
+        'scrap_rate': scrap_rate,
+        'avg_scrap_pct': avg_scrap_pct,
+        'n_rows': len(pooled_df),
+        'n_parts': len(part_ids)
+    }
+
+
+def compute_part_level_defect_analysis(df: pd.DataFrame, part_id, 
+                                        threshold_pct: float) -> dict:
+    """
+    Compute defect rate statistics for a single part (for comparison).
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Full dataset
+    part_id : str or int
+        Target part ID
+    threshold_pct : float
+        Scrap threshold percentage
+    
+    Returns:
+    --------
+    dict with defect statistics (limited confidence due to small sample)
+    """
+    part_id = str(part_id)
+    part_df = df[df['part_id'] == part_id]
+    
+    if len(part_df) == 0:
+        return {
+            'defect_stats': [],
+            'process_diagnosis': [],
+            'scrap_rate': 0,
+            'avg_scrap_pct': 0,
+            'n_rows': 0
+        }
+    
+    # Get defect columns
+    defect_cols = [c for c in df.columns if c.endswith('_rate') and c in DEFECT_RATE_COLUMNS]
+    
+    # Calculate defect statistics
+    defect_stats = []
+    for col in defect_cols:
+        if col in part_df.columns:
+            rates = part_df[col]
+            mean_rate = rates.mean()
+            
+            defect_name = col.replace('_rate', '').replace('_', ' ').title()
+            
+            defect_stats.append({
+                'Defect': defect_name,
+                'Defect_Code': col,
+                'Mean Rate (%)': mean_rate * 100,
+                'Occurrence (%)': (rates > 0).mean() * 100
+            })
+    
+    defect_stats_df = pd.DataFrame(defect_stats).sort_values('Mean Rate (%)', ascending=False)
+    
+    # Calculate process diagnosis
+    top_defects = defect_stats_df.head(10).copy()
+    
+    process_scores = {}
+    for _, row in top_defects.iterrows():
+        defect_code = row['Defect_Code']
+        rate = row['Mean Rate (%)']
+        
+        if defect_code in DEFECT_TO_PROCESS:
+            processes = DEFECT_TO_PROCESS[defect_code]
+            contribution = rate / len(processes) if len(processes) > 0 else 0.0
+            
+            for process in processes:
+                if process not in process_scores:
+                    process_scores[process] = 0.0
+                process_scores[process] += contribution
+    
+    process_diagnosis = []
+    for process, score in sorted(process_scores.items(), key=lambda x: x[1], reverse=True):
+        process_diagnosis.append({
+            'Process': process,
+            'Contribution (%)': score,
+            'Description': PROCESS_DEFECT_MAP.get(process, {}).get('description', '')
+        })
+    
+    # Overall scrap statistics
+    scrap_rate = (part_df['scrap_percent'] > threshold_pct).mean() * 100
+    avg_scrap_pct = part_df['scrap_percent'].mean()
+    
+    return {
+        'defect_stats': defect_stats_df.to_dict('records'),
+        'process_diagnosis': process_diagnosis,
+        'scrap_rate': scrap_rate,
+        'avg_scrap_pct': avg_scrap_pct,
+        'n_rows': len(part_df)
+    }
+
+
 def compute_pooled_prediction(df: pd.DataFrame, part_id, 
                                threshold_pct: float) -> dict:
     """
@@ -1569,9 +1757,11 @@ def compute_pooled_prediction(df: pd.DataFrame, part_id,
     return result
 
 
-def display_pooled_prediction(result: dict, threshold_pct: float):
+def display_pooled_prediction(result: dict, threshold_pct: float, 
+                               df: pd.DataFrame = None, show_comparison: bool = True):
     """
-    Display pooled prediction results in Streamlit with full transparency.
+    Display pooled prediction results in Streamlit with full transparency,
+    including defect analysis, process diagnosis, and part-level comparison.
     
     Parameters:
     -----------
@@ -1579,6 +1769,10 @@ def display_pooled_prediction(result: dict, threshold_pct: float):
         Result from compute_pooled_prediction
     threshold_pct : float
         Scrap threshold used
+    df : pd.DataFrame, optional
+        Full dataset for computing defect analysis
+    show_comparison : bool
+        Whether to show part-level vs pooled comparison
     """
     # Part-level assessment
     st.markdown("### 📊 Part-Level Assessment")
@@ -1637,8 +1831,8 @@ def display_pooled_prediction(result: dict, threshold_pct: float):
     
     st.markdown("---")
     
-    # Prediction results
-    st.markdown(f"### 📈 Prediction (Threshold: {threshold_pct}%)")
+    # Reliability Prediction
+    st.markdown(f"### 📈 Reliability Prediction (Threshold: {threshold_pct}%)")
     
     if result['mtts_runs'] is not None:
         col1, col2, col3, col4 = st.columns(4)
@@ -1665,45 +1859,305 @@ def display_pooled_prediction(result: dict, threshold_pct: float):
                 st.metric("Rule of Three", "N/A")
                 st.caption("Failures observed")
     else:
-        st.error("⚠️ INSUFFICIENT DATA - No prediction available")
+        st.error("⚠️ INSUFFICIENT DATA - No reliability prediction available")
+    
+    # ================================================================
+    # DEFECT ANALYSIS & PROCESS DIAGNOSIS (Enhanced in v3.5)
+    # ================================================================
+    if df is not None and len(result['included_part_ids']) > 0:
+        st.markdown("---")
+        
+        # Compute defect analysis for pooled data
+        pooled_analysis = compute_pooled_defect_analysis(
+            df, result['included_part_ids'], threshold_pct
+        )
+        
+        # Compute part-level analysis for comparison
+        part_analysis = compute_part_level_defect_analysis(
+            df, result['part_id'], threshold_pct
+        )
+        
+        # ============================================================
+        # COMPARISON VIEW: Part-Level vs Pooled
+        # ============================================================
+        if show_comparison and part_analysis['n_rows'] > 0:
+            st.markdown("### 🔄 Comparison: Part-Level vs Pooled Predictions")
+            
+            st.markdown(f"""
+            <div style="background: #e3f2fd; padding: 15px; border-radius: 10px; border-left: 5px solid #1976d2; margin-bottom: 15px;">
+                <strong>Why Compare?</strong> The pooled analysis draws on {pooled_analysis['n_rows']} data points from 
+                {pooled_analysis['n_parts']} similar parts, providing more reliable defect predictions than the 
+                {part_analysis['n_rows']} data point(s) available for this specific part.
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Summary comparison
+            comp_col1, comp_col2, comp_col3 = st.columns(3)
+            
+            with comp_col1:
+                st.markdown("**Data Points**")
+                st.markdown(f"- Part-Level: **{part_analysis['n_rows']}** ⚠️")
+                st.markdown(f"- Pooled: **{pooled_analysis['n_rows']}** ✓")
+            
+            with comp_col2:
+                st.markdown("**Scrap Rate**")
+                st.markdown(f"- Part-Level: **{part_analysis['scrap_rate']:.1f}%**")
+                st.markdown(f"- Pooled: **{pooled_analysis['scrap_rate']:.1f}%**")
+            
+            with comp_col3:
+                st.markdown("**Avg Scrap %**")
+                st.markdown(f"- Part-Level: **{part_analysis['avg_scrap_pct']:.2f}%**")
+                st.markdown(f"- Pooled: **{pooled_analysis['avg_scrap_pct']:.2f}%**")
+            
+            st.markdown("---")
+        
+        # ============================================================
+        # DEFECT PREDICTIONS FROM POOLED DATA
+        # ============================================================
+        st.markdown("### 📋 Defect Predictions (from Pooled Data)")
+        st.caption(f"*Based on {pooled_analysis['n_rows']} historical runs from {pooled_analysis['n_parts']} similar parts*")
+        
+        if pooled_analysis['defect_stats']:
+            # Create comparison dataframe if part data exists
+            pooled_defects_df = pd.DataFrame(pooled_analysis['defect_stats'])
+            
+            # Filter to top 10 by mean rate
+            top_pooled_defects = pooled_defects_df.head(10)
+            
+            # Create side-by-side display
+            if show_comparison and part_analysis['n_rows'] > 0 and part_analysis['defect_stats']:
+                part_defects_df = pd.DataFrame(part_analysis['defect_stats'])
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Part-Level Defects (⚠️ Low Confidence)")
+                    st.caption(f"n = {part_analysis['n_rows']} rows")
+                    
+                    if len(part_defects_df) > 0:
+                        top_part = part_defects_df.nlargest(10, 'Mean Rate (%)')
+                        display_part = top_part[['Defect', 'Mean Rate (%)']].copy()
+                        display_part['Mean Rate (%)'] = display_part['Mean Rate (%)'].apply(lambda x: f"{x:.2f}%")
+                        st.dataframe(display_part, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No defects recorded")
+                
+                with col2:
+                    st.markdown("#### Pooled Defects (✓ High Confidence)")
+                    st.caption(f"n = {pooled_analysis['n_rows']} rows")
+                    
+                    display_pooled = top_pooled_defects[['Defect', 'Mean Rate (%)', 'CI_Lower', 'CI_Upper']].copy()
+                    display_pooled['Rate ± CI'] = display_pooled.apply(
+                        lambda r: f"{r['Mean Rate (%)']:.2f}% [{r['CI_Lower']:.2f}-{r['CI_Upper']:.2f}]", axis=1
+                    )
+                    st.dataframe(display_pooled[['Defect', 'Rate ± CI']], use_container_width=True, hide_index=True)
+                
+                # Highlight differences
+                st.markdown("#### 🔍 Key Differences to Watch")
+                
+                # Find defects with significant differences
+                differences = []
+                part_dict = {d['Defect']: d['Mean Rate (%)'] for d in part_analysis['defect_stats']}
+                pooled_dict = {d['Defect']: d['Mean Rate (%)'] for d in pooled_analysis['defect_stats']}
+                
+                for defect, pooled_rate in pooled_dict.items():
+                    part_rate = part_dict.get(defect, 0)
+                    if pooled_rate > 0.5:  # Only significant defects
+                        diff = pooled_rate - part_rate
+                        if abs(diff) > 0.5:  # Meaningful difference
+                            direction = "↑ HIGHER" if diff > 0 else "↓ LOWER"
+                            risk = "⚠️ Watch for this" if diff > 0 else "✓ May be better"
+                            differences.append({
+                                'Defect': defect,
+                                'Part-Level': f"{part_rate:.2f}%",
+                                'Pooled': f"{pooled_rate:.2f}%",
+                                'Difference': f"{direction} ({abs(diff):.1f}pp)",
+                                'Action': risk
+                            })
+                
+                if differences:
+                    diff_df = pd.DataFrame(differences)
+                    st.dataframe(diff_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Part-level and pooled defect rates are similar")
+            
+            else:
+                # Just show pooled defects
+                st.markdown("#### Top Predicted Defects")
+                display_df = top_pooled_defects[['Defect', 'Mean Rate (%)', 'Std Dev (%)', 'Occurrence (%)']].copy()
+                display_df.columns = ['Defect', 'Mean Rate', 'Std Dev', '% Runs with Defect']
+                display_df['Mean Rate'] = display_df['Mean Rate'].apply(lambda x: f"{x:.2f}%")
+                display_df['Std Dev'] = display_df['Std Dev'].apply(lambda x: f"±{x:.2f}%")
+                display_df['% Runs with Defect'] = display_df['% Runs with Defect'].apply(lambda x: f"{x:.1f}%")
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # ============================================================
+        # PROCESS DIAGNOSIS FROM POOLED DATA
+        # ============================================================
+        st.markdown("---")
+        st.markdown("### 🏭 Process Diagnosis (from Pooled Data)")
+        st.markdown("*Based on Campbell (2003) process-defect relationships*")
+        
+        if pooled_analysis['process_diagnosis']:
+            # Create comparison if part data exists
+            if show_comparison and part_analysis['n_rows'] > 0 and part_analysis['process_diagnosis']:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Part-Level Diagnosis (⚠️)")
+                    part_proc_df = pd.DataFrame(part_analysis['process_diagnosis'][:6])
+                    if len(part_proc_df) > 0:
+                        fig_part = px.bar(
+                            part_proc_df,
+                            x='Process',
+                            y='Contribution (%)',
+                            color='Contribution (%)',
+                            color_continuous_scale='Blues',
+                            height=300
+                        )
+                        fig_part.update_layout(showlegend=False, xaxis_tickangle=-45)
+                        st.plotly_chart(fig_part, use_container_width=True)
+                
+                with col2:
+                    st.markdown("#### Pooled Diagnosis (✓ HIGH CONFIDENCE)")
+                    pooled_proc_df = pd.DataFrame(pooled_analysis['process_diagnosis'][:6])
+                    if len(pooled_proc_df) > 0:
+                        fig_pooled = px.bar(
+                            pooled_proc_df,
+                            x='Process',
+                            y='Contribution (%)',
+                            color='Contribution (%)',
+                            color_continuous_scale='Reds',
+                            height=300
+                        )
+                        fig_pooled.update_layout(showlegend=False, xaxis_tickangle=-45)
+                        st.plotly_chart(fig_pooled, use_container_width=True)
+                
+                # Process comparison table
+                st.markdown("#### Process Priority Comparison")
+                
+                part_proc_dict = {p['Process']: p['Contribution (%)'] for p in part_analysis['process_diagnosis']}
+                pooled_proc_dict = {p['Process']: p['Contribution (%)'] for p in pooled_analysis['process_diagnosis']}
+                
+                all_processes = set(part_proc_dict.keys()) | set(pooled_proc_dict.keys())
+                
+                proc_comparison = []
+                for proc in all_processes:
+                    part_score = part_proc_dict.get(proc, 0)
+                    pooled_score = pooled_proc_dict.get(proc, 0)
+                    
+                    if pooled_score > part_score + 1:
+                        change = f"↑ +{pooled_score - part_score:.1f}pp"
+                        alert = "🔴 ELEVATED RISK"
+                    elif pooled_score < part_score - 1:
+                        change = f"↓ {pooled_score - part_score:.1f}pp"
+                        alert = "🟢 Lower than expected"
+                    else:
+                        change = "≈ Similar"
+                        alert = "🟡 Monitor"
+                    
+                    proc_comparison.append({
+                        'Process': proc,
+                        'Part-Level': f"{part_score:.1f}%",
+                        'Pooled': f"{pooled_score:.1f}%",
+                        'Change': change,
+                        'Alert': alert
+                    })
+                
+                proc_comp_df = pd.DataFrame(proc_comparison)
+                proc_comp_df = proc_comp_df.sort_values('Pooled', key=lambda x: x.str.rstrip('%').astype(float), ascending=False)
+                st.dataframe(proc_comp_df.head(8), use_container_width=True, hide_index=True)
+            
+            else:
+                # Just show pooled process diagnosis
+                pooled_proc_df = pd.DataFrame(pooled_analysis['process_diagnosis'])
+                
+                if len(pooled_proc_df) > 0:
+                    fig = px.bar(
+                        pooled_proc_df.head(8),
+                        x='Process',
+                        y='Contribution (%)',
+                        color='Contribution (%)',
+                        color_continuous_scale='Reds',
+                        title='Process Contributions to Predicted Defects (Pooled Analysis)'
+                    )
+                    fig.update_layout(height=400, xaxis_tickangle=-45)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show description table
+                    st.markdown("#### Process Details")
+                    display_proc = pooled_proc_df.head(8)[['Process', 'Contribution (%)', 'Description']].copy()
+                    display_proc['Contribution (%)'] = display_proc['Contribution (%)'].apply(lambda x: f"{x:.2f}%")
+                    st.dataframe(display_proc, use_container_width=True, hide_index=True)
+        
+        # ============================================================
+        # ACTIONABLE RECOMMENDATIONS
+        # ============================================================
+        st.markdown("---")
+        st.markdown("### 💡 Actionable Recommendations")
+        
+        recommendations = []
+        
+        # Top process recommendation
+        if pooled_analysis['process_diagnosis']:
+            top_process = pooled_analysis['process_diagnosis'][0]
+            recommendations.append(f"**Priority 1:** Focus inspection on **{top_process['Process']}** ({top_process['Contribution (%)']:.1f}% contribution)")
+            recommendations.append(f"   - {top_process['Description']}")
+        
+        # Top defect recommendation
+        if pooled_analysis['defect_stats']:
+            top_defect = pooled_analysis['defect_stats'][0]
+            recommendations.append(f"**Priority 2:** Watch for **{top_defect['Defect']}** defects ({top_defect['Mean Rate (%)']:.2f}% expected rate)")
+        
+        # Confidence recommendation
+        conf = result['confidence']
+        if conf['level'] == 'HIGH':
+            recommendations.append(f"**Confidence:** ✅ HIGH - These predictions are statistically reliable (n={result['pooled_n']})")
+        elif conf['level'] == 'MODERATE':
+            recommendations.append(f"**Confidence:** ⚠️ MODERATE - Predictions are indicative but collect more data if possible")
+        else:
+            recommendations.append(f"**Confidence:** ⚠️ LOW - Use predictions as general guidance only")
+        
+        for rec in recommendations:
+            st.markdown(rec)
     
     st.markdown("---")
     
     # Parts included (transparency)
-    st.markdown("### 📋 Parts Included in This Prediction")
-    st.caption("*For manager review - these parts were pooled to generate the prediction*")
-    
-    if result['included_parts_details']:
-        # Create DataFrame for display
-        details_df = pd.DataFrame(result['included_parts_details'])
-        details_df['defects_str'] = details_df['defects'].apply(
-            lambda x: ', '.join(x[:3]) + (f' (+{len(x)-3})' if len(x) > 3 else '') if x else 'None'
-        )
-        details_df['is_target'] = details_df['part_id'] == result['part_id']
+    with st.expander("📋 Parts Included in This Prediction"):
+        st.caption("*For manager review - these parts were pooled to generate the prediction*")
         
-        # Format for display
-        display_df = details_df[['part_id', 'weight', 'runs', 'defects_str', 'is_target']].copy()
-        display_df.columns = ['Part ID', 'Weight (lbs)', 'Runs', 'Defects', 'Target']
-        display_df['Target'] = display_df['Target'].apply(lambda x: '← TARGET' if x else '')
-        
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                'Part ID': st.column_config.NumberColumn('Part ID', format='%d'),
-                'Weight (lbs)': st.column_config.NumberColumn('Weight (lbs)', format='%.1f'),
-                'Runs': st.column_config.NumberColumn('Runs', format='%d'),
-                'Defects': st.column_config.TextColumn('Defects'),
-                'Target': st.column_config.TextColumn(''),
-            }
-        )
-        
-        # Show all Part IDs in a compact format
-        with st.expander("📄 All Part IDs (copy-paste friendly)"):
+        if result['included_parts_details']:
+            # Create DataFrame for display
+            details_df = pd.DataFrame(result['included_parts_details'])
+            details_df['defects_str'] = details_df['defects'].apply(
+                lambda x: ', '.join(x[:3]) + (f' (+{len(x)-3})' if len(x) > 3 else '') if x else 'None'
+            )
+            details_df['is_target'] = details_df['part_id'].astype(str) == str(result['part_id'])
+            
+            # Format for display
+            display_df = details_df[['part_id', 'weight', 'runs', 'defects_str', 'is_target']].copy()
+            display_df.columns = ['Part ID', 'Weight (lbs)', 'Runs', 'Defects', 'Target']
+            display_df['Target'] = display_df['Target'].apply(lambda x: '← TARGET' if x else '')
+            
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'Part ID': st.column_config.TextColumn('Part ID'),
+                    'Weight (lbs)': st.column_config.NumberColumn('Weight (lbs)', format='%.1f'),
+                    'Runs': st.column_config.NumberColumn('Runs', format='%d'),
+                    'Defects': st.column_config.TextColumn('Defects'),
+                    'Target': st.column_config.TextColumn(''),
+                }
+            )
+            
+            # Show all Part IDs in a compact format
+            st.markdown("**All Part IDs (copy-paste friendly):**")
             st.code(', '.join(map(str, result['included_part_ids'])))
-    else:
-        st.warning("No parts available for pooling")
+        else:
+            st.warning("No parts available for pooling")
     
     # References
     with st.expander("📚 Statistical Basis & References"):
@@ -6091,11 +6545,12 @@ with tab6:
                     st.markdown("---")
                     st.subheader(f"📊 Pooled Prediction: Part {selected_part_id}")
                     
-                    # Display results using the display function
-                    display_pooled_prediction(result, thr_label)
+                    # Display results with defect analysis and comparison
+                    display_pooled_prediction(result, thr_label, df=df_pooling, show_comparison=True)
                     
-                    # Store result in session state
+                    # Store result and dataframe in session state
                     st.session_state['last_pooled_result'] = result
+                    st.session_state['last_pooled_df'] = df_pooling
                     
                 except Exception as e:
                     st.error(f"Error computing pooled prediction: {e}")
@@ -6107,8 +6562,9 @@ with tab6:
             st.markdown("---")
             st.caption("*Showing last computed result. Click 'Run Pooled Analysis' to refresh.*")
             result = st.session_state['last_pooled_result']
+            last_df = st.session_state.get('last_pooled_df', df_pooling)
             st.subheader(f"📊 Pooled Prediction: Part {result['part_id']}")
-            display_pooled_prediction(result, thr_label)
+            display_pooled_prediction(result, thr_label, df=last_df, show_comparison=True)
         
         st.markdown("---")
         
