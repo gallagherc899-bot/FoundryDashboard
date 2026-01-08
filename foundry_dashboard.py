@@ -183,14 +183,47 @@ POOLING_CONFIG = {
     }
 }
 
-# Defect rate columns for pooling
+# Defect rate columns for pooling (actual defect types only)
 DEFECT_RATE_COLUMNS = [
     'bent_rate', 'outside_process_scrap_rate', 'failed_zyglo_rate',
     'gouged_rate', 'shift_rate', 'missrun_rate', 'core_rate',
     'cut_into_rate', 'dirty_pattern_rate', 'crush_rate', 'zyglo_rate',
     'shrink_rate', 'short_pour_rate', 'runout_rate', 'shrink_porosity_rate',
-    'gas_porosity_rate', 'over_grind_rate', 'sand_rate', 'tear_up_rate'
+    'gas_porosity_rate', 'over_grind_rate', 'sand_rate', 'tear_up_rate',
+    'dross_rate'  # Added - present in data
 ]
+
+# Columns that end with _rate but are NOT actual defect types
+# These are calculated aggregate features, not defects to analyze
+EXCLUDED_RATE_COLUMNS = [
+    'total_defect_rate',      # Sum of all defect rates (aggregate)
+    'max_defect_rate',        # Maximum single defect rate (aggregate)
+    'defect_concentration',   # Ratio metric (aggregate)
+]
+
+def get_actual_defect_columns(df_columns: list) -> list:
+    """
+    Filter column list to only include actual defect rate columns,
+    excluding aggregate/calculated columns like total_defect_rate.
+    
+    Parameters:
+    -----------
+    df_columns : list
+        List of all column names in dataframe
+    
+    Returns:
+    --------
+    list of actual defect rate column names
+    """
+    defect_cols = []
+    for col in df_columns:
+        if col.endswith('_rate'):
+            # Exclude known aggregate columns
+            if col not in EXCLUDED_RATE_COLUMNS:
+                # Also exclude interaction terms (contain 'x_')
+                if '_x_' not in col:
+                    defect_cols.append(col)
+    return defect_cols
 
 # APA 7 References for pooling methodology
 POOLING_REFERENCES = """
@@ -3173,10 +3206,16 @@ def display_multi_defect_alert(analysis: dict):
     # Find common processes
     common_processes = analysis['primary_processes']
     
+    # Get total unique defect types if available
+    total_unique = analysis.get('unique_defect_types_total', n_defects)
+    total_rows = analysis.get('total_rows', 1)
+    
     st.error(f"""
-🚨 **MULTI-DEFECT ALERT: {n_defects} Defect Types Detected**
+🚨 **MULTI-DEFECT ALERT: {n_defects} Defect Types on Most Recent Run**
 
-**Active Defects:** {defect_list}
+**Unique Defect Types Observed (across all {total_rows} runs):** {total_unique}
+
+**Active Defects (latest run):** {defect_list}
 
 **Common Root Cause Processes:** {', '.join(common_processes)}
 
@@ -4865,13 +4904,25 @@ with tab1:
             
             # Get part history for multi-defect analysis
             part_history = df_full[df_full["part_id"] == part_id_input]
-            defect_cols = [c for c in df_full.columns if c.endswith("_rate")]
+            # Use filtered defect columns (exclude aggregates like total_defect_rate)
+            defect_cols = get_actual_defect_columns(df_full.columns.tolist())
             
-            # MULTI-DEFECT ANALYSIS (NEW IN V3.0)
+            # MULTI-DEFECT ANALYSIS (NEW IN V3.0, IMPROVED V3.5)
             if len(part_history) > 0 and use_multi_defect:
                 # Get most recent row for analysis
                 latest_row = part_history.iloc[-1]
                 multi_defect_analysis = get_multi_defect_analysis(latest_row, defect_cols)
+                
+                # Also calculate TOTAL unique defect types across ALL rows for this part
+                unique_defect_types = 0
+                for col in defect_cols:
+                    if col in part_history.columns:
+                        if (part_history[col] > 0).any():
+                            unique_defect_types += 1
+                
+                # Add to analysis dict for display
+                multi_defect_analysis['unique_defect_types_total'] = unique_defect_types
+                multi_defect_analysis['total_rows'] = len(part_history)
                 
                 if multi_defect_analysis['is_multi_defect']:
                     display_multi_defect_alert(multi_defect_analysis)
