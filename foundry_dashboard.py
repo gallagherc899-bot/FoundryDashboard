@@ -5340,9 +5340,47 @@ with tab1:
             X_input = pd.DataFrame([input_dict])[feats]
             
             proba = cal_part.predict_proba(X_input)[0, 1]
-            scrap_risk = proba * 100
-            reliability = (1 - proba) * 100
-            expected_scrap_pcs = order_qty * proba
+            
+            # ================================================================
+            # PARTS-BASED RELIABILITY CALCULATION (CORRECTED IN V3.6)
+            # ================================================================
+            # The ML model gives a base probability, but we need to adjust
+            # reliability based on ORDER QUANTITY using the exponential model:
+            #   R(n) = e^(-n/MTTS_parts)
+            # 
+            # This ensures larger orders have higher risk (more parts = more
+            # opportunities for defects to occur).
+            # ================================================================
+            
+            # Get parts-based MTTS for this part
+            mtts_df = compute_mtts_metrics(df_part, thr_label)
+            part_mtts_row = mtts_df[mtts_df['part_id'] == part_id_input]
+            
+            if len(part_mtts_row) > 0:
+                mtts_parts = part_mtts_row['mtts_parts'].values[0]
+            else:
+                # Fallback: estimate from average order quantity and runs-based MTTS
+                avg_order_qty_historical = df_part['order_quantity'].mean() if 'order_quantity' in df_part.columns else 300
+                mtts_parts = hist_mttf * avg_order_qty_historical  # Convert runs to parts
+            
+            # Calculate reliability using exponential model: R(n) = e^(-n/MTTS)
+            if mtts_parts > 0:
+                reliability_parts_based = np.exp(-order_qty / mtts_parts)
+                scrap_risk_parts_based = (1 - reliability_parts_based) * 100
+            else:
+                reliability_parts_based = 0
+                scrap_risk_parts_based = 100
+            
+            # Use the PARTS-BASED calculation as primary (not ML probability)
+            # This ensures risk scales correctly with order quantity
+            scrap_risk = scrap_risk_parts_based
+            reliability = reliability_parts_based * 100
+            
+            # Also store ML probability for comparison
+            ml_scrap_risk = proba * 100
+            ml_reliability = (1 - proba) * 100
+            
+            expected_scrap_pcs = order_qty * (scrap_risk / 100)
             expected_loss = expected_scrap_pcs * cost_per_part
 
             # Store prediction for potential outcome logging
@@ -5364,11 +5402,54 @@ with tab1:
             # Display results
             st.markdown(f"### 🎯 Risk Assessment for Part {part_id_input}")
             
+            # NEW IN V3.6: Show parts-based calculation explanation
+            st.markdown(f"""
+            <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 5px solid #1976d2;">
+                <h4 style="margin: 0; color: #1565c0;">📊 Parts-Based Reliability (MTTS = {mtts_parts:,.0f} parts)</h4>
+                <p style="margin: 10px 0 0 0;">
+                    <strong>Formula:</strong> R({order_qty:,}) = e<sup>-{order_qty:,}/{mtts_parts:,.0f}</sup> = e<sup>{-order_qty/mtts_parts:.4f}</sup> = <strong>{reliability:.1f}%</strong><br>
+                    <strong>Scrap Risk:</strong> 1 - {reliability:.1f}% = <strong>{scrap_risk:.1f}%</strong>
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
             r1, r2, r3, r4 = st.columns(4)
-            r1.metric("Scrap Risk", f"{scrap_risk:.1f}%")
+            r1.metric("Scrap Risk", f"{scrap_risk:.1f}%", help="Parts-based: R(n) = e^(-n/MTTS)")
             r2.metric("Expected Scrap", f"{expected_scrap_pcs:.1f} pieces")
             r3.metric("Expected Loss", f"${expected_loss:,.2f}")
-            r4.metric("Reliability", f"{reliability:.1f}%")
+            r4.metric("Reliability", f"{reliability:.1f}%", help="Parts-based: e^(-order_qty/MTTS)")
+            
+            # Show comparison with ML prediction
+            with st.expander("🔬 Compare: Parts-Based vs ML Prediction"):
+                comp_col1, comp_col2 = st.columns(2)
+                
+                with comp_col1:
+                    st.markdown("#### 📐 Parts-Based (Primary)")
+                    st.markdown(f"""
+                    - **MTTS:** {mtts_parts:,.0f} parts
+                    - **Order Qty:** {order_qty:,} parts
+                    - **R({order_qty:,}):** e^(-{order_qty}/{mtts_parts:.0f}) = **{reliability:.1f}%**
+                    - **Scrap Risk:** **{scrap_risk:.1f}%**
+                    
+                    *Uses exponential reliability model where risk scales with order size*
+                    """)
+                
+                with comp_col2:
+                    st.markdown("#### 🤖 ML Model (Reference)")
+                    st.markdown(f"""
+                    - **ML Probability:** {ml_scrap_risk:.1f}%
+                    - **ML Reliability:** {ml_reliability:.1f}%
+                    
+                    *ML model predicts based on historical patterns but doesn't 
+                    directly account for order quantity in reliability calculation*
+                    """)
+                
+                st.info("""
+                **Why Parts-Based is Primary:**
+                - A 10-part order should have MUCH lower risk than a 10,000-part order
+                - The exponential model R(n) = e^(-n/MTTS) correctly scales risk with order size
+                - This aligns with classical MTTF reliability theory (Ebeling, 2010)
+                """)
 
             # Multi-defect summary (NEW IN V3.0)
             if use_multi_defect:
