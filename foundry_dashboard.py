@@ -1,9 +1,32 @@
 # ================================================================
 # 🏭 Foundry Scrap Risk Dashboard with Process Diagnosis
-# VERSION 3.5 - HIERARCHICAL POOLING FOR LOW-DATA PARTS
+# VERSION 3.6 - ENHANCED PHM FRAMEWORK WITH DISSERTATION ALIGNMENT
 # ================================================================
 # 
-# NEW IN V3.5:
+# DISSERTATION CONCEPTUAL FRAMEWORK (Opyrchał, 2021):
+# --------------------------------------------------
+# "In a prognostic reframing, a casting defect that produces scrap is interpreted 
+#  as a machine failure event, where the Mean Time to Scrap (MTTS) metric serves 
+#  the same role as the Mean Time to Failure (MTTF) metric in reliability engineering."
+#
+# The casting process is viewed as a DEGRADABLE SYSTEM whose PROCESS HEALTH DECLINES
+# toward a defect threshold. With MTTS, practitioners can:
+#   1. Quantify process reliability
+#   2. Identify processes attributed to defects that cause scrap
+#   3. Take counter actions BEFORE scrap occurs
+#
+# This shift from DIAGNOSTICS (analyzing past defects to determine causes) to 
+# PROGNOSTICS (analyzing past defects to predict future scrap and responsible processes)
+# forms the conceptual bridge between traditional SPC and PHM frameworks.
+#
+# NEW IN V3.6:
+# - Process Health Score (inverse of degradation - higher = healthier)
+# - CO2/GHG emissions calculations aligned with DOE 2050 net-zero goals
+# - Explicit "BEFORE Production" action framing
+# - Additional citations: Opyrchał (2021), DOE (2022, 2023), Modern Casting (2021)
+# - Diagnostic vs Prognostic labeling in SPC comparison
+#
+# RETAINED FROM V3.5:
 # - Hierarchical Pooling for parts with insufficient data (n < 5)
 # - Weight-based part family formation (±10% tolerance)
 # - Cascading defect matching (Exact → Any → Weight-only)
@@ -60,7 +83,7 @@ import base64
 # Streamlit setup
 # -------------------------------
 st.set_page_config(
-    page_title="Foundry Scrap Risk Dashboard v3.1 - Temporal Features", 
+    page_title="Foundry Scrap Risk Dashboard v3.6 - Enhanced PHM Framework", 
     layout="wide"
 )
 
@@ -72,8 +95,8 @@ st.markdown("""
             padding: 10px 20px; border-radius: 10px; margin-bottom: 20px;">
     <h2 style="color: white; margin: 0;">🏭 Foundry Scrap Risk Dashboard</h2>
     <p style="color: #a8d0ff; margin: 5px 0 0 0;">
-        <strong>Version 3.5 - Hierarchical Pooling for Low-Data Parts</strong> | 
-        6-2-1 Rolling Window | Campbell Process Mapping | PHM Optimized | TRUE MTTS | R(t) & A(t) | Pooled Predictions
+        <strong>Version 3.6 - Enhanced PHM Framework</strong> | 
+        Prognostic Reliability | Process Health Scoring | CO₂ Impact | DOE 2050 Alignment
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -165,6 +188,39 @@ DOE_ALUMINUM_BENCHMARKS = {
     'permanent_mold_sand': {'btu_per_lb': 35953, 'source': 'Exhibit 4.47 - Perm Mold/Sand'},
     'lost_foam': {'btu_per_lb': 37030, 'source': 'Exhibit 4.47 - Lost Foam'},
     'average': {'btu_per_lb': 27962, 'source': 'Average of DOE aluminum facilities'},
+}
+
+# ================================================================
+# CO2 EMISSIONS AND DECARBONIZATION FACTORS (NEW IN V3.6)
+# ================================================================
+# Based on DOE Industrial Decarbonization Roadmap (2022) and
+# Liftoff: Industrial Decarbonization (2023)
+#
+# Supports DOE's 2050 net-zero industrial strategy by quantifying
+# GHG emissions avoided through scrap reduction.
+# ================================================================
+CO2_EMISSION_FACTORS = {
+    'natural_gas': {
+        'kg_co2_per_mmbtu': 53.06,  # EPA emission factor for natural gas
+        'source': 'EPA Emission Factors Hub (2024)'
+    },
+    'electricity_grid_avg': {
+        'kg_co2_per_kwh': 0.417,  # US grid average
+        'source': 'EIA (2023) - U.S. grid average'
+    },
+    'aluminum_melting': {
+        'kg_co2_per_lb_melted': 0.85,  # Combined scope 1+2 for aluminum melting
+        'source': 'DOE Industrial Decarbonization Roadmap (2022)'
+    }
+}
+
+# DOE Decarbonization References (NEW IN V3.6)
+DOE_DECARBONIZATION_REFS = {
+    'roadmap_2022': 'U.S. DOE. (2022). Industrial Decarbonization Roadmap. Office of Energy Efficiency & Renewable Energy.',
+    'liftoff_2023': 'U.S. DOE. (2023). Pathways to Commercial Liftoff: Industrial Decarbonization.',
+    'net_zero_2050': 'Target: Net-zero industrial GHG emissions by 2050 (DOE, 2022)',
+    'modern_casting_2021': 'Modern Casting. (2021). Scrap reduction yields ~$10,000 annual savings per 1% reduction per 500,000 lbs production.',
+    'oprychał_2021': 'Opyrchał, L. (2021). Reliability engineering applications in manufacturing quality control.'
 }
 
 # ================================================================
@@ -672,6 +728,24 @@ def add_mtts_features(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
             # Based on Weibull-style increasing hazard
             cycle_position = runs_since_failure / part_mtts_runs if part_mtts_runs > 0 else 0
             df.loc[idx, 'cycle_hazard_indicator'] = min(cycle_position, 2.0)  # Cap at 2x
+            
+            # ================================================================
+            # PROCESS HEALTH SCORE (NEW IN V3.6)
+            # ================================================================
+            # Implements dissertation concept: "The casting process is viewed as a 
+            # degradable system whose health declines toward a defect threshold."
+            #
+            # Process Health Score = 100 * (1 - hazard_indicator / 2)
+            # - Score of 100 = Healthy (just after successful run, low hazard)
+            # - Score of 50 = Moderate (approaching MTTS)
+            # - Score of 0 = Critical (at or beyond MTTS, high failure probability)
+            #
+            # This inverts the hazard indicator to provide an intuitive "health" metric
+            # where higher values indicate better process condition.
+            # ================================================================
+            hazard_capped = min(cycle_position, 2.0)
+            process_health_score = 100 * (1 - hazard_capped / 2)
+            df.loc[idx, 'process_health_score'] = max(0, process_health_score)
             
             # Update for next iteration
             prev_scrap = current_scrap
@@ -5211,21 +5285,25 @@ with tab1:
                         st.dataframe(mapping_df, use_container_width=True)
                     
                     # Recommendations
-                    st.markdown("### 💡 Recommended Actions")
+                    st.markdown("### 💡 PRE-PRODUCTION Actions (Take BEFORE Running)")
+                    st.caption("*Prognostic approach: Identify and correct issues BEFORE scrap occurs*")
                     
                     top_process = diagnosis.iloc[0]["Process"]
                     top_contribution = diagnosis.iloc[0]["Contribution (%)"]
                     
                     st.info(f"""
-**Primary Focus: {top_process}** ({top_contribution:.1f}% contribution)
+**⚠️ BEFORE PRODUCTION - Primary Focus: {top_process}** ({top_contribution:.1f}% contribution)
 
 **Description:** {PROCESS_DEFECT_MAP[top_process]["description"]}
 
-**Recommended Actions:**
-- Review SPC charts for {top_process} parameters
-- Increase inspection frequency for related defects
-- Consider process capability study for {top_process}
-- Check if {top_process} parameters are within specification limits
+**Pre-Production Checklist:**
+- ☐ Review SPC charts for {top_process} parameters BEFORE starting
+- ☐ Verify {top_process} parameters are within specification limits
+- ☐ Increase inspection frequency for related defects during run
+- ☐ Consider process capability study if recurring issues
+
+**Why BEFORE?** This prognostic approach enables counter-actions to prevent scrap, 
+rather than diagnostic detection after defects have already occurred.
                     """)
                     
                     if len(diagnosis) > 1:
@@ -8423,6 +8501,14 @@ with tab8:
         energy_per_scrap_lb_mmbtu = energy_benchmark / 1_000_000
         annual_tte_savings = avoided_scrap_lbs * energy_per_scrap_lb_mmbtu
         
+        # ================================================================
+        # CO2 EMISSIONS CALCULATIONS (NEW IN V3.6)
+        # Supports DOE 2050 net-zero industrial strategy
+        # ================================================================
+        co2_per_mmbtu = CO2_EMISSION_FACTORS['natural_gas']['kg_co2_per_mmbtu']
+        annual_co2_avoided_kg = annual_tte_savings * co2_per_mmbtu
+        annual_co2_avoided_tons = annual_co2_avoided_kg / 1000  # Metric tons
+        
         # Financial calculations
         material_savings = avoided_scrap_lbs * material_cost
         energy_savings = annual_tte_savings * energy_cost
@@ -8432,7 +8518,7 @@ with tab8:
         payback_days = (implementation_cost / total_savings * 365) if total_savings > 0 else float('inf')
         
         # Display results
-        result_col1, result_col2, result_col3 = st.columns(3)
+        result_col1, result_col2, result_col3, result_col4 = st.columns(4)
         
         with result_col1:
             st.markdown("#### Scrap Reduction")
@@ -8447,6 +8533,12 @@ with tab8:
             st.metric("Energy per Scrap lb", f"{energy_benchmark:,} Btu")
         
         with result_col3:
+            st.markdown("#### 🌿 GHG Impact (NEW)")
+            st.metric("CO₂ Avoided (Annual)", f"{annual_co2_avoided_tons:,.2f} metric tons")
+            st.metric("CO₂ per MMBtu", f"{co2_per_mmbtu:.1f} kg")
+            st.caption("*Supports DOE 2050 net-zero goals*")
+        
+        with result_col4:
             st.markdown("#### Financial Impact")
             st.metric("Total Annual Savings", f"${total_savings:,.2f}")
             status = "✅" if roi >= RQ_VALIDATION_CONFIG['RQ3']['roi_threshold'] else "❌"
@@ -8456,14 +8548,28 @@ with tab8:
             else:
                 st.metric("Payback Period", f"{payback_days/365:.1f} years")
         
+        # Decarbonization context box
+        st.markdown("""
+        <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 5px solid #4caf50;">
+            <h4 style="margin: 0; color: #2e7d32;">🌿 Decarbonization Impact</h4>
+            <p style="margin: 10px 0 0 0;">
+                Per DOE Industrial Decarbonization Roadmap (2022) and Liftoff: Industrial Decarbonization (2023), 
+                reducing foundry scrap directly contributes to national net-zero 2050 goals by avoiding both 
+                <strong>Scope 1</strong> (direct combustion) and <strong>Scope 2</strong> (electricity) emissions 
+                from melting, holding, and reprocessing scrapped castings.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
         # Detailed breakdown
-        with st.expander("📋 Detailed Financial Breakdown"):
+        with st.expander("📋 Detailed Financial & Environmental Breakdown"):
             breakdown_df = pd.DataFrame({
-                'Category': ['Material Savings', 'Energy Savings', 'Total Savings', 
+                'Category': ['Material Savings', 'Energy Savings', 'CO₂ Avoided', 'Total Savings', 
                             'Implementation Cost', 'Net First Year'],
                 'Amount': [
                     f"${material_savings:,.2f}",
                     f"${energy_savings:,.2f}",
+                    f"{annual_co2_avoided_tons:,.2f} metric tons",
                     f"${total_savings:,.2f}",
                     f"${implementation_cost:,.2f}",
                     f"${total_savings - implementation_cost:,.2f}"
@@ -8471,6 +8577,7 @@ with tab8:
                 'Notes': [
                     f"{avoided_scrap_lbs:,.0f} lbs × ${material_cost:.2f}/lb",
                     f"{annual_tte_savings:,.1f} MMBtu × ${energy_cost:.2f}/MMBtu",
+                    f"{annual_tte_savings:,.1f} MMBtu × {co2_per_mmbtu:.1f} kg/MMBtu",
                     "Material + Energy",
                     "One-time cost",
                     "First year net benefit"
@@ -8540,6 +8647,17 @@ with tab8:
         """)
         
         st.markdown("""
+        #### DOE Decarbonization Framework (NEW IN V3.6)
+        
+        > U.S. Department of Energy. (2022). *Industrial Decarbonization Roadmap*. 
+        > Office of Energy Efficiency and Renewable Energy.
+        
+        > U.S. Department of Energy. (2023). *Pathways to Commercial Liftoff: Industrial Decarbonization*.
+        
+        **Used for:** CO₂ emissions calculations, net-zero 2050 alignment, GHG impact quantification
+        """)
+        
+        st.markdown("""
         #### Reliability Engineering Fundamentals
         
         > Ebeling, C. E. (2010). *An Introduction to Reliability and Maintainability Engineering* 
@@ -8549,12 +8667,29 @@ with tab8:
         """)
         
         st.markdown("""
+        #### Prognostic Reframing - MTTS as MTTF (NEW IN V3.6)
+        
+        > Opyrchał, L. (2021). Reliability engineering applications in manufacturing quality control.
+        
+        **Used for:** Conceptual framework - treating scrap as reliability failure, MTTS = MTTF analogue
+        """)
+        
+        st.markdown("""
         #### Campbell Process-Defect Mapping
         
         > Campbell, J. (2003). *Castings* (2nd ed.). Butterworth-Heinemann.
         > Chapter 2: "Castings Practice: The Ten Rules of Castings"
         
         **Used for:** Root cause process diagnosis, defect-to-process mapping
+        """)
+        
+        st.markdown("""
+        #### Industry Economics Reference (NEW IN V3.6)
+        
+        > Modern Casting. (2021). Reducing scrap yields approximately $10,000 annual savings 
+        > per 1 percentage point reduction per 500,000 lbs production.
+        
+        **Used for:** ROI validation, financial impact benchmarks
         """)
         
         st.markdown("""
@@ -8577,6 +8712,14 @@ with tab8:
 Lei, Y., Li, N., Guo, L., Li, N., Yan, T., & Lin, J. (2018). Machinery health prognostics: A systematic review from data acquisition to RUL prediction. Mechanical Systems and Signal Processing, 104, 799-834. https://doi.org/10.1016/j.ymssp.2017.11.016
 
 Eppich, R. E. (2004). Energy Use in Selected Metalcasting Facilities—2003. U.S. Department of Energy, Office of Energy Efficiency and Renewable Energy, Industrial Technologies Program.
+
+U.S. Department of Energy. (2022). Industrial Decarbonization Roadmap. Office of Energy Efficiency and Renewable Energy.
+
+U.S. Department of Energy. (2023). Pathways to Commercial Liftoff: Industrial Decarbonization.
+
+Opyrchał, L. (2021). Reliability engineering applications in manufacturing quality control.
+
+Modern Casting. (2021). Scrap reduction financial impact analysis.
 
 Ebeling, C. E. (2010). An Introduction to Reliability and Maintainability Engineering (2nd ed.). Waveland Press.
 
@@ -9118,21 +9261,32 @@ with tab9:
         # SPC SUB-TAB 4: SPC vs ML Side-by-Side
         # ================================================================
         with spc_tab4:
-            st.subheader("SPC vs ML: Head-to-Head Comparison")
+            st.subheader("SPC vs ML: DIAGNOSTIC vs PROGNOSTIC Comparison")
             
             st.markdown("""
-            This comparison demonstrates why ML-based prediction outperforms traditional SPC 
-            for scrap prevention.
+            <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #1976d2;">
+                <h4 style="margin: 0; color: #1976d2;">📊 DIAGNOSTIC (SPC) vs 🔮 PROGNOSTIC (ML+MTTS)</h4>
+                <p style="margin: 10px 0 0 0;">
+                    <strong>Diagnostic:</strong> Analyzes past defects to determine which process(es) CAUSED scrap<br>
+                    <strong>Prognostic:</strong> Analyzes past defects to PREDICT future scrap and identify responsible processes BEFORE it occurs
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("""
+            This comparison demonstrates the paradigm shift from reactive quality control 
+            to predictive reliability management (Opyrchał, 2021).
             """)
             
             # Get ML predictions for this part
             df_part_ml = df_part.copy()
             
             # Create comparison table
-            st.markdown("### Capability Comparison")
+            st.markdown("### Capability Comparison: Diagnostic vs Prognostic")
             
             comparison_data = {
                 'Capability': [
+                    'Approach Type',
                     'Detection Timing',
                     'Output Type',
                     'Multi-variable Integration',
@@ -9142,8 +9296,9 @@ with tab9:
                     'Actionable Recommendations',
                     'Continuous Learning'
                 ],
-                'Traditional SPC': [
-                    '❌ Reactive (after event)',
+                '📊 SPC (DIAGNOSTIC)': [
+                    '❌ Analyzes PAST defects to find cause',
+                    '❌ Reactive (AFTER scrap occurs)',
                     '❌ Binary (in/out of control)',
                     '❌ Single variable per chart',
                     '❌ Limited (run charts only)',
@@ -9152,20 +9307,34 @@ with tab9:
                     '❌ Generic guidance',
                     '❌ Static limits'
                 ],
-                'ML + MTTS': [
-                    '✅ Predictive (before event)',
+                '🔮 ML + MTTS (PROGNOSTIC)': [
+                    '✅ Analyzes PAST defects to PREDICT future scrap',
+                    '✅ Predictive (BEFORE scrap occurs)',
                     '✅ Probability (0-100%)',
                     '✅ All features combined',
-                    '✅ MTTS reliability tracking',
+                    '✅ MTTS + Process Health Score',
                     '✅ RUL proxy estimation',
                     '✅ Campbell mapping automated',
-                    '✅ Specific process recommendations',
+                    '✅ Specific PRE-PRODUCTION recommendations',
                     '✅ Rolling window retraining'
                 ]
             }
             
             comparison_df = pd.DataFrame(comparison_data)
             st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+            
+            # Key insight box
+            st.markdown("""
+            <div style="background: #fff3e0; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 5px solid #ff9800;">
+                <h4 style="margin: 0; color: #e65100;">🔑 Key Insight</h4>
+                <p style="margin: 10px 0 0 0;">
+                    The prognostic reframing treats the casting process as a <strong>degradable system whose health 
+                    declines toward a defect threshold</strong>. MTTS (Mean Time To Scrap) serves the same role as 
+                    MTTF (Mean Time To Failure) in reliability engineering, enabling practitioners to take 
+                    <strong>counter-actions BEFORE scrap occurs</strong>.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
             
             # Visual comparison - Detection timeline
             st.markdown("### Detection Timeline Comparison")
@@ -9197,7 +9366,7 @@ with tab9:
                     x=spc_detections,
                     y=[scrap_values[i] for i in spc_detections],
                     mode='markers',
-                    name='SPC Detection (After Event)',
+                    name='SPC Detection (AFTER - Diagnostic)',
                     marker=dict(color='red', size=15, symbol='x')
                 ))
             
@@ -9686,4 +9855,4 @@ scrap prevention vs reactive SPC detection.
 
 
 st.markdown("---")
-st.caption("🏭 Foundry Scrap Risk Dashboard **v3.4 - RQ Validation + Reliability & Availability + SPC Comparison** | Based on Campbell (2003) + Lei et al. (2018) + DOE (2004) + Ebeling (2010) | 6-2-1 Rolling Window | R(t) & A(t) | TRUE MTTS")
+st.caption("🏭 Foundry Scrap Risk Dashboard **v3.6 - Enhanced PHM Framework** | Prognostic Reliability | Process Health Scoring | CO₂ Impact | Based on Campbell (2003) + Lei et al. (2018) + DOE (2004, 2022, 2023) + Opyrchał (2021) | 6-2-1 Rolling Window | R(t) & A(t) | TRUE MTTS")
