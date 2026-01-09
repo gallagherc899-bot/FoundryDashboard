@@ -542,17 +542,75 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
 #       Microelectronics Reliability, 50(3), 317-323.
 # ================================================================
 
+# ================================================================
+# MTTS CALCULATION - PARTS-BASED (CORRECTED IN V3.6)
+# ================================================================
+#
+# IMPORTANT CONCEPTUAL CORRECTION:
+# --------------------------------
+# The original implementation used "runs" (work orders) as the time unit.
+# This is INCORRECT because:
+#   - A run of 1,000 parts has more failure opportunities than a run of 10 parts
+#   - Risk should scale with ORDER QUANTITY, not just number of work orders
+#
+# CORRECTED APPROACH:
+# -------------------
+# MTTS is now calculated in PARTS, not runs, aligning with classical MTTF:
+#
+#   MTTF = Mean Time To Failure = Total Operating Time / Number of Failures
+#   MTTS = Mean Parts To Scrap = Total Parts Produced / Number of Failure Events
+#
+# MATHEMATICAL FOUNDATION:
+# ------------------------
+# Classical MTTF (Ebeling, 2010):
+#   MTTF = ∫₀^∞ R(t) dt = ∫₀^∞ e^(-λt) dt = 1/λ
+#
+# For exponential distribution:
+#   - λ = failure rate (failures per unit time)
+#   - MTTF = 1/λ (mean time between failures)
+#   - R(t) = e^(-λt) = e^(-t/MTTF) (reliability function)
+#
+# Foundry Analogue (MTTS):
+#   - "Time" unit = number of PARTS produced (not work orders)
+#   - λ_parts = failure rate per part = failures / total_parts
+#   - MTTS = 1/λ_parts = total_parts / failures (mean parts between failures)
+#   - R(n) = e^(-λ_parts × n) = e^(-n/MTTS) where n = order quantity
+#
+# WHY PARTS-BASED IS CORRECT:
+# ---------------------------
+# Example: Part 3 has 30 work orders totaling 9,000 parts with 4 failures
+#
+#   OLD (runs-based):  MTTS = 30/4 = 7.5 runs
+#     - Problem: Treats 10-part order same as 1000-part order
+#     - 10-part order risk ≈ 1000-part order risk (WRONG!)
+#
+#   NEW (parts-based): MTTS = 9,000/4 = 2,250 parts
+#     - 10-part order:    R(10) = e^(-10/2250) = 99.6% reliability (LOW RISK ✓)
+#     - 1000-part order:  R(1000) = e^(-1000/2250) = 64.1% reliability (HIGHER RISK ✓)
+#
+# This correctly models that larger orders have more failure opportunities.
+#
+# REFERENCES:
+# -----------
+# - Ebeling, C.E. (2010). Reliability and Maintainability Engineering, Ch. 3
+# - O'Connor, P. & Kleyner, A. (2012). Practical Reliability Engineering, Ch. 2
+# - Lei, Y. et al. (2018). Machinery health prognostics. MSSP, 104, 799-834.
+# ================================================================
+
 def compute_mtts_metrics(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     """
-    Compute TRUE MTTS (Mean Time To Scrap) metrics per part.
+    Compute TRUE MTTS (Mean Time To Scrap) metrics per part - PARTS-BASED.
     
     This is the PHM-equivalent of MTTF, treating scrap threshold exceedance
     as a "failure event" in reliability engineering terms.
     
+    CRITICAL: MTTS is calculated in PARTS, not runs/work orders!
+    This ensures that risk scales correctly with order quantity.
+    
     Parameters:
     -----------
     df : pd.DataFrame
-        Input dataframe with 'part_id', 'week_ending', 'scrap_percent'
+        Input dataframe with 'part_id', 'week_ending', 'scrap_percent', 'order_quantity'
     threshold : float
         Scrap threshold defining a "failure" (e.g., 5.0%)
     
@@ -560,81 +618,188 @@ def compute_mtts_metrics(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     --------
     pd.DataFrame with columns:
         - part_id: Part identifier
-        - mtts_runs: Mean runs until failure (TRUE MTTS - MTTF analogue)
+        - mtts_parts: Mean PARTS until failure (TRUE MTTS - MTTF analogue)
+        - mtts_runs: Mean RUNS until failure (for reference/comparison)
         - failure_count: Number of failure events observed
         - total_runs: Total production runs for this part
-        - hazard_rate: Failures per run (failure rate analogue)
-        - mtts_simple: Simple average scrap (for comparison)
-        - reliability_score: 1 - hazard_rate (probability of success)
+        - total_parts: Total parts produced for this part
+        - lambda_parts: Failure rate per part (λ = 1/MTTS)
+        - lambda_runs: Failure rate per run (for comparison)
+        - avg_order_quantity: Average parts per run
+        - reliability_score: Probability of single run success
     
-    Scientific Basis:
-    -----------------
-    MTTS serves as MTTF analogue:
-        MTTF = E[T] where T is time to failure
-        MTTS = E[N] where N is runs to scrap threshold exceedance
+    Mathematical Basis (Ebeling, 2010):
+    -----------------------------------
+    For exponential reliability model:
     
-    Hazard Rate analogue:
-        h(t) = f(t) / R(t) in traditional reliability
-        h_scrap = failure_count / total_runs in our framework
+        MTTF = Total Operating Time / Number of Failures
+        MTTS = Total Parts Produced / Number of Failures
+        
+        λ (lambda) = 1 / MTTS = failure rate per part
+        
+        R(n) = e^(-λn) = e^(-n/MTTS)
+        
+    Where:
+        - n = number of parts in new order
+        - R(n) = probability of producing n parts without failure
+        - MTTS = mean parts between failure events
     
-    Reference:
-    ----------
-    Lei, Y., et al. (2018). Machinery health prognostics: A systematic review.
-    Mechanical Systems and Signal Processing, 104, 799-834.
+    Example:
+    --------
+    Part 3: 30 runs, 9,000 total parts, 4 failures
+        MTTS_parts = 9,000 / 4 = 2,250 parts
+        λ_parts = 1/2,250 = 0.000444 failures/part
+        
+        For 100-part order:
+        R(100) = e^(-100/2250) = e^(-0.044) = 95.7% reliability
+        Scrap Risk = 1 - R(100) = 4.3%
+        
+        For 1000-part order:
+        R(1000) = e^(-1000/2250) = e^(-0.444) = 64.1% reliability
+        Scrap Risk = 1 - R(1000) = 35.9%
+    
+    References:
+    -----------
+    Ebeling, C.E. (2010). An Introduction to Reliability and Maintainability 
+        Engineering (2nd ed.), Chapter 3. Waveland Press.
+    Lei, Y. et al. (2018). Machinery health prognostics. MSSP, 104, 799-834.
     """
     results = []
     
     df_sorted = df.sort_values(['part_id', 'week_ending']).copy()
     
+    # Ensure order_quantity column exists
+    if 'order_quantity' not in df_sorted.columns:
+        df_sorted['order_quantity'] = 1  # Default to 1 if not available
+    
     for part_id, group in df_sorted.groupby('part_id'):
         group = group.reset_index(drop=True)
         
+        # Track parts since last failure (not runs)
+        parts_since_last_failure = 0
+        failure_cycles_parts = []  # Parts-to-failure for each cycle
+        failure_cycles_runs = []   # Runs-to-failure for each cycle (for comparison)
         runs_since_last_failure = 0
-        failure_cycles = []  # Stores runs-to-failure for each cycle
         failure_count = 0
         
         for idx, row in group.iterrows():
+            order_qty = row.get('order_quantity', 1)
+            parts_since_last_failure += order_qty
             runs_since_last_failure += 1
             
             # Check for failure (scrap exceeds threshold)
             if row['scrap_percent'] > threshold:
-                failure_cycles.append(runs_since_last_failure)
+                failure_cycles_parts.append(parts_since_last_failure)
+                failure_cycles_runs.append(runs_since_last_failure)
                 failure_count += 1
-                runs_since_last_failure = 0  # Reset counter after failure
+                parts_since_last_failure = 0  # Reset counter after failure
+                runs_since_last_failure = 0
         
-        # Calculate MTTS (Mean Time To Scrap)
-        if len(failure_cycles) > 0:
-            mtts_runs = np.mean(failure_cycles)
-            mtts_std = np.std(failure_cycles) if len(failure_cycles) > 1 else 0
+        # Calculate totals
+        total_runs = len(group)
+        total_parts = group['order_quantity'].sum() if 'order_quantity' in group.columns else total_runs
+        avg_order_quantity = total_parts / total_runs if total_runs > 0 else 0
+        
+        # Calculate MTTS (Mean Time To Scrap) - PARTS-BASED
+        if len(failure_cycles_parts) > 0:
+            mtts_parts = np.mean(failure_cycles_parts)
+            mtts_parts_std = np.std(failure_cycles_parts) if len(failure_cycles_parts) > 1 else 0
+            mtts_runs = np.mean(failure_cycles_runs)
         else:
             # No failures observed - censored data
-            # Use total runs as lower bound (right-censored estimate)
-            mtts_runs = len(group)
-            mtts_std = 0
+            # Use total parts as lower bound (right-censored estimate)
+            mtts_parts = total_parts
+            mtts_parts_std = 0
+            mtts_runs = total_runs
         
-        total_runs = len(group)
+        # Lambda (failure rate) - PARTS-BASED
+        # λ = failures / total_parts = 1 / MTTS
+        lambda_parts = failure_count / total_parts if total_parts > 0 else 0
+        lambda_runs = failure_count / total_runs if total_runs > 0 else 0
         
-        # Hazard rate (failures per run) - reliability analogue
-        hazard_rate = failure_count / total_runs if total_runs > 0 else 0
+        # Reliability score for average-sized order
+        # R(avg_qty) = e^(-λ × avg_qty) = e^(-avg_qty / MTTS)
+        if mtts_parts > 0:
+            reliability_score = np.exp(-avg_order_quantity / mtts_parts)
+        else:
+            reliability_score = 0
         
-        # Reliability score (probability of no failure)
-        reliability_score = 1 - hazard_rate
-        
-        # Simple MTTS (current implementation - for comparison)
+        # Simple average scrap (for comparison)
         mtts_simple = group['scrap_percent'].mean()
         
         results.append({
             'part_id': part_id,
-            'mtts_runs': mtts_runs,
-            'mtts_std': mtts_std,
+            'mtts_parts': mtts_parts,           # PRIMARY METRIC - parts-based
+            'mtts_parts_std': mtts_parts_std,
+            'mtts_runs': mtts_runs,              # For comparison only
             'failure_count': failure_count,
             'total_runs': total_runs,
-            'hazard_rate': hazard_rate,
+            'total_parts': total_parts,
+            'avg_order_quantity': avg_order_quantity,
+            'lambda_parts': lambda_parts,        # Failure rate per part
+            'lambda_runs': lambda_runs,          # Failure rate per run (comparison)
             'reliability_score': reliability_score,
             'mtts_simple': mtts_simple
         })
     
     return pd.DataFrame(results)
+
+
+def calculate_reliability_for_order(mtts_parts: float, order_quantity: int) -> dict:
+    """
+    Calculate reliability metrics for a specific order quantity.
+    
+    This function applies the exponential reliability model using parts-based MTTS.
+    
+    Parameters:
+    -----------
+    mtts_parts : float
+        Mean Time To Scrap in PARTS (from compute_mtts_metrics)
+    order_quantity : int
+        Number of parts in the new order
+    
+    Returns:
+    --------
+    dict with:
+        - reliability: R(n) = probability of completing order without failure
+        - scrap_risk: 1 - R(n) = probability of failure during order
+        - expected_failures: λ × n = expected number of failures
+        - lambda_parts: failure rate per part
+    
+    Mathematical Basis:
+    -------------------
+    R(n) = e^(-λn) = e^(-n/MTTS)
+    
+    Where:
+        - n = order_quantity (number of parts)
+        - λ = 1/MTTS (failure rate per part)
+        - MTTS = mean parts between failures
+    
+    Example:
+    --------
+    MTTS = 2,250 parts, Order = 300 parts
+    R(300) = e^(-300/2250) = e^(-0.133) = 87.5%
+    Scrap Risk = 1 - 0.875 = 12.5%
+    """
+    if mtts_parts <= 0:
+        return {
+            'reliability': 0,
+            'scrap_risk': 1.0,
+            'expected_failures': float('inf'),
+            'lambda_parts': float('inf')
+        }
+    
+    lambda_parts = 1 / mtts_parts
+    reliability = np.exp(-order_quantity / mtts_parts)
+    scrap_risk = 1 - reliability
+    expected_failures = lambda_parts * order_quantity
+    
+    return {
+        'reliability': reliability,
+        'scrap_risk': scrap_risk,
+        'expected_failures': expected_failures,
+        'lambda_parts': lambda_parts
+    }
 
 
 def add_mtts_features(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
@@ -756,16 +921,19 @@ def add_mtts_features(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
                 runs_since_failure = 0
                 cumulative_scrap = 0.0
     
-    # Merge part-level MTTS metrics
+    # Merge part-level MTTS metrics (now includes parts-based calculations)
     df = df.merge(
-        mtts_df[['part_id', 'mtts_runs', 'hazard_rate', 'reliability_score', 'failure_count']],
+        mtts_df[['part_id', 'mtts_parts', 'mtts_runs', 'lambda_parts', 'lambda_runs', 
+                 'reliability_score', 'failure_count', 'total_parts', 'avg_order_quantity']],
         on='part_id',
         how='left'
     )
     
     # Fill any missing values
-    df['mtts_runs'] = df['mtts_runs'].fillna(df['mtts_runs'].median())
-    df['hazard_rate'] = df['hazard_rate'].fillna(df['hazard_rate'].median())
+    df['mtts_parts'] = df['mtts_parts'].fillna(df['mtts_parts'].median() if df['mtts_parts'].notna().any() else 1000)
+    df['mtts_runs'] = df['mtts_runs'].fillna(df['mtts_runs'].median() if df['mtts_runs'].notna().any() else 10)
+    df['lambda_parts'] = df['lambda_parts'].fillna(df['lambda_parts'].median() if df['lambda_parts'].notna().any() else 0.001)
+    df['lambda_runs'] = df['lambda_runs'].fillna(df['lambda_runs'].median() if df['lambda_runs'].notna().any() else 0.1)
     df['reliability_score'] = df['reliability_score'].fillna(0.5)
     df['failure_count'] = df['failure_count'].fillna(0)
     
@@ -856,13 +1024,15 @@ def compute_reliability_metrics(df: pd.DataFrame, threshold: float,
     """
     Compute comprehensive Reliability and Availability metrics per part.
     
+    UPDATED IN V3.6: Now uses PARTS-BASED MTTS for correct scaling with order quantity.
+    
     This extends MTTS metrics with classical reliability engineering formulas,
     treating MTTS as the MTTF analogue for non-repairable quality events.
     
     Parameters:
     -----------
     df : pd.DataFrame
-        Input dataframe with 'part_id', 'week_ending', 'scrap_percent'
+        Input dataframe with 'part_id', 'week_ending', 'scrap_percent', 'order_quantity'
     threshold : float
         Scrap threshold defining a "failure" (e.g., 5.0%)
     mttr_runs : float
@@ -873,40 +1043,47 @@ def compute_reliability_metrics(df: pd.DataFrame, threshold: float,
     --------
     pd.DataFrame with columns:
         - part_id: Part identifier
-        - mtts_runs: Mean Time To Scrap (MTTF analogue)
-        - failure_rate_lambda: λ = 1/MTTS (failures per run)
-        - reliability_1run: R(1) - Probability of surviving 1 run
-        - reliability_5run: R(5) - Probability of surviving 5 runs
-        - reliability_10run: R(10) - Probability of surviving 10 runs
+        - mtts_parts: Mean Parts To Scrap (PRIMARY - MTTF analogue)
+        - mtts_runs: Mean Runs To Scrap (for comparison)
+        - lambda_parts: λ = 1/MTTS_parts (failures per part)
+        - total_parts: Total parts produced historically
+        - avg_order_quantity: Average order size
+        - reliability_100parts: R(100) - Reliability for 100-part order
+        - reliability_500parts: R(500) - Reliability for 500-part order
+        - reliability_1000parts: R(1000) - Reliability for 1000-part order
         - availability: A = MTTS / (MTTS + MTTR)
         - availability_percent: Availability as percentage
-        - mttr_runs: Mean Time To Repair/Replace used
-        - meets_availability_target: Boolean if A >= target
-        - meets_reliability_target: Boolean if R(1) >= target
     
-    Scientific Basis:
-    -----------------
+    Scientific Basis (Ebeling, 2010):
+    ---------------------------------
     Reliability Function (Exponential):
         R(t) = e^(-λt) = e^(-t/MTTF)
         
-    For our scrap context:
-        R(n) = e^(-n/MTTS)
+    For our PARTS-BASED scrap context:
+        R(n) = e^(-n/MTTS_parts) = e^(-λ_parts × n)
         
     Where:
-        n = number of production runs
-        MTTS = Mean Time To Scrap (runs)
-        λ = 1/MTTS = failure rate
+        n = number of PARTS in order (not runs!)
+        MTTS_parts = Mean Parts To Scrap
+        λ_parts = 1/MTTS_parts = failure rate per part
+    
+    WHY PARTS-BASED:
+    ----------------
+    Order of 10 parts should have LOWER risk than order of 1000 parts.
+    Using parts as the "time" unit ensures risk scales correctly:
+        - 10-part order:   R(10) = e^(-10/MTTS)   ≈ very high reliability
+        - 1000-part order: R(1000) = e^(-1000/MTTS) ≈ lower reliability
     
     Availability (Steady-State):
         A = MTTF / (MTTF + MTTR)
-        A = MTTS / (MTTS + MTTR)
+        A = MTTS_parts / (MTTS_parts + MTTR_parts)
     
     References:
     -----------
     Ebeling, C.E. (2010). An Introduction to Reliability and 
         Maintainability Engineering. 2nd ed. Waveland Press.
     """
-    # First compute base MTTS metrics
+    # First compute base MTTS metrics (now parts-based)
     mtts_df = compute_mtts_metrics(df, threshold)
     
     # Add reliability and availability calculations
@@ -914,47 +1091,71 @@ def compute_reliability_metrics(df: pd.DataFrame, threshold: float,
     
     for _, row in mtts_df.iterrows():
         part_id = row['part_id']
-        mtts = row['mtts_runs']
+        mtts_parts = row['mtts_parts']
+        mtts_runs = row['mtts_runs']
+        total_parts = row.get('total_parts', 0)
+        avg_order_qty = row.get('avg_order_quantity', 300)  # Default to 300 if not available
         
-        # Failure Rate: λ = 1/MTTS
-        # Handle edge case where MTTS is very small
-        if mtts > 0.001:
-            failure_rate_lambda = 1.0 / mtts
+        # Failure Rate: λ = 1/MTTS_parts (failures per part)
+        if mtts_parts > 0.001:
+            lambda_parts = 1.0 / mtts_parts
         else:
-            failure_rate_lambda = 1000.0  # Very high failure rate
+            lambda_parts = 1.0  # Very high failure rate
         
-        # Reliability Function: R(n) = e^(-λn) = e^(-n/MTTS)
-        # Probability of surviving n runs without failure
-        reliability_1run = np.exp(-1.0 / mtts) if mtts > 0.001 else 0.0
-        reliability_5run = np.exp(-5.0 / mtts) if mtts > 0.001 else 0.0
-        reliability_10run = np.exp(-10.0 / mtts) if mtts > 0.001 else 0.0
+        # Reliability Function: R(n) = e^(-λn) = e^(-n/MTTS_parts)
+        # Probability of producing n parts without failure
+        # Using standard order sizes for comparison
+        reliability_100parts = np.exp(-100.0 / mtts_parts) if mtts_parts > 0.001 else 0.0
+        reliability_500parts = np.exp(-500.0 / mtts_parts) if mtts_parts > 0.001 else 0.0
+        reliability_1000parts = np.exp(-1000.0 / mtts_parts) if mtts_parts > 0.001 else 0.0
+        reliability_avg_order = np.exp(-avg_order_qty / mtts_parts) if mtts_parts > 0.001 else 0.0
+        
+        # For backward compatibility, also compute runs-based
+        lambda_runs = row.get('lambda_runs', 0)
+        reliability_1run = np.exp(-1.0 / mtts_runs) if mtts_runs > 0.001 else 0.0
+        reliability_5run = np.exp(-5.0 / mtts_runs) if mtts_runs > 0.001 else 0.0
+        reliability_10run = np.exp(-10.0 / mtts_runs) if mtts_runs > 0.001 else 0.0
         
         # Availability: A = MTTS / (MTTS + MTTR)
-        availability = mtts / (mtts + mttr_runs) if (mtts + mttr_runs) > 0 else 0.0
+        # Convert MTTR from runs to parts for consistency
+        mttr_parts = mttr_runs * avg_order_qty
+        availability = mtts_parts / (mtts_parts + mttr_parts) if (mtts_parts + mttr_parts) > 0 else 0.0
         availability_percent = availability * 100
         
         # Check against targets
         meets_availability_target = availability >= AVAILABILITY_TARGET
-        meets_reliability_target = reliability_1run >= RELIABILITY_TARGET
+        meets_reliability_target = reliability_avg_order >= RELIABILITY_TARGET
         
         reliability_results.append({
             'part_id': part_id,
-            'mtts_runs': mtts,
-            'mtts_std': row.get('mtts_std', 0),
+            # PRIMARY: Parts-based metrics
+            'mtts_parts': mtts_parts,
+            'lambda_parts': lambda_parts,
+            'total_parts': total_parts,
+            'avg_order_quantity': avg_order_qty,
+            'reliability_100parts': reliability_100parts,
+            'reliability_500parts': reliability_500parts,
+            'reliability_1000parts': reliability_1000parts,
+            'reliability_avg_order': reliability_avg_order,
+            # SECONDARY: Runs-based metrics (for comparison)
+            'mtts_runs': mtts_runs,
+            'mtts_std': row.get('mtts_parts_std', 0),
             'failure_count': row.get('failure_count', 0),
             'total_runs': row.get('total_runs', 0),
-            'failure_rate_lambda': failure_rate_lambda,
+            'lambda_runs': lambda_runs,
             'reliability_1run': reliability_1run,
             'reliability_5run': reliability_5run,
             'reliability_10run': reliability_10run,
+            # Availability and targets
             'availability': availability,
             'availability_percent': availability_percent,
             'mttr_runs': mttr_runs,
             'meets_availability_target': meets_availability_target,
             'meets_reliability_target': meets_reliability_target,
-            # Keep original metrics for compatibility
-            'hazard_rate': row.get('hazard_rate', failure_rate_lambda),
-            'reliability_score': reliability_1run  # Map to single-run reliability
+            # Backward compatibility
+            'failure_rate_lambda': lambda_parts,
+            'hazard_rate': lambda_parts,
+            'reliability_score': reliability_avg_order
         })
     
     return pd.DataFrame(reliability_results)
@@ -5256,6 +5457,11 @@ with tab1:
                     diagnosis_display = diagnosis.copy()
                     diagnosis_display["Contribution (%)"] = diagnosis_display["Contribution (%)"].round(2)
                     
+                    # NEW IN V3.6: Add Risk Contribution column showing share of total scrap risk
+                    diagnosis_display["Risk Share (of {:.1f}%)".format(scrap_risk)] = (
+                        diagnosis_display["Contribution (%)"] / 100 * scrap_risk
+                    ).round(2)
+                    
                     st.dataframe(
                         diagnosis_display.style.background_gradient(
                             subset=["Contribution (%)"], 
@@ -5266,15 +5472,28 @@ with tab1:
                     
                     # Defect-to-Process mapping
                     st.markdown("#### 🔗 Defect → Process Mapping")
+                    st.caption(f"*How each defect contributes to the **{scrap_risk:.1f}% total scrap risk***")
+                    
+                    # Calculate total predicted rate for risk share calculation
+                    total_predicted_rate = top_defects["Predicted Rate (%)"].sum()
                     
                     mapping_data = []
                     for _, row in top_defects.head(10).iterrows():
                         defect_code = row["Defect_Code"]
+                        predicted_rate = row['Predicted Rate (%)']
+                        
+                        # Calculate this defect's share of total risk
+                        if total_predicted_rate > 0:
+                            defect_risk_share = (predicted_rate / total_predicted_rate) * scrap_risk
+                        else:
+                            defect_risk_share = 0
+                        
                         if defect_code in DEFECT_TO_PROCESS:
                             processes = DEFECT_TO_PROCESS[defect_code]
                             mapping_data.append({
                                 "Defect": row["Defect"],
-                                "Predicted Rate (%)": f"{row['Predicted Rate (%)']:.2f}",
+                                "Predicted Rate (%)": f"{predicted_rate:.2f}",
+                                "Risk Share (%)": f"{defect_risk_share:.2f}",
                                 "Expected Count": f"{row['Expected Count']:.1f}",
                                 "Root Cause Process(es)": ", ".join(processes),
                                 "# Processes": len(processes)
@@ -5283,6 +5502,16 @@ with tab1:
                     if mapping_data:
                         mapping_df = pd.DataFrame(mapping_data)
                         st.dataframe(mapping_df, use_container_width=True)
+                        
+                        # Add summary explanation
+                        st.info(f"""
+**📊 Reading This Table:**
+- **Predicted Rate (%)**: Historical rate of this defect type
+- **Risk Share (%)**: How much of the **{scrap_risk:.1f}% total scrap risk** this defect accounts for
+- **Expected Count**: Predicted defective pieces = Risk Share × Order Quantity ÷ 100
+
+*Example: If Dross has Risk Share of 12.3%, it contributes 12.3 percentage points to the total {scrap_risk:.1f}% scrap risk.*
+                        """)
                     
                     # Recommendations
                     st.markdown("### 💡 PRE-PRODUCTION Actions (Take BEFORE Running)")
@@ -5290,9 +5519,23 @@ with tab1:
                     
                     top_process = diagnosis.iloc[0]["Process"]
                     top_contribution = diagnosis.iloc[0]["Contribution (%)"]
+                    top_risk_share = (top_contribution / 100) * scrap_risk
+                    
+                    # Calculate risk shares for all processes
+                    process_risk_breakdown = []
+                    for _, proc_row in diagnosis.iterrows():
+                        proc_risk = (proc_row["Contribution (%)"] / 100) * scrap_risk
+                        process_risk_breakdown.append({
+                            "Process": proc_row["Process"],
+                            "Contribution (%)": proc_row["Contribution (%)"],
+                            "Risk Share (%)": proc_risk
+                        })
                     
                     st.info(f"""
-**⚠️ BEFORE PRODUCTION - Primary Focus: {top_process}** ({top_contribution:.1f}% contribution)
+**⚠️ BEFORE PRODUCTION - Primary Focus: {top_process}** 
+
+📊 **Risk Breakdown:** This process accounts for **{top_risk_share:.1f}%** of the **{scrap_risk:.1f}% total scrap risk**
+*(That's {top_contribution:.1f}% of defects × {scrap_risk:.1f}% total risk = {top_risk_share:.1f}% risk from {top_process})*
 
 **Description:** {PROCESS_DEFECT_MAP[top_process]["description"]}
 
@@ -5306,9 +5549,46 @@ with tab1:
 rather than diagnostic detection after defects have already occurred.
                     """)
                     
+                    # Show full process risk breakdown table
+                    st.markdown("#### 📊 Process Risk Breakdown")
+                    st.caption(f"*How each process contributes to the **{scrap_risk:.1f}% total scrap risk***")
+                    
+                    breakdown_df = pd.DataFrame(process_risk_breakdown)
+                    breakdown_df["Contribution (%)"] = breakdown_df["Contribution (%)"].round(1)
+                    breakdown_df["Risk Share (%)"] = breakdown_df["Risk Share (%)"].round(2)
+                    breakdown_df = breakdown_df.sort_values("Risk Share (%)", ascending=False)
+                    
+                    # Add visual bar representation
+                    breakdown_df["Risk Bar"] = breakdown_df["Risk Share (%)"].apply(
+                        lambda x: "█" * int(x / scrap_risk * 20) if scrap_risk > 0 else ""
+                    )
+                    
+                    st.dataframe(
+                        breakdown_df.style.background_gradient(
+                            subset=["Risk Share (%)"],
+                            cmap="Reds"
+                        ),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    
+                    # Summary statement
+                    top_3_processes = breakdown_df.head(3)
+                    top_3_risk = top_3_processes["Risk Share (%)"].sum()
+                    top_3_names = ", ".join(top_3_processes["Process"].tolist())
+                    
+                    st.success(f"""
+**🎯 Focus Summary:** The top 3 processes ({top_3_names}) account for **{top_3_risk:.1f}%** of the **{scrap_risk:.1f}%** total risk.
+Addressing these processes BEFORE production could prevent up to **{top_3_risk:.1f}%** scrap.
+                    """)
+                    
                     if len(diagnosis) > 1:
+                        second_process = diagnosis.iloc[1]["Process"]
+                        second_contribution = diagnosis.iloc[1]["Contribution (%)"]
+                        second_risk_share = (second_contribution / 100) * scrap_risk
+                        
                         st.warning(f"""
-**Secondary Concern: {diagnosis.iloc[1]["Process"]}** ({diagnosis.iloc[1]["Contribution (%)"]:.1f}% contribution)
+**Secondary Concern: {second_process}** ({second_risk_share:.1f}% of {scrap_risk:.1f}% total risk)
 
 Monitor this process as well, as it contributes significantly to the predicted defect profile.
                         """)
@@ -7172,7 +7452,7 @@ def make_xy(df, thr_label, use_rate_cols,
 
 
 # ================================================================
-# TAB 5: RELIABILITY & AVAILABILITY (NEW IN V3.3)
+# TAB 5: RELIABILITY & AVAILABILITY (NEW IN V3.3, UPDATED V3.6)
 # ================================================================
 with tab5:
     st.header("⚙️ Reliability & Availability Analysis")
@@ -7182,11 +7462,80 @@ with tab5:
     
     This tab applies classical reliability engineering metrics to foundry scrap prediction,
     treating scrap threshold exceedance as a "failure event" in reliability terms.
+    """)
     
+    # NEW IN V3.6: Explanation of parts-based MTTS
+    with st.expander("📚 **IMPORTANT: Understanding MTTS Calculation (Updated in v3.6)**", expanded=True):
+        st.markdown("""
+        ### MTTS is Now Calculated in PARTS, Not Runs
+        
+        **Why This Matters:**
+        - A run of 1,000 parts has MORE failure opportunities than a run of 10 parts
+        - Risk should scale with ORDER QUANTITY
+        - Classical MTTF uses "time" as the unit; we use "parts" as our "time" unit
+        
+        ---
+        
+        ### Mathematical Foundation (Ebeling, 2010)
+        
+        **Classical MTTF Formula:**
+        ```
+        MTTF = Total Operating Time / Number of Failures
+        ```
+        
+        **Our MTTS Formula (Parts-Based):**
+        ```
+        MTTS = Total Parts Produced / Number of Failure Events
+        ```
+        
+        **Failure Rate:**
+        ```
+        λ (lambda) = 1 / MTTS = failures per part
+        ```
+        
+        **Reliability Function:**
+        ```
+        R(n) = e^(-λn) = e^(-n/MTTS)
+        ```
+        Where n = number of parts in the order
+        
+        ---
+        
+        ### Example Calculation
+        
+        | Data | Value |
+        |------|-------|
+        | Total parts produced | 9,000 |
+        | Number of failures (scrap > threshold) | 4 |
+        | **MTTS** | 9,000 ÷ 4 = **2,250 parts** |
+        | **λ (failure rate)** | 1 ÷ 2,250 = **0.000444 per part** |
+        
+        | Order Quantity | R(n) Calculation | Reliability | Scrap Risk |
+        |---------------|------------------|-------------|------------|
+        | 10 parts | e^(-10/2250) | **99.6%** | 0.4% |
+        | 100 parts | e^(-100/2250) | **95.7%** | 4.3% |
+        | 300 parts | e^(-300/2250) | **87.5%** | 12.5% |
+        | 1000 parts | e^(-1000/2250) | **64.1%** | 35.9% |
+        
+        **Notice:** Larger orders have higher risk - this is correct behavior!
+        
+        ---
+        
+        ### Why Parts-Based is Correct
+        
+        | Approach | 10-Part Order | 1000-Part Order | Problem? |
+        |----------|--------------|-----------------|----------|
+        | **OLD (runs-based)** | ~10% risk | ~10% risk | ❌ Same risk for different sizes! |
+        | **NEW (parts-based)** | ~0.4% risk | ~36% risk | ✓ Risk scales correctly |
+        
+        The parts-based approach correctly models that larger orders have more opportunities for defects.
+        """)
+    
+    st.markdown("""
     **Key Metrics:**
-    - **MTTS (Mean Time To Scrap)**: Analogue to MTTF - average runs until failure
-    - **Failure Rate (λ)**: λ = 1/MTTS - failures per run
-    - **Reliability R(n)**: Probability of surviving n runs without failure: R(n) = e^(-n/MTTS)
+    - **MTTS (Mean Time To Scrap)**: PARTS between failures (MTTF analogue)
+    - **Failure Rate (λ)**: λ = 1/MTTS - failures per PART
+    - **Reliability R(n)**: Probability of producing n parts without failure: R(n) = e^(-n/MTTS)
     - **Availability A**: System uptime fraction: A = MTTS / (MTTS + MTTR)
     """)
     
