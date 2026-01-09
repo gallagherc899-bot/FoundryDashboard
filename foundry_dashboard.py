@@ -738,6 +738,7 @@ def compute_mtts_metrics(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
             'avg_order_quantity': avg_order_quantity,
             'lambda_parts': lambda_parts,        # Failure rate per part
             'lambda_runs': lambda_runs,          # Failure rate per run (comparison)
+            'hazard_rate': lambda_runs,          # BACKWARD COMPATIBILITY - alias for lambda_runs
             'reliability_score': reliability_score,
             'mtts_simple': mtts_simple
         })
@@ -924,7 +925,7 @@ def add_mtts_features(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     # Merge part-level MTTS metrics (now includes parts-based calculations)
     df = df.merge(
         mtts_df[['part_id', 'mtts_parts', 'mtts_runs', 'lambda_parts', 'lambda_runs', 
-                 'reliability_score', 'failure_count', 'total_parts', 'avg_order_quantity']],
+                 'hazard_rate', 'reliability_score', 'failure_count', 'total_parts', 'avg_order_quantity']],
         on='part_id',
         how='left'
     )
@@ -934,6 +935,7 @@ def add_mtts_features(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     df['mtts_runs'] = df['mtts_runs'].fillna(df['mtts_runs'].median() if df['mtts_runs'].notna().any() else 10)
     df['lambda_parts'] = df['lambda_parts'].fillna(df['lambda_parts'].median() if df['lambda_parts'].notna().any() else 0.001)
     df['lambda_runs'] = df['lambda_runs'].fillna(df['lambda_runs'].median() if df['lambda_runs'].notna().any() else 0.1)
+    df['hazard_rate'] = df['hazard_rate'].fillna(df['hazard_rate'].median() if df['hazard_rate'].notna().any() else 0.1)
     df['reliability_score'] = df['reliability_score'].fillna(0.5)
     df['failure_count'] = df['failure_count'].fillna(0)
     
@@ -3756,19 +3758,27 @@ def add_mtts_to_splits(df_train, df_calib, df_test, threshold):
                     cumulative_scrap = 0.0
     
     # Merge part-level MTTS from training (prevents leakage)
-    mtts_cols = ['part_id', 'mtts_runs', 'hazard_rate', 'reliability_score', 'failure_count']
-    df_calib_mtts = df_calib_mtts.merge(mtts_train[mtts_cols], on='part_id', how='left')
-    df_test_mtts = df_test_mtts.merge(mtts_train[mtts_cols], on='part_id', how='left')
+    # Updated for parts-based MTTS (v3.6)
+    mtts_cols = ['part_id', 'mtts_parts', 'mtts_runs', 'lambda_parts', 'lambda_runs', 'hazard_rate', 'reliability_score', 'failure_count']
+    # Filter to only columns that exist in mtts_train
+    available_cols = [c for c in mtts_cols if c in mtts_train.columns]
+    df_calib_mtts = df_calib_mtts.merge(mtts_train[available_cols], on='part_id', how='left')
+    df_test_mtts = df_test_mtts.merge(mtts_train[available_cols], on='part_id', how='left')
     
-    # Fill missing with training medians
-    for col in ['mtts_runs', 'hazard_rate', 'reliability_score', 'failure_count']:
-        median_val = mtts_train[col].median() if col in mtts_train.columns else 0
-        df_calib_mtts[col] = df_calib_mtts[col].fillna(median_val)
-        df_test_mtts[col] = df_test_mtts[col].fillna(median_val)
+    # Fill missing with training medians (handle both old and new column names)
+    fill_cols = ['mtts_parts', 'mtts_runs', 'lambda_parts', 'lambda_runs', 'hazard_rate', 'reliability_score', 'failure_count']
+    for col in fill_cols:
+        if col in mtts_train.columns:
+            median_val = mtts_train[col].median()
+            if col in df_calib_mtts.columns:
+                df_calib_mtts[col] = df_calib_mtts[col].fillna(median_val)
+            if col in df_test_mtts.columns:
+                df_test_mtts[col] = df_test_mtts[col].fillna(median_val)
     
-    # Add RUL proxy
-    df_calib_mtts['rul_proxy'] = (df_calib_mtts['mtts_runs'] - df_calib_mtts['runs_since_last_failure']).clip(lower=0)
-    df_test_mtts['rul_proxy'] = (df_test_mtts['mtts_runs'] - df_test_mtts['runs_since_last_failure']).clip(lower=0)
+    # Add RUL proxy (using mtts_parts if available, otherwise mtts_runs)
+    mtts_col = 'mtts_parts' if 'mtts_parts' in df_calib_mtts.columns else 'mtts_runs'
+    df_calib_mtts['rul_proxy'] = (df_calib_mtts[mtts_col] - df_calib_mtts['runs_since_last_failure']).clip(lower=0)
+    df_test_mtts['rul_proxy'] = (df_test_mtts[mtts_col] - df_test_mtts['runs_since_last_failure']).clip(lower=0)
     
     return df_train_mtts, df_calib_mtts, df_test_mtts
 
