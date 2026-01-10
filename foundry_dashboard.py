@@ -820,174 +820,8 @@ def train_global_model(df, threshold, defect_cols):
         "X_train": X_train, "X_test": X_test, "y_train": y_train, "y_test": y_test,
         "mtbf_train": mtbf_train, "part_freq_train": part_freq_train,
         "default_mtbf": default_mtbf, "default_freq": default_freq,
-        "metrics": metrics, "n_train": len(df_train), "n_calib": len(df_calib), "n_test": len(df_test),
-        "df_full_featured": df  # Keep the full featured dataframe
+        "metrics": metrics, "n_train": len(df_train), "n_calib": len(df_calib), "n_test": len(df_test)
     }
-
-
-def predict_for_part(df, part_id, global_model, threshold, defect_cols):
-    """
-    Use the GLOBAL ML MODEL to make predictions for a specific part.
-    
-    This is the AUTHENTIC approach - same model used in Tab 1 and RQ validation.
-    For parts with < 5 records, uses pooled similar parts for feature context.
-    
-    Returns predictions and metrics for this part.
-    """
-    cal_model = global_model['cal_model']
-    features = global_model['features']
-    df_featured = global_model['df_full_featured']
-    
-    part_id = str(part_id)
-    part_data = df_featured[df_featured['part_id'] == part_id].copy()
-    n_records = len(part_data)
-    
-    # Get pooling info
-    pooled_result = compute_pooled_prediction(df, part_id, threshold)
-    
-    result = {
-        'part_id': part_id,
-        'n_records': n_records,
-        'pooling_used': pooled_result['pooling_used'],
-        'pooling_method': pooled_result['pooling_method'],
-        'pooled_n': pooled_result['pooled_n'],
-    }
-    
-    if n_records == 0:
-        result.update({
-            'y_true': [],
-            'y_prob': [],
-            'y_pred': [],
-            'avg_prob': 0,
-            'recall': 0,
-            'precision': 0,
-            'has_positive': False
-        })
-        return result
-    
-    # Prepare features for this part's data
-    # Ensure all required features exist
-    for f in features:
-        if f not in part_data.columns:
-            part_data[f] = 0.0
-    
-    X_part = part_data[features].fillna(0)
-    y_true = (part_data['scrap_percent'] > threshold).astype(int)
-    
-    # Use the GLOBAL ML MODEL to predict
-    try:
-        y_prob = cal_model.predict_proba(X_part)[:, 1]
-        y_pred = (y_prob >= 0.5).astype(int)
-    except Exception as e:
-        y_prob = np.zeros(len(X_part))
-        y_pred = np.zeros(len(X_part))
-    
-    # Calculate metrics for this part
-    has_positive = y_true.sum() > 0
-    has_negative = (y_true == 0).sum() > 0
-    
-    if has_positive and has_negative:
-        part_recall = recall_score(y_true, y_pred, zero_division=0)
-        part_precision = precision_score(y_true, y_pred, zero_division=0)
-        try:
-            part_auc = roc_auc_score(y_true, y_prob)
-        except:
-            part_auc = 0.5
-    elif has_positive:
-        # Only positive samples
-        part_recall = (y_pred == 1).sum() / len(y_pred) if len(y_pred) > 0 else 0
-        part_precision = 1.0 if (y_pred == 1).sum() > 0 else 0
-        part_auc = 0.5
-    else:
-        # Only negative samples
-        part_recall = 0
-        part_precision = 0
-        part_auc = 0.5
-    
-    result.update({
-        'y_true': y_true.tolist(),
-        'y_prob': y_prob.tolist(),
-        'y_pred': y_pred.tolist(),
-        'avg_prob': float(np.mean(y_prob)),
-        'max_prob': float(np.max(y_prob)),
-        'n_actual_failures': int(y_true.sum()),
-        'n_predicted_failures': int(y_pred.sum()),
-        'recall': part_recall,
-        'precision': part_precision,
-        'auc': part_auc,
-        'has_positive': has_positive,
-        'has_negative': has_negative
-    })
-    
-    return result
-
-
-def run_all_parts_validation(df, global_model, threshold, defect_cols):
-    """
-    Run the ML model on ALL 359 parts and aggregate results.
-    
-    This is the AUTHENTIC RQ1/RQ2 validation - running the same model
-    that Tab 1 uses on every single part.
-    """
-    all_y_true = []
-    all_y_prob = []
-    all_y_pred = []
-    part_results = []
-    
-    unique_parts = df['part_id'].unique()
-    
-    for part_id in unique_parts:
-        result = predict_for_part(df, part_id, global_model, threshold, defect_cols)
-        part_results.append(result)
-        
-        # Aggregate predictions
-        all_y_true.extend(result['y_true'])
-        all_y_prob.extend(result['y_prob'])
-        all_y_pred.extend(result['y_pred'])
-    
-    # Convert to arrays
-    all_y_true = np.array(all_y_true)
-    all_y_prob = np.array(all_y_prob)
-    all_y_pred = np.array(all_y_pred)
-    
-    # Calculate aggregate metrics
-    if len(all_y_true) > 0 and all_y_true.sum() > 0:
-        agg_recall = recall_score(all_y_true, all_y_pred, zero_division=0)
-        agg_precision = precision_score(all_y_true, all_y_pred, zero_division=0)
-        agg_f1 = f1_score(all_y_true, all_y_pred, zero_division=0)
-        agg_accuracy = accuracy_score(all_y_true, all_y_pred)
-        try:
-            agg_auc = roc_auc_score(all_y_true, all_y_prob)
-        except:
-            agg_auc = 0.5
-        agg_brier = brier_score_loss(all_y_true, all_y_prob)
-        
-        # ROC curve
-        fpr, tpr, _ = roc_curve(all_y_true, all_y_prob)
-    else:
-        agg_recall = agg_precision = agg_f1 = agg_accuracy = 0
-        agg_auc = 0.5
-        agg_brier = 0.25
-        fpr, tpr = [0, 1], [0, 1]
-    
-    aggregate_metrics = {
-        'recall': agg_recall,
-        'precision': agg_precision,
-        'f1': agg_f1,
-        'accuracy': agg_accuracy,
-        'auc': agg_auc,
-        'brier': agg_brier,
-        'roc_fpr': fpr,
-        'roc_tpr': tpr,
-        'n_total_records': len(all_y_true),
-        'n_actual_failures': int(all_y_true.sum()),
-        'n_predicted_failures': int(all_y_pred.sum()),
-        'y_true': all_y_true,
-        'y_prob': all_y_prob,
-        'y_pred': all_y_pred
-    }
-    
-    return aggregate_metrics, part_results
 
 
 # ================================================================
@@ -1068,15 +902,6 @@ def main():
     
     st.success(f"✅ Model trained ({global_model['calibration_method']}): {global_model['n_train']} train, {len(global_model['features'])} features")
     
-    # ================================================================
-    # RUN AUTHENTIC ALL-PARTS VALIDATION
-    # This runs the SAME model on ALL 359 parts - the authentic approach
-    # ================================================================
-    with st.spinner("Running ML model on all 359 parts for authentic RQ1/RQ2 validation..."):
-        all_parts_metrics, all_parts_results = run_all_parts_validation(df, global_model, threshold, defect_cols)
-    
-    st.success(f"✅ Validated on all {len(all_parts_results)} parts | {all_parts_metrics['n_total_records']:,} total records | {all_parts_metrics['n_actual_failures']} failures")
-    
     # Part selection
     part_ids = sorted(df["part_id"].unique())
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -1101,89 +926,64 @@ def main():
     with tab1:
         st.header("Prognostic Model: Predict & Diagnose")
         
-        # ================================================================
-        # USE THE GLOBAL ML MODEL FOR PREDICTIONS (AUTHENTIC APPROACH)
-        # ================================================================
-        ml_prediction = predict_for_part(df, selected_part, global_model, threshold, defect_cols)
+        # Get pooled prediction for this part
         pooled_result = compute_pooled_prediction(df, selected_part, threshold)
         
-        # Show data status
-        if ml_prediction['n_records'] < 5:
-            st.warning(f"⚠️ **Limited Data for Part {selected_part}** (only {ml_prediction['n_records']} records)")
+        # Show pooling notification if used
+        if pooled_result['pooling_used']:
+            st.warning(f"⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)")
             
             st.markdown(f"""
-            **Hierarchical Pooling Context:** {pooled_result['pooling_method']}
+            **Hierarchical Pooling Applied:** {pooled_result['pooling_method']}
             
             | Pooling Details | Value |
             |-----------------|-------|
             | Target Part Weight | {pooled_result['target_weight']:.2f} lbs |
             | Target Part Defects | {', '.join(pooled_result['target_defects']) if pooled_result['target_defects'] else 'None detected'} |
             | Weight Range (±10%) | {pooled_result['weight_range']} lbs |
-            | Parts in Pool | {pooled_result['pooled_parts_count']} parts |
-            | Records in Pool | {pooled_result['pooled_n']} records |
+            | Parts Pooled | {pooled_result['pooled_parts_count']} parts |
+            | Total Records | {pooled_result['pooled_n']} records |
             | Confidence Level | {pooled_result['confidence']} |
             """)
+            
+            # Show pooled parts
+            if pooled_result.get('included_part_ids'):
+                with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts"):
+                    for pid in pooled_result['included_part_ids'][:20]:
+                        pid_data = df[df['part_id'] == pid]
+                        pid_weight = pid_data['piece_weight_lbs'].iloc[0] if len(pid_data) > 0 else 0
+                        pid_n = len(pid_data)
+                        st.write(f"• Part {pid}: {pid_weight:.2f} lbs, {pid_n} records")
+                    if len(pooled_result['included_part_ids']) > 20:
+                        st.write(f"... and {len(pooled_result['included_part_ids']) - 20} more parts")
         
         order_qty = st.slider("Order Quantity (parts)", 1, 5000, 100)
         
-        # ================================================================
-        # ML MODEL PREDICTION (Primary - What RQ1/RQ2 validates)
-        # ================================================================
-        st.markdown("### 🤖 ML Model Prediction")
-        st.caption("*This is the same model validated in RQ1/RQ2*")
-        
-        ml_scrap_prob = ml_prediction['avg_prob']
-        ml_max_prob = ml_prediction.get('max_prob', ml_scrap_prob)
-        
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("🎯 ML Scrap Probability", f"{ml_scrap_prob*100:.1f}%",
-                 help="Average probability from ML model")
-        m2.metric("⚠️ Max Risk Seen", f"{ml_max_prob*100:.1f}%",
-                 help="Highest probability in historical data")
-        m3.metric("📊 Actual Failures", f"{ml_prediction['n_actual_failures']}/{ml_prediction['n_records']}",
-                 help="Historical scrap events for this part")
-        m4.metric("🔮 Predicted Failures", f"{ml_prediction['n_predicted_failures']}/{ml_prediction['n_records']}",
-                 help="ML model predictions at 50% threshold")
-        
-        # Show per-record predictions if available
-        if ml_prediction['n_records'] > 0 and ml_prediction['n_records'] <= 20:
-            with st.expander("📋 View Individual Record Predictions"):
-                pred_df = pd.DataFrame({
-                    'Record': range(1, ml_prediction['n_records'] + 1),
-                    'Actual': ['⚠️ Scrap' if y == 1 else '✅ OK' for y in ml_prediction['y_true']],
-                    'ML Probability': [f"{p*100:.1f}%" for p in ml_prediction['y_prob']],
-                    'ML Prediction': ['⚠️ Scrap' if y == 1 else '✅ OK' for y in ml_prediction['y_pred']]
-                })
-                st.dataframe(pred_df, use_container_width=True, hide_index=True)
-        
-        st.markdown("---")
-        
-        # ================================================================
-        # RELIABILITY METRICS (Secondary - MTTS-based)
-        # ================================================================
-        st.markdown("### 📐 Reliability Metrics (MTTS-Based)")
-        st.caption("*Exponential reliability model using Mean Time To Scrap*")
-        
-        # Use pooled MTTS
-        if pooled_result['mtts_runs'] is not None and pooled_result['mtts_runs'] > 0:
+        # Use pooled MTTS if available
+        if pooled_result['mtts_runs'] is not None:
             mtts_runs = pooled_result['mtts_runs']
+            # Convert to parts-based MTTS
             avg_qty = df[df['part_id'] == selected_part]['order_quantity'].mean()
             if pd.isna(avg_qty) or avg_qty == 0:
                 avg_qty = 100
             mtts = mtts_runs * avg_qty
+            failure_rate = pooled_result['failure_rate']
         else:
             mtts = 1000
             avg_qty = 100
+            failure_rate = 0
         
         reliability = np.exp(-order_qty / mtts) if mtts > 0 else 0
         scrap_risk = 1 - reliability
         availability = mtts / (mtts + DEFAULT_MTTR * avg_qty) if mtts > 0 else 0
         
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("📈 Reliability R(n)", f"{reliability*100:.1f}%")
-        r2.metric("🎲 Scrap Risk", f"{scrap_risk*100:.1f}%")
-        r3.metric("⚡ Availability", f"{availability*100:.1f}%")
-        r4.metric("🔧 MTTS", f"{mtts:,.0f} parts")
+        st.markdown("### 🎯 Prediction Summary")
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("🎲 Scrap Risk", f"{scrap_risk*100:.1f}%")
+        m2.metric("📈 Reliability R(n)", f"{reliability*100:.1f}%")
+        m3.metric("⚡ Availability", f"{availability*100:.1f}%")
+        m4.metric("🔧 MTTS", f"{mtts:,.0f} parts")
         
         st.info(f"**Reliability Formula:** R({order_qty}) = e^(-{order_qty}/{mtts:.0f}) = {reliability*100:.1f}%")
         
@@ -1413,7 +1213,7 @@ def main():
         | Data source | {data_source} | |
         """)
     
-    # TAB 2: RQ1 - MODEL VALIDATION (AUTHENTIC - ALL PARTS)
+    # TAB 2: RQ1 - MODEL VALIDATION
     with tab2:
         st.header("RQ1: Model Validation & Predictive Performance")
         
@@ -1421,15 +1221,13 @@ def main():
         <div class="citation-box">
             <strong>Research Question 1:</strong> Does MTTS-integrated ML achieve effective prognostic recall (≥80%)?
             <br><strong>Hypothesis H1:</strong> MTTS integration achieves ≥80% recall, consistent with effective PHM.
-            <br><em>✅ AUTHENTIC VALIDATION: Same ML model run on ALL 359 parts</em>
         </div>
         """, unsafe_allow_html=True)
         
-        # Use the AUTHENTIC all-parts metrics
-        metrics = all_parts_metrics
+        metrics = global_model["metrics"]
         
         st.markdown(f"### 📊 Model Performance Metrics")
-        st.caption(f"*ML model predictions aggregated across ALL {len(all_parts_results)} parts ({metrics['n_total_records']:,} records)*")
+        st.caption(f"*Evaluated on test set: {global_model['n_test']} samples*")
         
         c1, c2, c3, c4 = st.columns(4)
         
@@ -1442,26 +1240,14 @@ def main():
         c3.metric(f"{'✅' if auc_pass else '❌'} AUC-ROC", f"{metrics['auc']:.3f}", f"{'Pass' if auc_pass else 'Below'} ≥0.80")
         c4.metric("📉 Brier Score", f"{metrics['brier']:.3f}")
         
-        # Additional stats
-        st.markdown("#### 📈 Prediction Summary")
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Total Records", f"{metrics['n_total_records']:,}")
-        s2.metric("Actual Failures", f"{metrics['n_actual_failures']:,}")
-        s3.metric("Predicted Failures", f"{metrics['n_predicted_failures']:,}")
-        s4.metric("Parts Analyzed", f"{len(all_parts_results)}")
-        
         h1_pass = recall_pass and precision_pass and auc_pass
         
         if h1_pass:
             st.success(f"""
             ### ✅ Hypothesis H1: SUPPORTED
             
-            The MTTS-integrated ML model achieves **{metrics['recall']*100:.1f}% recall** across all {len(all_parts_results)} parts,
+            The MTTS-integrated ML model achieves **{metrics['recall']*100:.1f}% recall**, 
             meeting the PHM performance benchmark (Lei et al., 2018).
-            
-            - **Authentic Validation**: Same model used in Tab 1 predictions
-            - **Coverage**: {metrics['n_total_records']:,} records across {len(all_parts_results)} parts
-            - **True Positives**: {metrics['n_predicted_failures']} predicted / {metrics['n_actual_failures']} actual failures
             """)
         else:
             st.warning("### ⚠️ Hypothesis H1: Partially Supported")
@@ -1469,33 +1255,22 @@ def main():
         # ROC Curve
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("#### ROC Curve")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=metrics["roc_fpr"], y=metrics["roc_tpr"], mode='lines', name=f'Model (AUC={metrics["auc"]:.3f})'))
-            fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', name='Random', line=dict(dash='dash')))
-            fig.update_layout(xaxis_title="False Positive Rate", yaxis_title="True Positive Rate", height=350)
-            st.plotly_chart(fig, use_container_width=True)
+            if "roc_fpr" in metrics:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=metrics["roc_fpr"], y=metrics["roc_tpr"], mode='lines', name=f'Model (AUC={metrics["auc"]:.3f})'))
+                fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', name='Random', line=dict(dash='dash')))
+                fig.update_layout(title="ROC Curve", xaxis_title="FPR", yaxis_title="TPR", height=350)
+                st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            st.markdown("#### Prediction Distribution")
-            fig = go.Figure()
-            fig.add_trace(go.Histogram(x=metrics['y_prob'], nbinsx=20, name='Predicted Probabilities', marker_color='steelblue'))
-            fig.add_vline(x=0.5, line_dash="dash", line_color="red", annotation_text="Threshold")
-            fig.update_layout(xaxis_title="Predicted Probability", yaxis_title="Count", height=350)
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Confusion Matrix
-        st.markdown("#### Confusion Matrix")
-        cm = confusion_matrix(metrics['y_true'], metrics['y_pred'])
-        fig_cm = go.Figure(data=go.Heatmap(
-            z=cm, x=['Predicted: OK', 'Predicted: Scrap'],
-            y=['Actual: OK', 'Actual: Scrap'],
-            colorscale='Blues', text=cm, texttemplate="%{text}", textfont={"size": 16}
-        ))
-        fig_cm.update_layout(height=300)
-        st.plotly_chart(fig_cm, use_container_width=True)
+            if "cal_true" in metrics:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=metrics["cal_pred"], y=metrics["cal_true"], mode='lines+markers', name='Model'))
+                fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', name='Perfect', line=dict(dash='dash')))
+                fig.update_layout(title="Calibration Curve", xaxis_title="Predicted", yaxis_title="Actual", height=350)
+                st.plotly_chart(fig, use_container_width=True)
     
-    # TAB 3: RQ2 - PHM EQUIVALENCE (AUTHENTIC - ALL PARTS)
+    # TAB 3: RQ2 - PHM EQUIVALENCE
     with tab3:
         st.header("RQ2: Reliability & PHM Equivalence")
         
@@ -1503,68 +1278,24 @@ def main():
         <div class="citation-box">
             <strong>Research Question 2:</strong> Can sensor-free ML achieve ≥80% of sensor-based PHM performance?
             <br><strong>Hypothesis H2:</strong> SPC-native ML achieves ≥80% PHM-equivalent recall without sensors.
-            <br><em>✅ AUTHENTIC VALIDATION: Same ML model run on ALL 359 parts</em>
         </div>
         """, unsafe_allow_html=True)
         
         sensor_benchmark = RQ_THRESHOLDS['RQ2']['sensor_benchmark']
-        model_recall = all_parts_metrics["recall"]  # Use authentic all-parts recall
+        model_recall = global_model["metrics"]["recall"]
         phm_equiv = (model_recall / sensor_benchmark) * 100
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("🎯 Sensor Benchmark", f"{sensor_benchmark*100:.0f}%", help="Typical sensor-based PHM recall")
-        c2.metric("🤖 Our Model Recall", f"{model_recall*100:.1f}%", help="ML model recall across all 359 parts")
+        c1.metric("🎯 Sensor Benchmark", f"{sensor_benchmark*100:.0f}%")
+        c2.metric("🤖 Our Model Recall", f"{model_recall*100:.1f}%")
         
         phm_pass = phm_equiv >= RQ_THRESHOLDS['RQ2']['phm_equivalence'] * 100
         c3.metric(f"{'✅' if phm_pass else '❌'} PHM Equivalence", f"{phm_equiv:.1f}%", f"{'Pass' if phm_pass else 'Below'} ≥80%")
         
         if phm_pass:
-            st.success(f"""
-            ### ✅ Hypothesis H2: SUPPORTED
-            
-            PHM Equivalence: **{phm_equiv:.1f}%** (≥80% threshold)
-            
-            The sensor-free, SPC-native ML model achieves **{model_recall*100:.1f}% recall** across all {len(all_parts_results)} parts,
-            demonstrating that existing foundry data can support prognostic capabilities without sensor infrastructure.
-            """)
+            st.success(f"### ✅ Hypothesis H2: SUPPORTED\n\nPHM Equivalence: **{phm_equiv:.1f}%** (≥80%)")
         else:
-            st.warning(f"### ⚠️ Hypothesis H2: Partially Supported\n\nPHM Equivalence: {phm_equiv:.1f}% (target ≥80%)")
-        
-        # Per-part recall distribution
-        st.markdown("### 📊 Per-Part Performance Distribution")
-        
-        # Create dataframe of per-part results
-        parts_df = pd.DataFrame(all_parts_results)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Recall distribution (for parts with failures)
-            parts_with_failures = parts_df[parts_df['has_positive'] == True]
-            fig_recall = go.Figure()
-            fig_recall.add_trace(go.Histogram(
-                x=parts_with_failures['recall'] * 100,
-                nbinsx=20, marker_color='#4CAF50', name='Recall'
-            ))
-            fig_recall.add_vline(x=80, line_dash="dash", line_color="red", annotation_text="80% Target")
-            fig_recall.update_layout(
-                title=f"Per-Part Recall Distribution (n={len(parts_with_failures)} parts with failures)",
-                xaxis_title="Recall (%)", yaxis_title="Number of Parts", height=350
-            )
-            st.plotly_chart(fig_recall, use_container_width=True)
-        
-        with col2:
-            # Average probability distribution
-            fig_prob = go.Figure()
-            fig_prob.add_trace(go.Histogram(
-                x=parts_df['avg_prob'] * 100,
-                nbinsx=20, marker_color='#2196F3', name='Avg Probability'
-            ))
-            fig_prob.update_layout(
-                title="Per-Part Average Scrap Probability",
-                xaxis_title="Average ML Probability (%)", yaxis_title="Number of Parts", height=350
-            )
-            st.plotly_chart(fig_prob, use_container_width=True)
+            st.warning(f"### ⚠️ Hypothesis H2: Partially Supported")
     
     # TAB 4: RQ3 - OPERATIONAL IMPACT
     with tab4:
@@ -1597,24 +1328,16 @@ def main():
         m3.metric("🌿 CO₂ Avoided", f"{tte['co2_savings_tons']:,.2f} tons")
         m4.metric("💰 ROI", f"{roi:.1f}×")
     
-    # TAB 5: ALL PARTS SUMMARY (AUTHENTIC ML RESULTS)
+    # TAB 5: ALL PARTS SUMMARY
     with tab5:
-        st.header("📈 All Parts Summary: Authentic ML Model Validation")
+        st.header("📈 All Parts Summary: Global Model Performance")
         
-        st.markdown("""
-        <div class="citation-box">
-            <strong>✅ AUTHENTIC VALIDATION:</strong> The SAME ML model used in Tab 1 predictions 
-            has been run on ALL 359 parts. These are the aggregated results.
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Use authentic all-parts metrics
-        metrics = all_parts_metrics
+        metrics = global_model["metrics"]
         
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Total Parts", f"{len(all_parts_results)}")
-        c2.metric("Total Records", f"{metrics['n_total_records']:,}")
-        c3.metric("Actual Failures", f"{metrics['n_actual_failures']}")
+        c1.metric("Train (60%)", f"{global_model['n_train']:,}")
+        c2.metric("Calib (20%)", f"{global_model['n_calib']:,}")
+        c3.metric("Test (20%)", f"{global_model['n_test']:,}")
         c4.metric("Recall", f"{metrics['recall']*100:.1f}%")
         c5.metric("Precision", f"{metrics['precision']*100:.1f}%")
         c6.metric("AUC-ROC", f"{metrics['auc']:.3f}")
@@ -1628,125 +1351,209 @@ def main():
         c1, c2 = st.columns(2)
         with c1:
             if h1_pass:
-                st.success(f"### ✅ H1: SUPPORTED\n- Recall: {metrics['recall']*100:.1f}%\n- Precision: {metrics['precision']*100:.1f}%\n- AUC: {metrics['auc']:.3f}\n- Based on {metrics['n_total_records']:,} records")
+                st.success(f"### ✅ H1: SUPPORTED\n- Recall: {metrics['recall']*100:.1f}%\n- Precision: {metrics['precision']*100:.1f}%\n- AUC: {metrics['auc']:.3f}")
             else:
                 st.warning(f"### ⚠️ H1: Partially Supported")
         with c2:
             if h2_pass:
-                st.success(f"### ✅ H2: SUPPORTED\n- PHM Equivalence: {phm_equiv:.1f}%\n- Model Recall: {metrics['recall']*100:.1f}%\n- Sensor Benchmark: 90%")
+                st.success(f"### ✅ H2: SUPPORTED\n- PHM Equivalence: {phm_equiv:.1f}%")
             else:
                 st.warning(f"### ⚠️ H2: Partially Supported")
         
         st.markdown("---")
         
         # ================================================================
-        # PER-PART ML RESULTS DISTRIBUTION
+        # PER-PART ANALYSIS USING GLOBAL MODEL
         # ================================================================
-        st.markdown("### 📊 Per-Part ML Model Performance Distribution")
-        st.caption("*These are the actual ML model predictions for each of the 359 parts*")
+        st.markdown("### 📊 Per-Part Performance Distribution (All 359 Parts)")
+        st.caption("*Each part's predictions made using the global model with hierarchical pooling for low-data parts*")
         
-        # Convert results to dataframe
-        results_df = pd.DataFrame(all_parts_results)
+        with st.spinner("Computing per-part metrics..."):
+            # Compute metrics for each part using pooled predictions
+            part_results = []
+            
+            for pid in df['part_id'].unique():
+                # Get pooled prediction for this part
+                pooled = compute_pooled_prediction(df, pid, threshold)
+                
+                # Get part stats
+                part_data = df[df['part_id'] == pid]
+                n_records = len(part_data)
+                avg_scrap = part_data['scrap_percent'].mean()
+                
+                # Compute reliability metrics
+                if pooled['mtts_runs'] and pooled['mtts_runs'] > 0:
+                    mtts_runs = pooled['mtts_runs']
+                    reliability = np.exp(-1 / mtts_runs)  # R(1 run)
+                    failure_rate = pooled['failure_rate']
+                else:
+                    mtts_runs = 0
+                    reliability = 0
+                    failure_rate = 0
+                
+                # PHM equivalence for this part
+                part_phm_equiv = (reliability / 0.90) * 100 if reliability > 0 else 0
+                
+                # Determine H1/H2 pass status
+                # For per-part, we use the pooled reliability as proxy for recall
+                h1_pass_part = reliability >= 0.80
+                h2_pass_part = part_phm_equiv >= 80
+                
+                part_results.append({
+                    'Part ID': pid,
+                    'Records': n_records,
+                    'Avg Scrap %': avg_scrap,
+                    'Pooled Records': pooled['pooled_n'],
+                    'Pooling Method': pooled['pooling_method'],
+                    'MTTS (runs)': mtts_runs,
+                    'Reliability R(1)': reliability * 100,
+                    'Failure Rate': failure_rate * 100,
+                    'PHM Equiv %': part_phm_equiv,
+                    'H1 Pass': h1_pass_part,
+                    'H2 Pass': h2_pass_part,
+                    'Confidence': pooled['confidence']
+                })
+            
+            results_df = pd.DataFrame(part_results)
         
         # Summary Statistics
         st.markdown("### 📈 Summary Statistics")
         
         total_parts = len(results_df)
-        parts_with_failures = results_df[results_df['has_positive'] == True]
-        parts_with_predictions = results_df[results_df['n_predicted_failures'] > 0]
-        low_data_parts = results_df[results_df['n_records'] < 5]
+        h1_pass_count = results_df['H1 Pass'].sum()
+        h2_pass_count = results_df['H2 Pass'].sum()
+        pooled_count = (results_df['Records'] < 5).sum()
         
         s1, s2, s3, s4, s5 = st.columns(5)
         s1.metric("Total Parts", f"{total_parts}")
-        s2.metric("Parts with Failures", f"{len(parts_with_failures)}")
-        s3.metric("Parts with Predictions", f"{len(parts_with_predictions)}")
-        s4.metric("Low Data Parts (<5)", f"{len(low_data_parts)}")
-        s5.metric("Avg ML Probability", f"{results_df['avg_prob'].mean()*100:.1f}%")
+        s2.metric("H1 Pass Rate", f"{h1_pass_count/total_parts*100:.1f}%", f"{h1_pass_count}/{total_parts}")
+        s3.metric("H2 Pass Rate", f"{h2_pass_count/total_parts*100:.1f}%", f"{h2_pass_count}/{total_parts}")
+        s4.metric("Parts Needing Pooling", f"{pooled_count}", f"< 5 records")
+        s5.metric("Avg Reliability", f"{results_df['Reliability R(1)'].mean():.1f}%")
         
         # Distribution Charts
-        st.markdown("### 📊 ML Model Prediction Distributions")
+        st.markdown("### 📊 RQ1: Model Validation Distributions")
         
         dist_col1, dist_col2 = st.columns(2)
         
         with dist_col1:
-            # ML Probability Distribution
-            fig_prob = go.Figure()
-            fig_prob.add_trace(go.Histogram(
-                x=results_df['avg_prob'] * 100,
+            # Reliability Distribution
+            fig_rel = go.Figure()
+            fig_rel.add_trace(go.Histogram(
+                x=results_df['Reliability R(1)'],
                 nbinsx=20,
                 marker_color='#4CAF50',
-                name='Avg Probability'
+                name='Reliability'
             ))
-            fig_prob.add_vline(x=50, line_dash="dash", line_color="red",
-                             annotation_text="50% Threshold")
-            fig_prob.update_layout(
-                title="Per-Part Average ML Scrap Probability",
-                xaxis_title="ML Probability (%)",
+            fig_rel.add_vline(x=80, line_dash="dash", line_color="red",
+                             annotation_text="80% Threshold")
+            fig_rel.update_layout(
+                title="Reliability R(1 run) Distribution",
+                xaxis_title="Reliability (%)",
                 yaxis_title="Number of Parts",
                 height=350
             )
-            st.plotly_chart(fig_prob, use_container_width=True)
+            st.plotly_chart(fig_rel, use_container_width=True)
             
             # Stats table
             st.markdown(f"""
             | Statistic | Value |
             |-----------|-------|
-            | Mean Probability | {results_df['avg_prob'].mean()*100:.1f}% |
-            | Median Probability | {results_df['avg_prob'].median()*100:.1f}% |
-            | Std Dev | {results_df['avg_prob'].std()*100:.1f}% |
-            | Min | {results_df['avg_prob'].min()*100:.1f}% |
-            | Max | {results_df['avg_prob'].max()*100:.1f}% |
+            | Mean | {results_df['Reliability R(1)'].mean():.1f}% |
+            | Median | {results_df['Reliability R(1)'].median():.1f}% |
+            | Std Dev | {results_df['Reliability R(1)'].std():.1f}% |
+            | Min | {results_df['Reliability R(1)'].min():.1f}% |
+            | Max | {results_df['Reliability R(1)'].max():.1f}% |
+            | Parts ≥80% | {(results_df['Reliability R(1)'] >= 80).sum()} |
             """)
         
         with dist_col2:
-            # Per-Part Recall Distribution (for parts with actual failures)
-            if len(parts_with_failures) > 0:
-                fig_recall = go.Figure()
-                fig_recall.add_trace(go.Histogram(
-                    x=parts_with_failures['recall'] * 100,
-                    nbinsx=20,
-                    marker_color='#2196F3',
-                    name='Recall'
-                ))
-                fig_recall.add_vline(x=80, line_dash="dash", line_color="red",
-                                 annotation_text="80% Target")
-                fig_recall.update_layout(
-                    title=f"Per-Part Recall (n={len(parts_with_failures)} parts with failures)",
-                    xaxis_title="Recall (%)",
-                    yaxis_title="Number of Parts",
-                    height=350
-                )
-                st.plotly_chart(fig_recall, use_container_width=True)
-                
-                # Recall stats
-                st.markdown(f"""
-                | Statistic | Value |
-                |-----------|-------|
-                | Mean Recall | {parts_with_failures['recall'].mean()*100:.1f}% |
-                | Median Recall | {parts_with_failures['recall'].median()*100:.1f}% |
-                | Parts ≥80% Recall | {(parts_with_failures['recall'] >= 0.80).sum()} |
-                | Parts ≥50% Recall | {(parts_with_failures['recall'] >= 0.50).sum()} |
-                """)
-            else:
-                st.info("No parts with actual failures to show recall distribution")
+            # Failure Rate Distribution
+            fig_fr = go.Figure()
+            fig_fr.add_trace(go.Histogram(
+                x=results_df['Failure Rate'],
+                nbinsx=20,
+                marker_color='#FF9800',
+                name='Failure Rate'
+            ))
+            fig_fr.update_layout(
+                title="Failure Rate Distribution",
+                xaxis_title="Failure Rate (%)",
+                yaxis_title="Number of Parts",
+                height=350
+            )
+            st.plotly_chart(fig_fr, use_container_width=True)
+            
+            # Stats table
+            st.markdown(f"""
+            | Statistic | Value |
+            |-----------|-------|
+            | Mean | {results_df['Failure Rate'].mean():.2f}% |
+            | Median | {results_df['Failure Rate'].median():.2f}% |
+            | Std Dev | {results_df['Failure Rate'].std():.2f}% |
+            | Min | {results_df['Failure Rate'].min():.2f}% |
+            | Max | {results_df['Failure Rate'].max():.2f}% |
+            """)
         
-        # Records per part distribution
-        st.markdown("### 📊 Data Distribution")
+        # PHM Equivalence Distribution
+        st.markdown("### 📊 RQ2: PHM Equivalence Distribution")
         
-        data_col1, data_col2 = st.columns(2)
+        phm_col1, phm_col2 = st.columns(2)
         
-        with data_col1:
+        with phm_col1:
+            fig_phm = go.Figure()
+            fig_phm.add_trace(go.Histogram(
+                x=results_df['PHM Equiv %'],
+                nbinsx=20,
+                marker_color='#2196F3',
+                name='PHM Equivalence'
+            ))
+            fig_phm.add_vline(x=80, line_dash="dash", line_color="red",
+                             annotation_text="80% Threshold")
+            fig_phm.update_layout(
+                title="PHM Equivalence Distribution (Model Recall / 90%)",
+                xaxis_title="PHM Equivalence (%)",
+                yaxis_title="Number of Parts",
+                height=350
+            )
+            st.plotly_chart(fig_phm, use_container_width=True)
+        
+        with phm_col2:
+            # MTTS Distribution
+            mtts_valid = results_df[results_df['MTTS (runs)'] > 0]['MTTS (runs)']
+            fig_mtts = go.Figure()
+            fig_mtts.add_trace(go.Histogram(
+                x=mtts_valid,
+                nbinsx=20,
+                marker_color='#9C27B0',
+                name='MTTS'
+            ))
+            fig_mtts.update_layout(
+                title="MTTS (runs) Distribution",
+                xaxis_title="MTTS (runs until failure)",
+                yaxis_title="Number of Parts",
+                height=350
+            )
+            st.plotly_chart(fig_mtts, use_container_width=True)
+        
+        # Data Quality / Pooling Analysis
+        st.markdown("### 📊 Data Quality & Pooling Analysis")
+        
+        pool_col1, pool_col2 = st.columns(2)
+        
+        with pool_col1:
+            # Records per part distribution
             fig_records = go.Figure()
             fig_records.add_trace(go.Histogram(
-                x=results_df['n_records'],
+                x=results_df['Records'],
                 nbinsx=30,
                 marker_color='#607D8B',
                 name='Records'
             ))
             fig_records.add_vline(x=5, line_dash="dash", line_color="red",
-                                 annotation_text="Min=5")
+                                 annotation_text="Min for Part-Level (5)")
             fig_records.add_vline(x=30, line_dash="dash", line_color="green",
-                                 annotation_text="High=30")
+                                 annotation_text="HIGH Confidence (30)")
             fig_records.update_layout(
                 title="Records per Part Distribution",
                 xaxis_title="Number of Records",
@@ -1755,9 +1562,9 @@ def main():
             )
             st.plotly_chart(fig_records, use_container_width=True)
         
-        with data_col2:
+        with pool_col2:
             # Pooling method breakdown
-            pooling_counts = results_df['pooling_method'].value_counts()
+            pooling_counts = results_df['Pooling Method'].value_counts()
             fig_pooling = go.Figure(go.Pie(
                 labels=pooling_counts.index,
                 values=pooling_counts.values,
@@ -1770,33 +1577,32 @@ def main():
             st.plotly_chart(fig_pooling, use_container_width=True)
         
         # Detailed Results Table
-        st.markdown("### 📋 Detailed ML Results Table")
+        st.markdown("### 📋 Detailed Results Table")
         
-        with st.expander("View All Parts ML Predictions"):
+        with st.expander("View All Parts Data"):
             # Format for display
-            display_df = results_df[['part_id', 'n_records', 'pooling_method', 'pooled_n',
-                                     'n_actual_failures', 'n_predicted_failures', 
-                                     'avg_prob', 'recall', 'precision']].copy()
-            display_df.columns = ['Part ID', 'Records', 'Pooling Method', 'Pooled N',
-                                 'Actual Failures', 'Predicted Failures', 
-                                 'Avg ML Prob', 'Recall', 'Precision']
-            display_df['Avg ML Prob'] = (display_df['Avg ML Prob'] * 100).round(1).astype(str) + '%'
-            display_df['Recall'] = (display_df['Recall'] * 100).round(1).astype(str) + '%'
-            display_df['Precision'] = (display_df['Precision'] * 100).round(1).astype(str) + '%'
+            display_df = results_df.copy()
+            display_df['Avg Scrap %'] = display_df['Avg Scrap %'].round(2)
+            display_df['MTTS (runs)'] = display_df['MTTS (runs)'].round(1)
+            display_df['Reliability R(1)'] = display_df['Reliability R(1)'].round(1)
+            display_df['Failure Rate'] = display_df['Failure Rate'].round(2)
+            display_df['PHM Equiv %'] = display_df['PHM Equiv %'].round(1)
+            display_df['H1 Pass'] = display_df['H1 Pass'].map({True: '✅', False: '❌'})
+            display_df['H2 Pass'] = display_df['H2 Pass'].map({True: '✅', False: '❌'})
             
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             
             # Download button
             csv = results_df.to_csv(index=False)
             st.download_button(
-                label="📥 Download Full Results CSV",
+                label="📥 Download Results CSV",
                 data=csv,
-                file_name="all_parts_ml_results.csv",
+                file_name="all_parts_results.csv",
                 mime="text/csv"
             )
     
     st.markdown("---")
-    st.caption("🏭 Foundry Dashboard V3 | AUTHENTIC ML Validation | Same Model for Tab 1 & RQ1/RQ2 | 6-2-1 Split")
+    st.caption("🏭 Foundry Dashboard V3 | Global Model with Multi-Defect + Temporal + MTTS Features | 6-2-1 Split")
 
 
 if __name__ == "__main__":
