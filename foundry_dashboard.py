@@ -7643,23 +7643,26 @@ with tab5:
         help="Recovery time (in production runs) after a scrap event"
     )
     
-    availability_target_input = st.sidebar.slider(
-        "Availability Target",
-        min_value=0.80,
-        max_value=0.99,
-        value=AVAILABILITY_TARGET,
-        step=0.01,
-        format="%.0f%%"
+    # Fixed slider format - use percentage values (80-99) instead of decimals (0.80-0.99)
+    availability_target_pct = st.sidebar.slider(
+        "Availability Target (%)",
+        min_value=80,
+        max_value=99,
+        value=int(AVAILABILITY_TARGET * 100),
+        step=1,
+        format="%d%%"
     )
+    availability_target_input = availability_target_pct / 100.0  # Convert back to decimal
     
-    reliability_target_input = st.sidebar.slider(
-        "Reliability Target (1 Run)",
-        min_value=0.80,
-        max_value=0.99,
-        value=RELIABILITY_TARGET,
-        step=0.01,
-        format="%.0f%%"
+    reliability_target_pct = st.sidebar.slider(
+        "Reliability Target (%)",
+        min_value=80,
+        max_value=99,
+        value=int(RELIABILITY_TARGET * 100),
+        step=1,
+        format="%d%%"
     )
+    reliability_target_input = reliability_target_pct / 100.0  # Convert back to decimal
     
     # Main content
     rel_tab1, rel_tab2, rel_tab3, rel_tab4, rel_tab5 = st.tabs([
