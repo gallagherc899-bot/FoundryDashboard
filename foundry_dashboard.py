@@ -456,13 +456,21 @@ def identify_part_defects(df: pd.DataFrame, part_id) -> list:
     """
     Identify which defect types are present for a given part.
     Returns list of defect column names where rate > 0
+    
+    Dynamically finds all _rate columns instead of using hardcoded list.
     """
     part_id = str(part_id)
     part_data = df[df['part_id'] == part_id]
     present_defects = []
     
-    for col in DEFECT_RATE_COLUMNS:
-        if col in df.columns and (part_data[col] > 0).any():
+    # Dynamically find all defect rate columns (excluding totals/aggregates)
+    defect_cols = [c for c in df.columns if c.endswith('_rate') 
+                   and 'total' not in c.lower() 
+                   and 'max' not in c.lower()
+                   and 'concentration' not in c.lower()]
+    
+    for col in defect_cols:
+        if (part_data[col] > 0).any():
             present_defects.append(col)
     
     return present_defects
@@ -515,15 +523,22 @@ def filter_by_exact_defects(df: pd.DataFrame, part_ids: list,
 def filter_by_any_defect(df: pd.DataFrame, part_ids: list) -> list:
     """
     Filter parts that have ANY defect type (1 or more).
+    Uses dynamic column detection instead of hardcoded list.
     """
     matching_parts = []
+    
+    # Dynamically find all defect rate columns
+    defect_cols = [c for c in df.columns if c.endswith('_rate') 
+                   and 'total' not in c.lower() 
+                   and 'max' not in c.lower()
+                   and 'concentration' not in c.lower()]
     
     for pid in part_ids:
         part_data = df[df['part_id'] == pid]
         has_any_defect = False
         
-        for defect_col in DEFECT_RATE_COLUMNS:
-            if defect_col in df.columns and (part_data[defect_col] > 0).any():
+        for defect_col in defect_cols:
+            if (part_data[defect_col] > 0).any():
                 has_any_defect = True
                 break
         
@@ -1175,6 +1190,8 @@ def main():
     # ================================================================
     if pooled_result['pooling_used']:
         confidence = pooled_result['confidence']
+        target_defects_str = ", ".join(pooled_result['target_defects']) if pooled_result['target_defects'] else "None detected"
+        
         st.warning(f"""
         ⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)
         
@@ -1182,7 +1199,9 @@ def main():
         
         | Pooling Details | Value |
         |-----------------|-------|
-        | Weight Range | {pooled_result['weight_range']} |
+        | Target Part Weight | {pooled_result['target_weight']:.2f} lbs |
+        | Target Part Defects | {target_defects_str} |
+        | Weight Range (±10%) | {pooled_result['weight_range']} |
         | Parts Pooled | {pooled_result['pooled_parts_count']} parts |
         | Total Records | {pooled_result['pooled_n']} records |
         | Confidence Level | **{confidence['level']}** ({confidence['percentage']}%) |
