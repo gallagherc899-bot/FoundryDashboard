@@ -86,6 +86,28 @@ PROCESS_DEFECT_MAP = {
     "Finishing": {"defects": ["over_grind_rate", "cut_into_rate"], "description": "Grinding, machining"}
 }
 
+# Hierarchical Pooling Configuration
+POOLING_CONFIG = {
+    'enabled': True,
+    'min_part_level_data': 5,
+    'weight_tolerance': 0.10,
+    'confidence_thresholds': {
+        'HIGH': 30,
+        'MODERATE': 15,
+        'LOW': 5,
+    }
+}
+
+# Defect rate columns for pooling
+DEFECT_RATE_COLUMNS = [
+    'bent_rate', 'outside_process_scrap_rate', 'failed_zyglo_rate',
+    'gouged_rate', 'shift_rate', 'missrun_rate', 'core_rate',
+    'cut_into_rate', 'dirty_pattern_rate', 'crush_rate', 'zyglo_rate',
+    'shrink_rate', 'short_pour_rate', 'runout_rate', 'shrink_porosity_rate',
+    'gas_porosity_rate', 'over_grind_rate', 'sand_rate', 'tear_up_rate',
+    'dross_rate'
+]
+
 # ================================================================
 # CUSTOM CSS
 # ================================================================
@@ -376,6 +398,259 @@ def add_mtts_features(df, threshold):
 
 
 # ================================================================
+# HIERARCHICAL POOLING SYSTEM (FROM ENHANCED VERSION)
+# ================================================================
+def identify_part_defects(df, part_id):
+    """Identify which defect types are present for a part."""
+    part_id = str(part_id)
+    part_data = df[df['part_id'] == part_id]
+    present_defects = []
+    
+    for col in DEFECT_RATE_COLUMNS:
+        if col in df.columns and (part_data[col] > 0).any():
+            present_defects.append(col)
+    
+    return present_defects
+
+
+def filter_by_weight(df, target_weight, tolerance=None):
+    """Filter parts by weight within ±10% tolerance."""
+    if tolerance is None:
+        tolerance = POOLING_CONFIG['weight_tolerance']
+    
+    weight_min = target_weight * (1 - tolerance)
+    weight_max = target_weight * (1 + tolerance)
+    
+    weight_col = 'piece_weight_lbs'
+    part_weights = df.groupby('part_id')[weight_col].first()
+    
+    matching_parts = part_weights[
+        (part_weights >= weight_min) & (part_weights <= weight_max)
+    ].index.tolist()
+    
+    weight_range = f"{weight_min:.1f} - {weight_max:.1f}"
+    
+    return matching_parts, weight_range
+
+
+def filter_by_exact_defects(df, part_ids, target_defects):
+    """Filter parts that have at least one of the SAME defect types."""
+    if not target_defects:
+        return part_ids
+    
+    matching_parts = []
+    
+    for pid in part_ids:
+        part_data = df[df['part_id'] == pid]
+        for defect_col in target_defects:
+            if defect_col in df.columns and (part_data[defect_col] > 0).any():
+                matching_parts.append(pid)
+                break
+    
+    return list(set(matching_parts))
+
+
+def filter_by_any_defect(df, part_ids):
+    """Filter parts that have ANY defect type."""
+    matching_parts = []
+    
+    for pid in part_ids:
+        part_data = df[df['part_id'] == pid]
+        has_any_defect = False
+        
+        for defect_col in DEFECT_RATE_COLUMNS:
+            if defect_col in df.columns and (part_data[defect_col] > 0).any():
+                has_any_defect = True
+                break
+        
+        if has_any_defect:
+            matching_parts.append(pid)
+    
+    return list(set(matching_parts))
+
+
+def get_confidence_tier(n):
+    """Get confidence tier based on sample size."""
+    thresholds = POOLING_CONFIG['confidence_thresholds']
+    if n >= thresholds['HIGH']:
+        return f"HIGH ({n} ≥ {thresholds['HIGH']})"
+    elif n >= thresholds['MODERATE']:
+        return f"MODERATE ({n} ≥ {thresholds['MODERATE']})"
+    elif n >= thresholds['LOW']:
+        return f"LOW ({n} ≥ {thresholds['LOW']})"
+    else:
+        return f"INSUFFICIENT ({n} < {thresholds['LOW']})"
+
+
+def compute_pooled_prediction(df, part_id, threshold_pct):
+    """
+    Compute reliability prediction using hierarchical pooling.
+    
+    Cascading strategy:
+    1. Check if part-level data is sufficient (n ≥ 5)
+    2. If not, try Weight ±10% + Exact Defect matching
+    3. If that doesn't work, try Weight ±10% + Any Defect
+    4. Return best available prediction with full transparency
+    """
+    thresholds = POOLING_CONFIG['confidence_thresholds']
+    min_part_data = POOLING_CONFIG['min_part_level_data']
+    weight_tolerance = POOLING_CONFIG['weight_tolerance']
+    
+    part_id = str(part_id)
+    part_data = df[df['part_id'] == part_id]
+    part_n = len(part_data)
+    
+    target_weight = part_data['piece_weight_lbs'].iloc[0] if len(part_data) > 0 else 0
+    target_defects = identify_part_defects(df, part_id)
+    target_defects_clean = [d.replace('_rate', '').replace('_', ' ').title() for d in target_defects]
+    
+    result = {
+        'part_id': part_id,
+        'part_level_n': part_n,
+        'part_level_sufficient': part_n >= min_part_data,
+        'target_weight': target_weight,
+        'target_defects': target_defects_clean,
+        'pooling_used': False,
+    }
+    
+    # CASE 1: Part-level data is sufficient
+    if part_n >= min_part_data:
+        confidence = get_confidence_tier(part_n)
+        failures = (part_data['scrap_percent'] > threshold_pct).sum()
+        failure_rate = failures / part_n if part_n > 0 else 0
+        
+        if failures > 0:
+            failure_cycles = []
+            runs_since_failure = 0
+            for _, row in part_data.sort_values('week_ending').iterrows():
+                runs_since_failure += 1
+                if row['scrap_percent'] > threshold_pct:
+                    failure_cycles.append(runs_since_failure)
+                    runs_since_failure = 0
+            mtts = np.mean(failure_cycles) if failure_cycles else part_n
+        else:
+            mtts = part_n * 10
+        
+        reliability = np.exp(-1 / mtts) if mtts > 0 else 0
+        
+        result.update({
+            'pooling_method': 'Part-Level (No Pooling Required)',
+            'pooling_used': False,
+            'weight_range': 'N/A',
+            'pooled_n': part_n,
+            'pooled_parts_count': 1,
+            'included_part_ids': [part_id],
+            'confidence': confidence,
+            'mtts_runs': mtts,
+            'reliability_next_run': reliability,
+            'failure_count': failures,
+            'failure_rate': failure_rate,
+        })
+        return result
+    
+    # CASE 2: Need pooling
+    result['pooling_used'] = True
+    
+    # Step 1: Weight filter
+    weight_matched_parts, weight_range = filter_by_weight(df, target_weight, weight_tolerance)
+    
+    # Step 2: Exact defect filter
+    exact_matched_parts = filter_by_exact_defects(df, weight_matched_parts, target_defects)
+    exact_pooled_df = df[df['part_id'].isin(exact_matched_parts)]
+    exact_pooled_n = len(exact_pooled_df)
+    
+    # Step 3: Any defect filter
+    any_matched_parts = filter_by_any_defect(df, weight_matched_parts)
+    any_pooled_df = df[df['part_id'].isin(any_matched_parts)]
+    any_pooled_n = len(any_pooled_df)
+    
+    # Step 4: Weight only
+    weight_only_df = df[df['part_id'].isin(weight_matched_parts)]
+    weight_only_n = len(weight_only_df)
+    
+    # Select best pooling method
+    if exact_pooled_n >= thresholds['HIGH']:
+        final_parts = exact_matched_parts
+        final_df = exact_pooled_df
+        pooling_method = 'Weight ±10% + Exact Defect Match'
+    elif any_pooled_n >= thresholds['HIGH']:
+        final_parts = any_matched_parts
+        final_df = any_pooled_df
+        pooling_method = 'Weight ±10% + Any Defect'
+    elif exact_pooled_n >= thresholds['MODERATE']:
+        final_parts = exact_matched_parts
+        final_df = exact_pooled_df
+        pooling_method = 'Weight ±10% + Exact Defect Match'
+    elif any_pooled_n >= thresholds['MODERATE']:
+        final_parts = any_matched_parts
+        final_df = any_pooled_df
+        pooling_method = 'Weight ±10% + Any Defect'
+    elif exact_pooled_n >= thresholds['LOW']:
+        final_parts = exact_matched_parts
+        final_df = exact_pooled_df
+        pooling_method = 'Weight ±10% + Exact Defect Match'
+    elif any_pooled_n >= thresholds['LOW']:
+        final_parts = any_matched_parts
+        final_df = any_pooled_df
+        pooling_method = 'Weight ±10% + Any Defect'
+    elif weight_only_n >= thresholds['LOW']:
+        final_parts = weight_matched_parts
+        final_df = weight_only_df
+        pooling_method = 'Weight ±10% Only'
+    else:
+        # Insufficient data even with pooling
+        result.update({
+            'pooling_method': 'Insufficient Data',
+            'weight_range': weight_range,
+            'pooled_n': 0,
+            'pooled_parts_count': 0,
+            'confidence': 'INSUFFICIENT',
+            'mtts_runs': None,
+            'reliability_next_run': None,
+            'failure_count': 0,
+            'failure_rate': 0,
+        })
+        return result
+    
+    # Compute metrics from pooled data
+    pooled_n = len(final_df)
+    confidence = get_confidence_tier(pooled_n)
+    failures = (final_df['scrap_percent'] > threshold_pct).sum()
+    failure_rate = failures / pooled_n if pooled_n > 0 else 0
+    
+    if failures > 0:
+        failure_cycles = []
+        for pid in final_parts:
+            pid_data = final_df[final_df['part_id'] == pid].sort_values('week_ending')
+            runs_since_failure = 0
+            for _, row in pid_data.iterrows():
+                runs_since_failure += 1
+                if row['scrap_percent'] > threshold_pct:
+                    failure_cycles.append(runs_since_failure)
+                    runs_since_failure = 0
+        mtts = np.mean(failure_cycles) if failure_cycles else pooled_n / max(failures, 1)
+    else:
+        mtts = pooled_n * 10
+    
+    reliability = np.exp(-1 / mtts) if mtts > 0 else 0
+    
+    result.update({
+        'pooling_method': pooling_method,
+        'weight_range': weight_range,
+        'pooled_n': pooled_n,
+        'pooled_parts_count': len(final_parts),
+        'included_part_ids': final_parts,
+        'confidence': confidence,
+        'mtts_runs': mtts,
+        'reliability_next_run': reliability,
+        'failure_count': failures,
+        'failure_rate': failure_rate,
+    })
+    
+    return result
+
+
+# ================================================================
 # 6-2-1 TEMPORAL SPLIT
 # ================================================================
 def time_split_621(df):
@@ -584,7 +859,10 @@ def diagnose_processes(df, part_id, defect_cols):
     else:
         process_contributions = {p: 0 for p in process_scores}
     
-    return sorted(process_contributions.items(), key=lambda x: x[1], reverse=True), sorted(defect_rates.items(), key=lambda x: x[1], reverse=True)[:5]
+    sorted_processes = sorted(process_contributions.items(), key=lambda x: x[1], reverse=True)
+    sorted_defects = sorted(defect_rates.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    return sorted_processes, sorted_defects
 
 
 def calculate_tte_savings(current_scrap, target_scrap, annual_production, energy_per_lb=DOE_BENCHMARKS['average']):
@@ -648,15 +926,58 @@ def main():
     with tab1:
         st.header("Prognostic Model: Predict & Diagnose")
         
+        # Get pooled prediction for this part
+        pooled_result = compute_pooled_prediction(df, selected_part, threshold)
+        
+        # Show pooling notification if used
+        if pooled_result['pooling_used']:
+            st.warning(f"⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)")
+            
+            st.markdown(f"""
+            **Hierarchical Pooling Applied:** {pooled_result['pooling_method']}
+            
+            | Pooling Details | Value |
+            |-----------------|-------|
+            | Target Part Weight | {pooled_result['target_weight']:.2f} lbs |
+            | Target Part Defects | {', '.join(pooled_result['target_defects']) if pooled_result['target_defects'] else 'None detected'} |
+            | Weight Range (±10%) | {pooled_result['weight_range']} lbs |
+            | Parts Pooled | {pooled_result['pooled_parts_count']} parts |
+            | Total Records | {pooled_result['pooled_n']} records |
+            | Confidence Level | {pooled_result['confidence']} |
+            """)
+            
+            # Show pooled parts
+            if pooled_result.get('included_part_ids'):
+                with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts"):
+                    for pid in pooled_result['included_part_ids'][:20]:
+                        pid_data = df[df['part_id'] == pid]
+                        pid_weight = pid_data['piece_weight_lbs'].iloc[0] if len(pid_data) > 0 else 0
+                        pid_n = len(pid_data)
+                        st.write(f"• Part {pid}: {pid_weight:.2f} lbs, {pid_n} records")
+                    if len(pooled_result['included_part_ids']) > 20:
+                        st.write(f"... and {len(pooled_result['included_part_ids']) - 20} more parts")
+        
         order_qty = st.slider("Order Quantity (parts)", 1, 5000, 100)
         
-        mtts_df = compute_mtts_metrics(df, threshold)
-        part_mtts = mtts_df[mtts_df['part_id'] == selected_part]
-        mtts = part_mtts['mtts_parts'].values[0] if len(part_mtts) > 0 else 1000
+        # Use pooled MTTS if available
+        if pooled_result['mtts_runs'] is not None:
+            mtts_runs = pooled_result['mtts_runs']
+            # Convert to parts-based MTTS
+            avg_qty = df[df['part_id'] == selected_part]['order_quantity'].mean()
+            if pd.isna(avg_qty) or avg_qty == 0:
+                avg_qty = 100
+            mtts = mtts_runs * avg_qty
+            failure_rate = pooled_result['failure_rate']
+        else:
+            mtts = 1000
+            avg_qty = 100
+            failure_rate = 0
         
-        reliability = np.exp(-order_qty / mtts)
+        reliability = np.exp(-order_qty / mtts) if mtts > 0 else 0
         scrap_risk = 1 - reliability
-        availability = mtts / (mtts + DEFAULT_MTTR) if mtts > 0 else 0
+        availability = mtts / (mtts + DEFAULT_MTTR * avg_qty) if mtts > 0 else 0
+        
+        st.markdown("### 🎯 Prediction Summary")
         
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("🎲 Scrap Risk", f"{scrap_risk*100:.1f}%")
@@ -664,13 +985,227 @@ def main():
         m3.metric("⚡ Availability", f"{availability*100:.1f}%")
         m4.metric("🔧 MTTS", f"{mtts:,.0f} parts")
         
-        process_ranking, _ = diagnose_processes(df, selected_part, defect_cols)
+        st.info(f"**Reliability Formula:** R({order_qty}) = e^(-{order_qty}/{mtts:.0f}) = {reliability*100:.1f}%")
+        
+        st.markdown("---")
+        
+        # ================================================================
+        # DETAILED DEFECT ANALYSIS
+        # ================================================================
+        st.markdown("### 📊 Detailed Defect Analysis")
+        
+        # Get data for analysis (use pooled parts if pooling was applied)
+        if pooled_result['pooling_used'] and pooled_result.get('included_part_ids'):
+            analysis_df = df[df['part_id'].isin(pooled_result['included_part_ids'])]
+        else:
+            analysis_df = df[df['part_id'] == selected_part]
+        
+        # Compute defect rates
+        defect_data = []
+        for col in defect_cols:
+            if col in analysis_df.columns:
+                hist_rate = analysis_df[col].mean() * 100
+                if hist_rate > 0:
+                    defect_name = col.replace('_rate', '').replace('_', ' ').title()
+                    defect_data.append({
+                        'Defect': defect_name,
+                        'Defect_Code': col,
+                        'Historical Rate (%)': hist_rate,
+                        'Predicted Rate (%)': hist_rate,  # Using historical as proxy
+                        'Expected Count': hist_rate / 100 * order_qty
+                    })
+        
+        if defect_data:
+            defect_df = pd.DataFrame(defect_data).sort_values('Historical Rate (%)', ascending=False)
+            
+            # Pareto Charts side by side
+            pareto_col1, pareto_col2 = st.columns(2)
+            
+            with pareto_col1:
+                st.markdown("#### 📊 Historical Defect Pareto")
+                hist_data = defect_df.head(10).copy()
+                
+                # Create Pareto chart
+                total = hist_data['Historical Rate (%)'].sum()
+                hist_data['Cumulative %'] = (hist_data['Historical Rate (%)'].cumsum() / total * 100) if total > 0 else 0
+                
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Bar(
+                    x=hist_data['Defect'],
+                    y=hist_data['Historical Rate (%)'],
+                    name='Rate (%)',
+                    marker_color='steelblue'
+                ))
+                fig_hist.add_trace(go.Scatter(
+                    x=hist_data['Defect'],
+                    y=hist_data['Cumulative %'],
+                    name='Cumulative %',
+                    marker_color='red',
+                    yaxis='y2',
+                    mode='lines+markers'
+                ))
+                fig_hist.update_layout(
+                    title="Top 10 Historical Defects",
+                    xaxis=dict(tickangle=-45),
+                    yaxis=dict(title='Rate (%)', side='left'),
+                    yaxis2=dict(title='Cumulative %', side='right', overlaying='y', range=[0, 105]),
+                    height=400,
+                    showlegend=True,
+                    legend=dict(x=0.7, y=1)
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+            
+            with pareto_col2:
+                st.markdown("#### 🔮 Predicted Defect Pareto")
+                pred_data = defect_df.head(10).copy()
+                
+                total_pred = pred_data['Predicted Rate (%)'].sum()
+                pred_data['Cumulative %'] = (pred_data['Predicted Rate (%)'].cumsum() / total_pred * 100) if total_pred > 0 else 0
+                
+                fig_pred = go.Figure()
+                fig_pred.add_trace(go.Bar(
+                    x=pred_data['Defect'],
+                    y=pred_data['Predicted Rate (%)'],
+                    name='Rate (%)',
+                    marker_color='#E53935'
+                ))
+                fig_pred.add_trace(go.Scatter(
+                    x=pred_data['Defect'],
+                    y=pred_data['Cumulative %'],
+                    name='Cumulative %',
+                    marker_color='orange',
+                    yaxis='y2',
+                    mode='lines+markers'
+                ))
+                fig_pred.update_layout(
+                    title="Top 10 Predicted Defects",
+                    xaxis=dict(tickangle=-45),
+                    yaxis=dict(title='Rate (%)', side='left'),
+                    yaxis2=dict(title='Cumulative %', side='right', overlaying='y', range=[0, 105]),
+                    height=400,
+                    showlegend=True,
+                    legend=dict(x=0.7, y=1)
+                )
+                st.plotly_chart(fig_pred, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # ================================================================
+        # ROOT CAUSE PROCESS DIAGNOSIS
+        # ================================================================
+        st.markdown("### 🏭 Root Cause Process Diagnosis")
+        st.caption("*Based on Campbell (2003) process-defect relationships*")
+        
+        process_ranking, top_defects = diagnose_processes(df, selected_part, defect_cols)
+        
         if process_ranking:
-            st.markdown("### 🔍 Predicted Root Cause Processes")
-            for process, contrib in process_ranking[:3]:
-                if contrib > 0:
-                    st.markdown(f"**{process}:** {contrib:.1f}%")
-                    st.progress(contrib / 100)
+            # Process contribution chart
+            process_data = [p for p in process_ranking if p[1] > 0]
+            
+            if process_data:
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    st.markdown("#### 🎯 Top Contributing Processes")
+                    for i, (process, contribution) in enumerate(process_data[:5]):
+                        icon = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "📍"
+                        color = '#FFEBEE' if i == 0 else '#FFF3E0' if i == 1 else '#E3F2FD' if i == 2 else '#F5F5F5'
+                        st.markdown(f"""
+                        <div style="background: {color}; padding: 10px; border-radius: 8px; margin: 5px 0;">
+                            {icon} <strong>{process}</strong>: {contribution:.1f}%
+                            <br><small>{PROCESS_DEFECT_MAP[process]['description']}</small>
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                with col2:
+                    fig_process = go.Figure(go.Bar(
+                        x=[p[0] for p in process_data],
+                        y=[p[1] for p in process_data],
+                        marker_color=['#D32F2F', '#F57C00', '#1976D2', '#388E3C', '#7B1FA2', 
+                                     '#00796B', '#5D4037', '#455A64', '#C2185B'][:len(process_data)]
+                    ))
+                    fig_process.update_layout(
+                        title="Process Contributions to Predicted Defects",
+                        xaxis_title="Process",
+                        yaxis_title="Contribution (%)",
+                        height=350,
+                        xaxis_tickangle=-45
+                    )
+                    st.plotly_chart(fig_process, use_container_width=True)
+                
+                # Detailed Process Table
+                st.markdown("#### 📋 Detailed Process Analysis")
+                
+                process_table = []
+                for process, contribution in process_data:
+                    risk_share = contribution / 100 * scrap_risk * 100
+                    defects = PROCESS_DEFECT_MAP[process]['defects']
+                    defect_names = [d.replace('_rate', '').replace('_', ' ').title() for d in defects]
+                    process_table.append({
+                        'Process': process,
+                        'Contribution (%)': f"{contribution:.1f}",
+                        f'Risk Share (of {scrap_risk*100:.1f}%)': f"{risk_share:.2f}",
+                        'Related Defects': ', '.join(defect_names),
+                        'Description': PROCESS_DEFECT_MAP[process]['description']
+                    })
+                
+                process_df = pd.DataFrame(process_table)
+                st.dataframe(process_df, use_container_width=True, hide_index=True)
+                
+                # Defect to Process Mapping
+                st.markdown("#### 🔗 Defect → Process Mapping")
+                st.caption(f"*How each defect contributes to the **{scrap_risk*100:.1f}% total scrap risk***")
+                
+                if defect_data:
+                    mapping_data = []
+                    total_defect_rate = sum(d['Historical Rate (%)'] for d in defect_data[:10])
+                    
+                    for d in defect_data[:10]:
+                        defect_code = d['Defect_Code']
+                        # Find which processes this defect maps to
+                        related_processes = []
+                        for proc, info in PROCESS_DEFECT_MAP.items():
+                            if defect_code in info['defects']:
+                                related_processes.append(proc)
+                        
+                        if total_defect_rate > 0:
+                            risk_share = (d['Historical Rate (%)'] / total_defect_rate) * scrap_risk * 100
+                        else:
+                            risk_share = 0
+                        
+                        mapping_data.append({
+                            'Defect': d['Defect'],
+                            'Historical Rate (%)': f"{d['Historical Rate (%)']:.2f}",
+                            'Risk Share (%)': f"{risk_share:.2f}",
+                            'Expected Count': f"{d['Expected Count']:.1f}",
+                            'Root Cause Process(es)': ', '.join(related_processes) if related_processes else 'Unknown'
+                        })
+                    
+                    mapping_df = pd.DataFrame(mapping_data)
+                    st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+        
+        # Reliability Metrics Snapshot
+        st.markdown("---")
+        st.markdown("### 📋 Reliability Metrics Snapshot")
+        
+        r1, r5, r10 = st.columns(3)
+        rel_1 = np.exp(-1 / pooled_result['mtts_runs']) if pooled_result['mtts_runs'] and pooled_result['mtts_runs'] > 0 else 0
+        rel_5 = np.exp(-5 / pooled_result['mtts_runs']) if pooled_result['mtts_runs'] and pooled_result['mtts_runs'] > 0 else 0
+        rel_10 = np.exp(-10 / pooled_result['mtts_runs']) if pooled_result['mtts_runs'] and pooled_result['mtts_runs'] > 0 else 0
+        
+        r1.metric("R(1 run)", f"{rel_1*100:.1f}%")
+        r5.metric("R(5 runs)", f"{rel_5*100:.1f}%")
+        r10.metric("R(10 runs)", f"{rel_10*100:.1f}%")
+        
+        st.markdown(f"""
+        | Metric | Value | Formula |
+        |--------|-------|---------|
+        | MTTS (parts) | {mtts:,.0f} | Total Parts / Failures |
+        | MTTS (runs) | {pooled_result['mtts_runs']:.1f if pooled_result['mtts_runs'] else 'N/A'} | Total Runs / Failures |
+        | λ (failure rate) | {1/mtts:.6f if mtts > 0 else 0} | 1 / MTTS |
+        | Failures observed | {pooled_result['failure_count']} | Scrap > threshold |
+        | Data source | {'Pooled (' + str(pooled_result['pooled_n']) + ' records)' if pooled_result['pooling_used'] else 'Part-level'} | |
+        """)
     
     # TAB 2: RQ1 - MODEL VALIDATION
     with tab2:
