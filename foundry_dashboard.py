@@ -273,7 +273,22 @@ def load_data(filepath):
             df["order_quantity"] = 100  # Default
     
     if "piece_weight_lbs" not in df.columns:
-        possible_weight_cols = [c for c in df.columns if 'weight' in c.lower() or 'lbs' in c.lower()]
+        # Look for piece weight specifically - NOT total scrap weight
+        # Priority: "piece_weight" > "piece weight" > generic "weight" (but not "total" or "scrap")
+        possible_weight_cols = []
+        for c in df.columns:
+            c_lower = c.lower()
+            # Skip columns with "total" or "scrap" in the name
+            if 'total' in c_lower or 'scrap' in c_lower:
+                continue
+            # Prioritize "piece" in the name
+            if 'piece' in c_lower and 'weight' in c_lower:
+                possible_weight_cols.insert(0, c)  # Add to front (highest priority)
+            elif 'weight' in c_lower and 'lbs' in c_lower:
+                possible_weight_cols.append(c)
+            elif c_lower in ['weight', 'lbs']:
+                possible_weight_cols.append(c)
+        
         if possible_weight_cols:
             df["piece_weight_lbs"] = pd.to_numeric(df[possible_weight_cols[0]], errors="coerce").fillna(1.0)
         else:
@@ -309,13 +324,23 @@ def load_data(filepath):
 
 def get_part_stats(df, part_id):
     """Get statistics for a specific part."""
-    part_data = df[df["part_id"] == part_id]
+    # Ensure part_id comparison works with both string and numeric types
+    part_id_str = str(part_id).strip()
+    part_data = df[df["part_id"].astype(str).str.strip() == part_id_str]
     
     if len(part_data) == 0:
         return None
     
+    # Use MODE (most common value) for piece_weight since it's a fixed part attribute
+    # If multiple modes, take the smallest (more likely to be correct)
+    weight_mode = part_data["piece_weight_lbs"].mode()
+    if len(weight_mode) > 0:
+        part_weight = weight_mode.min()  # Take smallest mode if multiple
+    else:
+        part_weight = part_data["piece_weight_lbs"].median()
+    
     stats = {
-        "part_id": part_id,
+        "part_id": part_id_str,
         "n_records": len(part_data),
         "avg_scrap": part_data["scrap_percent"].mean(),
         "std_scrap": part_data["scrap_percent"].std(),
@@ -323,7 +348,7 @@ def get_part_stats(df, part_id):
         "max_scrap": part_data["scrap_percent"].max(),
         "avg_order_qty": part_data["order_quantity"].mean(),
         "total_parts": part_data["order_quantity"].sum(),
-        "piece_weight": part_data["piece_weight_lbs"].iloc[0]
+        "piece_weight": part_weight
     }
     
     return stats
@@ -723,6 +748,12 @@ def main():
         <strong style="color: #1976D2;">Auto-Threshold: {auto_threshold:.2f}%</strong>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Debug: Show unique weight values for this part
+    part_data_debug = df[df["part_id"].astype(str).str.strip() == str(selected_part).strip()]
+    unique_weights = part_data_debug["piece_weight_lbs"].unique()
+    if len(unique_weights) > 1:
+        st.warning(f"⚠️ Multiple weights found for Part {selected_part}: {sorted(unique_weights)[:5]}... Using mean: {part_stats['piece_weight']:.2f} lbs")
     
     # ================================================================
     # COMPUTE ALL METRICS
