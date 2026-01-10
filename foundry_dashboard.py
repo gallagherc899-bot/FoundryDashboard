@@ -881,36 +881,68 @@ def time_split_621(df):
 
 def train_model(df, part_id, defect_cols, threshold, weight_tolerance=0.10):
     """
-    Train calibrated Random Forest model with pooling for low-data parts.
+    Train calibrated Random Forest model with hierarchical pooling for low-data parts.
+    
+    Uses the same pooling logic as compute_pooled_prediction():
+    1. If part has >= 5 records, use part data only
+    2. If < 5 records, use Weight ±10% + Exact Defect matching
+    3. If still insufficient, use Weight ±10% + Any Defect matching
+    4. If still insufficient, use Weight ±10% only
+    
+    This ensures the model is trained on RELEVANT similar parts, not all data.
     """
+    part_id = str(part_id)
+    min_records_for_training = 5
+    min_records_for_split = 10  # Need at least 10 for meaningful 6-2-1 split
+    
     # Get part-specific data
-    part_data = df[df["part_id"] == part_id]
+    part_data = df[df["part_id"] == part_id].copy()
     
-    if len(part_data) < 5:
-        # Pool similar parts by weight
+    # Determine if pooling is needed
+    if len(part_data) >= min_records_for_training:
+        # Sufficient data - use part data only
+        training_data = part_data
+        pooling_used = False
+    else:
+        # Need pooling - use hierarchical approach
+        pooling_used = True
+        
+        # Get target characteristics
         target_weight = part_data["piece_weight_lbs"].iloc[0] if len(part_data) > 0 else df["piece_weight_lbs"].median()
-        weight_min = target_weight * (1 - weight_tolerance)
-        weight_max = target_weight * (1 + weight_tolerance)
+        target_defects = identify_part_defects(df, part_id)
         
-        similar_parts = df[
-            (df["piece_weight_lbs"] >= weight_min) & 
-            (df["piece_weight_lbs"] <= weight_max)
-        ]
+        # Step 1: Weight filter (±10%)
+        weight_matched_parts, _ = filter_by_weight(df, target_weight, weight_tolerance)
         
-        if len(similar_parts) >= 30:
-            part_data = similar_parts
-    
-    if len(part_data) < 30:
-        # Use all data as fallback
-        part_data = df
+        # Step 2: Try Exact Defect matching first
+        exact_matched_parts = filter_by_exact_defects(df, weight_matched_parts, target_defects)
+        exact_pooled_df = df[df['part_id'].isin(exact_matched_parts)]
+        
+        # Step 3: Try Any Defect matching
+        any_matched_parts = filter_by_any_defect(df, weight_matched_parts)
+        any_pooled_df = df[df['part_id'].isin(any_matched_parts)]
+        
+        # Step 4: Weight only
+        weight_only_df = df[df['part_id'].isin(weight_matched_parts)]
+        
+        # Select best pooling level (prioritize more specific matching)
+        if len(exact_pooled_df) >= min_records_for_split:
+            training_data = exact_pooled_df
+        elif len(any_pooled_df) >= min_records_for_split:
+            training_data = any_pooled_df
+        elif len(weight_only_df) >= min_records_for_split:
+            training_data = weight_only_df
+        else:
+            # Last resort: use weight-matched even if small
+            training_data = weight_only_df if len(weight_only_df) > 0 else part_data
     
     # Prepare features
-    df_prep, feature_cols = prepare_features(part_data, defect_cols, threshold)
+    df_prep, feature_cols = prepare_features(training_data, defect_cols, threshold)
     
-    # Time split
+    # Time split 6-2-1
     df_train, df_calib, df_test = time_split_621(df_prep)
     
-    # Check for class diversity
+    # Check for class diversity in training set
     y_train = df_train["high_scrap"]
     y_calib = df_calib["high_scrap"]
     y_test = df_test["high_scrap"] if len(df_test) > 0 else pd.Series([0])
@@ -928,11 +960,11 @@ def train_model(df, part_id, defect_cols, threshold, weight_tolerance=0.10):
     X_calib = df_calib[feature_cols].fillna(0)
     X_test = df_test[feature_cols].fillna(0) if len(df_test) > 0 else X_calib
     
-    # Train Random Forest
+    # Train Random Forest - FRESH for each part
     rf = RandomForestClassifier(
         n_estimators=N_ESTIMATORS,
         max_depth=10,
-        min_samples_leaf=5,
+        min_samples_leaf=max(2, len(X_train) // 10),  # Adaptive min_samples_leaf
         class_weight="balanced",
         random_state=RANDOM_STATE,
         n_jobs=-1
@@ -956,46 +988,81 @@ def train_model(df, part_id, defect_cols, threshold, weight_tolerance=0.10):
             calibration_method = "none"
     
     # Compute metrics on test set
-    if len(df_test) > 5 and y_test.nunique() == 2:
-        y_pred_proba = model.predict_proba(X_test)[:, 1]
+    # Use calibration set if test set is too small
+    if len(df_test) < 3 or y_test.nunique() < 2:
+        eval_X = X_calib
+        eval_y = y_calib
+    else:
+        eval_X = X_test
+        eval_y = y_test
+    
+    if len(eval_X) >= 3 and eval_y.nunique() == 2:
+        y_pred_proba = model.predict_proba(eval_X)[:, 1]
         y_pred = (y_pred_proba > 0.5).astype(int)
         
         metrics = {
-            "recall": recall_score(y_test, y_pred, zero_division=0),
-            "precision": precision_score(y_test, y_pred, zero_division=0),
-            "f1": f1_score(y_test, y_pred, zero_division=0),
-            "auc": roc_auc_score(y_test, y_pred_proba) if y_test.nunique() == 2 else 0.5,
-            "brier": brier_score_loss(y_test, y_pred_proba),
-            "accuracy": accuracy_score(y_test, y_pred)
+            "recall": recall_score(eval_y, y_pred, zero_division=0),
+            "precision": precision_score(eval_y, y_pred, zero_division=0),
+            "f1": f1_score(eval_y, y_pred, zero_division=0),
+            "auc": roc_auc_score(eval_y, y_pred_proba) if eval_y.nunique() == 2 else 0.5,
+            "brier": brier_score_loss(eval_y, y_pred_proba),
+            "accuracy": accuracy_score(eval_y, y_pred)
         }
         
         # ROC curve data
-        fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+        fpr, tpr, _ = roc_curve(eval_y, y_pred_proba)
         metrics["roc_fpr"] = fpr
         metrics["roc_tpr"] = tpr
         
         # PR curve data
-        prec_curve, rec_curve, _ = precision_recall_curve(y_test, y_pred_proba)
+        prec_curve, rec_curve, _ = precision_recall_curve(eval_y, y_pred_proba)
         metrics["pr_precision"] = prec_curve
         metrics["pr_recall"] = rec_curve
         
         # Calibration data
         try:
-            prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=5)
+            prob_true, prob_pred = calibration_curve(eval_y, y_pred_proba, n_bins=5)
             metrics["cal_true"] = prob_true
             metrics["cal_pred"] = prob_pred
         except:
             metrics["cal_true"] = [0, 1]
             metrics["cal_pred"] = [0, 1]
     else:
-        metrics = {
-            "recall": 0.85,  # Placeholder
-            "precision": 0.75,
-            "f1": 0.80,
-            "auc": 0.85,
-            "brier": 0.15,
-            "accuracy": 0.82
-        }
+        # Cannot compute real metrics - use cross-validation on training data
+        try:
+            from sklearn.model_selection import cross_val_predict
+            y_cv_proba = cross_val_predict(rf, X_train, y_train, cv=min(3, len(X_train)), method='predict_proba')[:, 1]
+            y_cv_pred = (y_cv_proba > 0.5).astype(int)
+            
+            metrics = {
+                "recall": recall_score(y_train, y_cv_pred, zero_division=0),
+                "precision": precision_score(y_train, y_cv_pred, zero_division=0),
+                "f1": f1_score(y_train, y_cv_pred, zero_division=0),
+                "auc": roc_auc_score(y_train, y_cv_proba) if y_train.nunique() == 2 else 0.5,
+                "brier": brier_score_loss(y_train, y_cv_proba),
+                "accuracy": accuracy_score(y_train, y_cv_pred)
+            }
+        except:
+            # Fallback to training set metrics
+            y_train_proba = model.predict_proba(X_train)[:, 1]
+            y_train_pred = (y_train_proba > 0.5).astype(int)
+            
+            metrics = {
+                "recall": recall_score(y_train, y_train_pred, zero_division=0),
+                "precision": precision_score(y_train, y_train_pred, zero_division=0),
+                "f1": f1_score(y_train, y_train_pred, zero_division=0),
+                "auc": roc_auc_score(y_train, y_train_proba) if y_train.nunique() == 2 else 0.5,
+                "brier": brier_score_loss(y_train, y_train_proba),
+                "accuracy": accuracy_score(y_train, y_train_pred)
+            }
+        
+        # No ROC/PR curves for small datasets
+        metrics["roc_fpr"] = [0, 1]
+        metrics["roc_tpr"] = [0, 1]
+        metrics["pr_precision"] = [1, 0]
+        metrics["pr_recall"] = [0, 1]
+        metrics["cal_true"] = [0, 1]
+        metrics["cal_pred"] = [0, 1]
     
     return model, feature_cols, metrics, calibration_method, len(df_train)
 
