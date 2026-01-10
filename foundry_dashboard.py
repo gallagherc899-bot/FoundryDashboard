@@ -127,21 +127,22 @@ DOE_BENCHMARKS = {
 CO2_PER_MMBTU = 53.06  # kg CO2 per MMBtu natural gas
 
 # Campbell Process-Defect Mapping (Campbell, 2003)
+# Extended to cover all 20 defect types in the dataset
 PROCESS_DEFECT_MAP = {
     "Melting": {
-        "defects": ["dross_rate", "inclusions_rate", "chemistry_rate"],
+        "defects": ["dross_rate", "inclusions_rate", "chemistry_rate", "gas_porosity_rate"],
         "description": "Metal preparation, temperature control, degassing"
     },
     "Pouring": {
-        "defects": ["misrun_rate", "cold_shut_rate", "slag_rate"],
+        "defects": ["misrun_rate", "missrun_rate", "cold_shut_rate", "slag_rate", "short_pour_rate", "runout_rate"],
         "description": "Pour temperature, rate, turbulence control"
     },
     "Gating Design": {
-        "defects": ["shrink_rate", "shrink_porosity_rate", "hot_tear_rate"],
+        "defects": ["shrink_rate", "shrink_porosity_rate", "hot_tear_rate", "tear_up_rate"],
         "description": "Runner/riser sizing, feeding, solidification"
     },
     "Sand System": {
-        "defects": ["sand_rate", "gas_porosity_rate", "penetration_rate"],
+        "defects": ["sand_rate", "penetration_rate", "dirty_pattern_rate"],
         "description": "Sand preparation, moisture, binder ratio"
     },
     "Core Making": {
@@ -149,16 +150,20 @@ PROCESS_DEFECT_MAP = {
         "description": "Core integrity, venting, placement"
     },
     "Shakeout": {
-        "defects": ["broken_rate", "crack_rate"],
+        "defects": ["broken_rate", "crack_rate", "bent_rate"],
         "description": "Casting extraction, cooling rate"
     },
     "Pattern/Tooling": {
-        "defects": ["mismatch_rate", "swell_rate"],
+        "defects": ["mismatch_rate", "swell_rate", "gouged_rate"],
         "description": "Pattern accuracy, wear, alignment"
     },
     "Inspection": {
-        "defects": ["outside_process_scrap_rate"],
-        "description": "Quality control, measurement"
+        "defects": ["outside_process_scrap_rate", "zyglo_rate", "failed_zyglo_rate"],
+        "description": "Quality control, NDT testing, measurement"
+    },
+    "Finishing": {
+        "defects": ["over_grind_rate", "cut_into_rate"],
+        "description": "Grinding, machining, surface finishing"
     }
 }
 
