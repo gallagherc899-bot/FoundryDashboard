@@ -1197,15 +1197,6 @@ def main():
         confidence = pooled_result['confidence']
         target_defects_str = ", ".join(pooled_result['target_defects']) if pooled_result['target_defects'] else "None detected"
         
-        # Create citation with hyperlink
-        citation_links = {
-            'Kwak & Kim (2017)': '#pooling-references',
-            'Bujang et al. (2024)': '#pooling-references',
-            'van de Schoot et al. (2015)': '#pooling-references',
-            'General statistical principle': '#pooling-references'
-        }
-        citation_text = confidence['citation']
-        
         st.warning(f"""
         ⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)
         
@@ -1222,14 +1213,6 @@ def main():
         | Statistical Basis | {confidence['statistical_basis']} |
         """)
         
-        # Citation with link to references
-        st.markdown(f"""
-        <p style="font-style: italic; margin-top: -10px;">
-            Reference: <a href="#pooling-references" style="color: #1976D2;">{citation_text}</a> 
-            - <a href="#pooling-references" style="color: #1976D2;">See full citation below ↓</a>
-        </p>
-        """, unsafe_allow_html=True)
-        
         # Show included parts
         with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts"):
             for detail in pooled_result['included_parts_details'][:10]:  # Show first 10
@@ -1237,98 +1220,16 @@ def main():
                 st.markdown(f"- **Part {detail['part_id']}**: {detail['weight']:.1f} lbs, {detail['runs']} runs, Defects: {defects_str}")
             if len(pooled_result['included_parts_details']) > 10:
                 st.caption(f"...and {len(pooled_result['included_parts_details']) - 10} more parts")
-        
-        # Pooling References Section (collapsible)
-        with st.expander("📚 Pooling Methodology References", expanded=False):
-            st.markdown('<a name="pooling-references"></a>', unsafe_allow_html=True)
-            st.markdown("""
-            ### Statistical Basis for Hierarchical Pooling
-            
-            The confidence thresholds used in this dashboard are based on established statistical principles:
-            
-            ---
-            
-            #### HIGH Confidence (n ≥ 30): Central Limit Theorem
-            
-            **Kwak, S. G., & Kim, J. H. (2017).** Central limit theorem: The cornerstone of modern statistics. 
-            *Korean Journal of Anesthesiology, 70*(2), 144-156. https://doi.org/10.4097/kjae.2017.70.2.144
-            
-            > **Why n ≥ 30?** The Central Limit Theorem states that the sampling distribution of the mean 
-            > approaches a normal distribution as sample size increases, regardless of the population's 
-            > underlying distribution. At n ≥ 30, this approximation is generally considered reliable, 
-            > allowing the use of parametric statistical methods and confidence intervals.
-            
-            ---
-            
-            #### MODERATE Confidence (n ≥ 15): ICC Stability
-            
-            **Bujang, M. A., Omar, E. D., Hon, Y. K., & Foo, D. H. P. (2024).** Sample size determination 
-            for conducting a pilot study to assess reliability of a questionnaire. 
-            *Education in Medicine Journal, 16*(1), 53-62. https://doi.org/10.21315/eimj2024.16.1.5
-            
-            > **Why n ≥ 15?** Research on Intraclass Correlation Coefficients (ICC) demonstrates that 
-            > reliability estimates become reasonably stable at sample sizes of 15 or more. This threshold 
-            > provides adequate precision for pilot studies and preliminary analyses where full sample 
-            > sizes are not yet available.
-            
-            ---
-            
-            #### LOW Confidence (n ≥ 5): Bayesian Methods
-            
-            **van de Schoot, R., Kaplan, D., Denissen, J., Asendorpf, J. B., Neyer, F. J., & van Aken, M. A. G. (2015).** 
-            A gentle introduction to Bayesian analysis: Applications to developmental research. 
-            *Child Development, 85*(3), 842-860. https://doi.org/10.1111/cdev.12169
-            
-            > **Why n ≥ 5?** Bayesian statistical methods can provide valid inferences with very small 
-            > samples when informative priors are available. In manufacturing contexts, historical data 
-            > from similar parts provides these priors. With n ≥ 5 observations, Bayesian updating can 
-            > yield useful posterior estimates, though with wider credible intervals.
-            
-            ---
-            
-            #### Additional Pooling References
-            
-            **Gu, K., Jia, X., You, H., & Liang, T. (2014).** A t-chart for monitoring multi-variety and 
-            small batch production run. *Quality and Reliability Engineering International, 31*(4), 577-585.
-            
-            > Provides methodology for SPC in low-volume, high-variety manufacturing - the foundation 
-            > for pooling similar parts to increase statistical power.
-            
-            **Koons, G. F., & Luner, J. J. (1991).** SPC in low volume manufacturing: A case study. 
-            *Journal of Quality Technology, 23*(4), 287-295.
-            
-            > Demonstrates practical applications of statistical process control when individual part 
-            > volumes are too low for traditional control charts.
-            
-            **Jovanovic, B. D., & Levy, P. S. (1997).** A look at the rule of three. 
-            *The American Statistician, 51*(2), 137-139.
-            
-            > When zero failures are observed in n trials, the 95% upper confidence bound for the true 
-            > failure rate is approximately 3/n. This "Rule of Three" is used when pooled data shows 
-            > no scrap events.
-            """)
-            
-            st.info("""
-            **How Pooling Works in This Dashboard:**
-            
-            1. **Weight Matching (±10%)**: Parts with similar weights have similar thermal mass and 
-               solidification characteristics, making their defect patterns comparable.
-            
-            2. **Defect Matching**: Parts experiencing the same defect types likely share common 
-               process vulnerabilities, making their reliability data transferable.
-            
-            3. **Cascading Strategy**: The algorithm tries exact defect matching first, then relaxes 
-               to any-defect matching, prioritizing data quality over quantity.
-            """)
     
     # ================================================================
-    # 4 PANEL TABS
+    # 5 PANEL TABS
     # ================================================================
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔮 Prognostic Model",
         "📊 RQ1: Model Validation",
         "⚙️ RQ2: Reliability & PHM",
-        "💰 RQ3: Operational Impact"
+        "💰 RQ3: Operational Impact",
+        "📈 All Parts Summary"
     ])
     
     # ================================================================
@@ -2080,6 +1981,359 @@ def main():
             ENERGY STAR Industrial Energy Guide Series. https://www.energystar.gov/sites/default/files/tools/ENERGY%20STAR%20Metal%20Casting%20Energy%20Guide.pdf
         </div>
         """, unsafe_allow_html=True)
+    
+    # ================================================================
+    # PANEL 5: ALL PARTS SUMMARY
+    # ================================================================
+    with tab5:
+        st.header("📈 All Parts Summary: Model Performance Distribution")
+        
+        st.markdown("""
+        <div class="citation-box">
+            <strong>Purpose:</strong> Run all parts through the model and visualize the distribution of 
+            RQ1 and RQ2 validation metrics across the entire dataset.
+            <br><em>This provides aggregate evidence for hypothesis validation across all 359 parts.</em>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Minimum records filter
+        min_records = st.slider(
+            "Minimum records per part (for reliable metrics)",
+            min_value=5,
+            max_value=30,
+            value=10,
+            help="Parts with fewer records will use pooled data"
+        )
+        
+        # Run analysis button
+        if st.button("🚀 Run Analysis on All Parts", type="primary"):
+            
+            # Get all part IDs
+            all_parts = df["part_id"].unique()
+            n_parts = len(all_parts)
+            
+            # Initialize results storage
+            results = []
+            
+            # Progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for i, part_id in enumerate(all_parts):
+                # Update progress
+                progress_bar.progress((i + 1) / n_parts)
+                status_text.text(f"Processing Part {part_id} ({i+1}/{n_parts})...")
+                
+                try:
+                    # Get part stats
+                    p_stats = get_part_stats(df, part_id)
+                    if p_stats is None or p_stats['n_records'] < 3:
+                        continue
+                    
+                    # Auto threshold
+                    threshold = p_stats['avg_scrap']
+                    
+                    # Train model for this part
+                    model_p, feat_cols_p, metrics_p, cal_p, n_train_p = train_model(
+                        df, part_id, defect_cols, threshold
+                    )
+                    
+                    # Get PHM equivalence
+                    phm_equiv = (metrics_p['recall'] / RQ_THRESHOLDS['RQ2']['sensor_benchmark']) * 100
+                    
+                    # Store results
+                    results.append({
+                        'part_id': part_id,
+                        'n_records': p_stats['n_records'],
+                        'avg_scrap': p_stats['avg_scrap'],
+                        'recall': metrics_p['recall'] * 100,
+                        'precision': metrics_p['precision'] * 100,
+                        'auc_roc': metrics_p['auc'],
+                        'brier_score': metrics_p['brier'],
+                        'phm_equivalence': phm_equiv,
+                        'h1_pass': metrics_p['recall'] >= RQ_THRESHOLDS['RQ1']['recall'],
+                        'h2_pass': phm_equiv >= RQ_THRESHOLDS['RQ2']['phm_equivalence'] * 100
+                    })
+                    
+                except Exception as e:
+                    continue
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+            if len(results) == 0:
+                st.error("No parts could be analyzed. Check data quality.")
+            else:
+                # Convert to DataFrame
+                results_df = pd.DataFrame(results)
+                
+                # Store in session state for persistence
+                st.session_state['all_parts_results'] = results_df
+                st.success(f"✅ Analysis complete! Processed {len(results_df)} parts.")
+        
+        # Display results if available
+        if 'all_parts_results' in st.session_state:
+            results_df = st.session_state['all_parts_results']
+            
+            st.markdown("---")
+            
+            # ============================================
+            # SUMMARY STATISTICS
+            # ============================================
+            st.markdown("### 📊 Summary Statistics")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Parts Analyzed", f"{len(results_df)}")
+            with col2:
+                h1_pass_rate = (results_df['h1_pass'].sum() / len(results_df)) * 100
+                st.metric("H1 Pass Rate", f"{h1_pass_rate:.1f}%")
+            with col3:
+                h2_pass_rate = (results_df['h2_pass'].sum() / len(results_df)) * 100
+                st.metric("H2 Pass Rate", f"{h2_pass_rate:.1f}%")
+            with col4:
+                avg_recall = results_df['recall'].mean()
+                st.metric("Avg Recall", f"{avg_recall:.1f}%")
+            
+            # ============================================
+            # RQ1 DISTRIBUTIONS
+            # ============================================
+            st.markdown("### 📈 RQ1: Model Validation Distributions")
+            
+            rq1_col1, rq1_col2 = st.columns(2)
+            
+            with rq1_col1:
+                # Recall Distribution
+                fig_recall = go.Figure()
+                fig_recall.add_trace(go.Histogram(
+                    x=results_df['recall'],
+                    nbinsx=20,
+                    name='Recall',
+                    marker_color='#4CAF50'
+                ))
+                fig_recall.add_vline(x=80, line_dash="dash", line_color="red", 
+                                     annotation_text="Target ≥80%")
+                fig_recall.update_layout(
+                    title="Recall Distribution",
+                    xaxis_title="Recall (%)",
+                    yaxis_title="Number of Parts",
+                    height=300
+                )
+                st.plotly_chart(fig_recall, use_container_width=True)
+                
+                # Stats
+                st.markdown(f"""
+                | Statistic | Value |
+                |-----------|-------|
+                | Mean | {results_df['recall'].mean():.1f}% |
+                | Median | {results_df['recall'].median():.1f}% |
+                | Std Dev | {results_df['recall'].std():.1f}% |
+                | Min | {results_df['recall'].min():.1f}% |
+                | Max | {results_df['recall'].max():.1f}% |
+                | Pass Rate (≥80%) | {(results_df['recall'] >= 80).mean()*100:.1f}% |
+                """)
+            
+            with rq1_col2:
+                # Precision Distribution
+                fig_precision = go.Figure()
+                fig_precision.add_trace(go.Histogram(
+                    x=results_df['precision'],
+                    nbinsx=20,
+                    name='Precision',
+                    marker_color='#2196F3'
+                ))
+                fig_precision.add_vline(x=70, line_dash="dash", line_color="red",
+                                        annotation_text="Target ≥70%")
+                fig_precision.update_layout(
+                    title="Precision Distribution",
+                    xaxis_title="Precision (%)",
+                    yaxis_title="Number of Parts",
+                    height=300
+                )
+                st.plotly_chart(fig_precision, use_container_width=True)
+                
+                # Stats
+                st.markdown(f"""
+                | Statistic | Value |
+                |-----------|-------|
+                | Mean | {results_df['precision'].mean():.1f}% |
+                | Median | {results_df['precision'].median():.1f}% |
+                | Std Dev | {results_df['precision'].std():.1f}% |
+                | Min | {results_df['precision'].min():.1f}% |
+                | Max | {results_df['precision'].max():.1f}% |
+                | Pass Rate (≥70%) | {(results_df['precision'] >= 70).mean()*100:.1f}% |
+                """)
+            
+            rq1_col3, rq1_col4 = st.columns(2)
+            
+            with rq1_col3:
+                # AUC-ROC Distribution
+                fig_auc = go.Figure()
+                fig_auc.add_trace(go.Histogram(
+                    x=results_df['auc_roc'],
+                    nbinsx=20,
+                    name='AUC-ROC',
+                    marker_color='#FF9800'
+                ))
+                fig_auc.add_vline(x=0.80, line_dash="dash", line_color="red",
+                                  annotation_text="Target ≥0.80")
+                fig_auc.update_layout(
+                    title="AUC-ROC Distribution",
+                    xaxis_title="AUC-ROC",
+                    yaxis_title="Number of Parts",
+                    height=300
+                )
+                st.plotly_chart(fig_auc, use_container_width=True)
+                
+                # Stats
+                st.markdown(f"""
+                | Statistic | Value |
+                |-----------|-------|
+                | Mean | {results_df['auc_roc'].mean():.3f} |
+                | Median | {results_df['auc_roc'].median():.3f} |
+                | Std Dev | {results_df['auc_roc'].std():.3f} |
+                | Min | {results_df['auc_roc'].min():.3f} |
+                | Max | {results_df['auc_roc'].max():.3f} |
+                | Pass Rate (≥0.80) | {(results_df['auc_roc'] >= 0.80).mean()*100:.1f}% |
+                """)
+            
+            with rq1_col4:
+                # Brier Score Distribution
+                fig_brier = go.Figure()
+                fig_brier.add_trace(go.Histogram(
+                    x=results_df['brier_score'],
+                    nbinsx=20,
+                    name='Brier Score',
+                    marker_color='#9C27B0'
+                ))
+                fig_brier.update_layout(
+                    title="Brier Score Distribution (Lower is Better)",
+                    xaxis_title="Brier Score",
+                    yaxis_title="Number of Parts",
+                    height=300
+                )
+                st.plotly_chart(fig_brier, use_container_width=True)
+                
+                # Stats
+                st.markdown(f"""
+                | Statistic | Value |
+                |-----------|-------|
+                | Mean | {results_df['brier_score'].mean():.3f} |
+                | Median | {results_df['brier_score'].median():.3f} |
+                | Std Dev | {results_df['brier_score'].std():.3f} |
+                | Min | {results_df['brier_score'].min():.3f} |
+                | Max | {results_df['brier_score'].max():.3f} |
+                """)
+            
+            # ============================================
+            # RQ2 DISTRIBUTION
+            # ============================================
+            st.markdown("### 📈 RQ2: PHM Equivalence Distribution")
+            
+            fig_phm = go.Figure()
+            fig_phm.add_trace(go.Histogram(
+                x=results_df['phm_equivalence'],
+                nbinsx=20,
+                name='PHM Equivalence',
+                marker_color='#00BCD4'
+            ))
+            fig_phm.add_vline(x=80, line_dash="dash", line_color="red",
+                              annotation_text="Target ≥80%")
+            fig_phm.update_layout(
+                title="PHM Equivalence Distribution (Model Recall / Sensor Benchmark)",
+                xaxis_title="PHM Equivalence (%)",
+                yaxis_title="Number of Parts",
+                height=350
+            )
+            st.plotly_chart(fig_phm, use_container_width=True)
+            
+            phm_col1, phm_col2, phm_col3 = st.columns(3)
+            with phm_col1:
+                st.metric("Mean PHM Equivalence", f"{results_df['phm_equivalence'].mean():.1f}%")
+            with phm_col2:
+                st.metric("Median PHM Equivalence", f"{results_df['phm_equivalence'].median():.1f}%")
+            with phm_col3:
+                phm_pass = (results_df['phm_equivalence'] >= 80).mean() * 100
+                st.metric("Pass Rate (≥80%)", f"{phm_pass:.1f}%")
+            
+            # ============================================
+            # HYPOTHESIS VALIDATION SUMMARY
+            # ============================================
+            st.markdown("---")
+            st.markdown("### ✅ Aggregate Hypothesis Validation")
+            
+            h1_rate = (results_df['h1_pass'].sum() / len(results_df)) * 100
+            h2_rate = (results_df['h2_pass'].sum() / len(results_df)) * 100
+            
+            val_col1, val_col2 = st.columns(2)
+            
+            with val_col1:
+                if h1_rate >= 80:
+                    st.success(f"""
+                    ### ✅ Hypothesis H1: SUPPORTED
+                    
+                    **{h1_rate:.1f}%** of parts ({results_df['h1_pass'].sum()}/{len(results_df)}) 
+                    achieve ≥80% recall.
+                    
+                    - Mean Recall: {results_df['recall'].mean():.1f}%
+                    - Mean Precision: {results_df['precision'].mean():.1f}%
+                    - Mean AUC-ROC: {results_df['auc_roc'].mean():.3f}
+                    """)
+                else:
+                    st.warning(f"""
+                    ### ⚠️ Hypothesis H1: Partially Supported
+                    
+                    **{h1_rate:.1f}%** of parts achieve ≥80% recall.
+                    
+                    - Mean Recall: {results_df['recall'].mean():.1f}%
+                    - Target: ≥80% of parts passing
+                    """)
+            
+            with val_col2:
+                if h2_rate >= 80:
+                    st.success(f"""
+                    ### ✅ Hypothesis H2: SUPPORTED
+                    
+                    **{h2_rate:.1f}%** of parts ({results_df['h2_pass'].sum()}/{len(results_df)}) 
+                    achieve ≥80% PHM equivalence.
+                    
+                    - Mean PHM Equivalence: {results_df['phm_equivalence'].mean():.1f}%
+                    - Sensor Benchmark: 90% recall
+                    """)
+                else:
+                    st.warning(f"""
+                    ### ⚠️ Hypothesis H2: Partially Supported
+                    
+                    **{h2_rate:.1f}%** of parts achieve ≥80% PHM equivalence.
+                    
+                    - Mean PHM Equivalence: {results_df['phm_equivalence'].mean():.1f}%
+                    - Target: ≥80% of parts passing
+                    """)
+            
+            # ============================================
+            # DATA TABLE
+            # ============================================
+            st.markdown("---")
+            st.markdown("### 📋 Detailed Results Table")
+            
+            with st.expander("View All Parts Data"):
+                st.dataframe(
+                    results_df.sort_values('recall', ascending=False),
+                    use_container_width=True,
+                    height=400
+                )
+                
+                # Download button
+                csv = results_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Results as CSV",
+                    data=csv,
+                    file_name="all_parts_analysis.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.info("👆 Click 'Run Analysis on All Parts' to generate distribution charts.")
     
     # Footer
     st.markdown("---")
