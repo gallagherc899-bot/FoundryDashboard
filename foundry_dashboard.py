@@ -296,26 +296,34 @@ def load_data(filepath):
     
     if "scrap_percent" not in df.columns:
         # Look for scrap percentage specifically - NOT pieces scrapped or scrap weight
-        # Priority: columns with "%" or "percent" or "pct" > "scrap_rate" > generic "scrap"
-        possible_scrap_cols = []
-        for c in df.columns:
-            c_lower = c.lower()
-            # Skip columns with "pieces", "weight", "total" in the name
-            if 'pieces' in c_lower or 'weight' in c_lower or 'total' in c_lower:
-                continue
-            # Prioritize columns with %, percent, or pct
-            if 'scrap' in c_lower:
-                if '%' in c or 'percent' in c_lower or 'pct' in c_lower:
-                    possible_scrap_cols.insert(0, c)  # Highest priority
-                elif 'rate' in c_lower:
-                    possible_scrap_cols.insert(0, c)  # High priority
-                else:
-                    possible_scrap_cols.append(c)  # Lower priority
+        # Your CSV has column "Scrap%" which after .lower().replace(" ","_") becomes "scrap%"
         
-        if possible_scrap_cols:
-            df["scrap_percent"] = pd.to_numeric(df[possible_scrap_cols[0]], errors="coerce").fillna(0)
+        # First, check for exact matches that are clearly percentage columns
+        if "scrap%" in df.columns:
+            df["scrap_percent"] = pd.to_numeric(df["scrap%"], errors="coerce").fillna(0)
+        elif "scrap_%" in df.columns:
+            df["scrap_percent"] = pd.to_numeric(df["scrap_%"], errors="coerce").fillna(0)
         else:
-            df["scrap_percent"] = 0  # Default
+            # Fallback: search for columns
+            possible_scrap_cols = []
+            for c in df.columns:
+                c_lower = c.lower()
+                # Skip columns with "pieces", "weight", "total" in the name
+                if 'pieces' in c_lower or 'weight' in c_lower or 'total' in c_lower:
+                    continue
+                # Prioritize columns with %, percent, or pct
+                if 'scrap' in c_lower:
+                    if '%' in c or 'percent' in c_lower or 'pct' in c_lower:
+                        possible_scrap_cols.insert(0, c)  # Highest priority
+                    elif 'rate' in c_lower:
+                        possible_scrap_cols.insert(0, c)  # High priority
+                    elif c_lower == 'scrap':
+                        possible_scrap_cols.append(c)  # Lower priority
+            
+            if possible_scrap_cols:
+                df["scrap_percent"] = pd.to_numeric(df[possible_scrap_cols[0]], errors="coerce").fillna(0)
+            else:
+                df["scrap_percent"] = 0  # Default
     
     # Convert types safely
     df["part_id"] = df["part_id"].astype(str).str.strip()
@@ -1250,20 +1258,25 @@ def main():
         
         col1, col2 = st.columns(2)
         
+        # Ensure avg_scrap is at least 0.1 to avoid widget errors
+        safe_avg_scrap = max(0.1, float(part_stats["avg_scrap"]))
+        
         with col1:
             current_scrap = st.number_input(
                 "Current Scrap Rate (%)",
-                min_value=0.1,
+                min_value=0.0,
                 max_value=50.0,
-                value=float(part_stats["avg_scrap"]),
+                value=safe_avg_scrap,
                 step=0.1
             )
             
+            # Ensure target doesn't exceed current
+            safe_target = max(0.1, current_scrap * 0.5)
             target_scrap = st.number_input(
                 "Target Scrap Rate (%)",
-                min_value=0.1,
-                max_value=float(current_scrap),
-                value=float(current_scrap * 0.5),
+                min_value=0.0,
+                max_value=max(0.1, float(current_scrap)),
+                value=min(safe_target, current_scrap),
                 step=0.1
             )
         
