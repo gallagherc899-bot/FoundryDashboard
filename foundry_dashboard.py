@@ -1197,6 +1197,15 @@ def main():
         confidence = pooled_result['confidence']
         target_defects_str = ", ".join(pooled_result['target_defects']) if pooled_result['target_defects'] else "None detected"
         
+        # Create citation with hyperlink
+        citation_links = {
+            'Kwak & Kim (2017)': '#pooling-references',
+            'Bujang et al. (2024)': '#pooling-references',
+            'van de Schoot et al. (2015)': '#pooling-references',
+            'General statistical principle': '#pooling-references'
+        }
+        citation_text = confidence['citation']
+        
         st.warning(f"""
         ⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)
         
@@ -1211,9 +1220,15 @@ def main():
         | Total Records | {pooled_result['pooled_n']} records |
         | Confidence Level | **{confidence['level']}** ({confidence['percentage']}%) |
         | Statistical Basis | {confidence['statistical_basis']} |
-        
-        *Reference: {confidence['citation']}*
         """)
+        
+        # Citation with link to references
+        st.markdown(f"""
+        <p style="font-style: italic; margin-top: -10px;">
+            Reference: <a href="#pooling-references" style="color: #1976D2;">{citation_text}</a> 
+            - <a href="#pooling-references" style="color: #1976D2;">See full citation below ↓</a>
+        </p>
+        """, unsafe_allow_html=True)
         
         # Show included parts
         with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts"):
@@ -1222,6 +1237,89 @@ def main():
                 st.markdown(f"- **Part {detail['part_id']}**: {detail['weight']:.1f} lbs, {detail['runs']} runs, Defects: {defects_str}")
             if len(pooled_result['included_parts_details']) > 10:
                 st.caption(f"...and {len(pooled_result['included_parts_details']) - 10} more parts")
+        
+        # Pooling References Section (collapsible)
+        with st.expander("📚 Pooling Methodology References", expanded=False):
+            st.markdown('<a name="pooling-references"></a>', unsafe_allow_html=True)
+            st.markdown("""
+            ### Statistical Basis for Hierarchical Pooling
+            
+            The confidence thresholds used in this dashboard are based on established statistical principles:
+            
+            ---
+            
+            #### HIGH Confidence (n ≥ 30): Central Limit Theorem
+            
+            **Kwak, S. G., & Kim, J. H. (2017).** Central limit theorem: The cornerstone of modern statistics. 
+            *Korean Journal of Anesthesiology, 70*(2), 144-156. https://doi.org/10.4097/kjae.2017.70.2.144
+            
+            > **Why n ≥ 30?** The Central Limit Theorem states that the sampling distribution of the mean 
+            > approaches a normal distribution as sample size increases, regardless of the population's 
+            > underlying distribution. At n ≥ 30, this approximation is generally considered reliable, 
+            > allowing the use of parametric statistical methods and confidence intervals.
+            
+            ---
+            
+            #### MODERATE Confidence (n ≥ 15): ICC Stability
+            
+            **Bujang, M. A., Omar, E. D., Hon, Y. K., & Foo, D. H. P. (2024).** Sample size determination 
+            for conducting a pilot study to assess reliability of a questionnaire. 
+            *Education in Medicine Journal, 16*(1), 53-62. https://doi.org/10.21315/eimj2024.16.1.5
+            
+            > **Why n ≥ 15?** Research on Intraclass Correlation Coefficients (ICC) demonstrates that 
+            > reliability estimates become reasonably stable at sample sizes of 15 or more. This threshold 
+            > provides adequate precision for pilot studies and preliminary analyses where full sample 
+            > sizes are not yet available.
+            
+            ---
+            
+            #### LOW Confidence (n ≥ 5): Bayesian Methods
+            
+            **van de Schoot, R., Kaplan, D., Denissen, J., Asendorpf, J. B., Neyer, F. J., & van Aken, M. A. G. (2015).** 
+            A gentle introduction to Bayesian analysis: Applications to developmental research. 
+            *Child Development, 85*(3), 842-860. https://doi.org/10.1111/cdev.12169
+            
+            > **Why n ≥ 5?** Bayesian statistical methods can provide valid inferences with very small 
+            > samples when informative priors are available. In manufacturing contexts, historical data 
+            > from similar parts provides these priors. With n ≥ 5 observations, Bayesian updating can 
+            > yield useful posterior estimates, though with wider credible intervals.
+            
+            ---
+            
+            #### Additional Pooling References
+            
+            **Gu, K., Jia, X., You, H., & Liang, T. (2014).** A t-chart for monitoring multi-variety and 
+            small batch production run. *Quality and Reliability Engineering International, 31*(4), 577-585.
+            
+            > Provides methodology for SPC in low-volume, high-variety manufacturing - the foundation 
+            > for pooling similar parts to increase statistical power.
+            
+            **Koons, G. F., & Luner, J. J. (1991).** SPC in low volume manufacturing: A case study. 
+            *Journal of Quality Technology, 23*(4), 287-295.
+            
+            > Demonstrates practical applications of statistical process control when individual part 
+            > volumes are too low for traditional control charts.
+            
+            **Jovanovic, B. D., & Levy, P. S. (1997).** A look at the rule of three. 
+            *The American Statistician, 51*(2), 137-139.
+            
+            > When zero failures are observed in n trials, the 95% upper confidence bound for the true 
+            > failure rate is approximately 3/n. This "Rule of Three" is used when pooled data shows 
+            > no scrap events.
+            """)
+            
+            st.info("""
+            **How Pooling Works in This Dashboard:**
+            
+            1. **Weight Matching (±10%)**: Parts with similar weights have similar thermal mass and 
+               solidification characteristics, making their defect patterns comparable.
+            
+            2. **Defect Matching**: Parts experiencing the same defect types likely share common 
+               process vulnerabilities, making their reliability data transferable.
+            
+            3. **Cascading Strategy**: The algorithm tries exact defect matching first, then relaxes 
+               to any-defect matching, prioritizing data quality over quantity.
+            """)
     
     # ================================================================
     # 4 PANEL TABS
