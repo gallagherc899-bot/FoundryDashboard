@@ -295,7 +295,23 @@ def load_data(filepath):
             df["piece_weight_lbs"] = 1.0  # Default
     
     if "scrap_percent" not in df.columns:
-        possible_scrap_cols = [c for c in df.columns if 'scrap' in c.lower()]
+        # Look for scrap percentage specifically - NOT pieces scrapped or scrap weight
+        # Priority: columns with "%" or "percent" or "pct" > "scrap_rate" > generic "scrap"
+        possible_scrap_cols = []
+        for c in df.columns:
+            c_lower = c.lower()
+            # Skip columns with "pieces", "weight", "total" in the name
+            if 'pieces' in c_lower or 'weight' in c_lower or 'total' in c_lower:
+                continue
+            # Prioritize columns with %, percent, or pct
+            if 'scrap' in c_lower:
+                if '%' in c or 'percent' in c_lower or 'pct' in c_lower:
+                    possible_scrap_cols.insert(0, c)  # Highest priority
+                elif 'rate' in c_lower:
+                    possible_scrap_cols.insert(0, c)  # High priority
+                else:
+                    possible_scrap_cols.append(c)  # Lower priority
+        
         if possible_scrap_cols:
             df["scrap_percent"] = pd.to_numeric(df[possible_scrap_cols[0]], errors="coerce").fillna(0)
         else:
