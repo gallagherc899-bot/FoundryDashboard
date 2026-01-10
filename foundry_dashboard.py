@@ -1189,22 +1189,28 @@ def main():
         st.markdown("### 📋 Reliability Metrics Snapshot")
         
         r1, r5, r10 = st.columns(3)
-        rel_1 = np.exp(-1 / pooled_result['mtts_runs']) if pooled_result['mtts_runs'] and pooled_result['mtts_runs'] > 0 else 0
-        rel_5 = np.exp(-5 / pooled_result['mtts_runs']) if pooled_result['mtts_runs'] and pooled_result['mtts_runs'] > 0 else 0
-        rel_10 = np.exp(-10 / pooled_result['mtts_runs']) if pooled_result['mtts_runs'] and pooled_result['mtts_runs'] > 0 else 0
+        mtts_runs_val = pooled_result['mtts_runs'] if pooled_result['mtts_runs'] else 0
+        rel_1 = np.exp(-1 / mtts_runs_val) if mtts_runs_val > 0 else 0
+        rel_5 = np.exp(-5 / mtts_runs_val) if mtts_runs_val > 0 else 0
+        rel_10 = np.exp(-10 / mtts_runs_val) if mtts_runs_val > 0 else 0
         
         r1.metric("R(1 run)", f"{rel_1*100:.1f}%")
         r5.metric("R(5 runs)", f"{rel_5*100:.1f}%")
         r10.metric("R(10 runs)", f"{rel_10*100:.1f}%")
         
+        # Prepare values for table
+        mtts_runs_display = f"{pooled_result['mtts_runs']:.1f}" if pooled_result['mtts_runs'] else "N/A"
+        lambda_display = f"{1/mtts:.6f}" if mtts > 0 else "0"
+        data_source = f"Pooled ({pooled_result['pooled_n']} records)" if pooled_result['pooling_used'] else "Part-level"
+        
         st.markdown(f"""
         | Metric | Value | Formula |
         |--------|-------|---------|
         | MTTS (parts) | {mtts:,.0f} | Total Parts / Failures |
-        | MTTS (runs) | {pooled_result['mtts_runs']:.1f if pooled_result['mtts_runs'] else 'N/A'} | Total Runs / Failures |
-        | λ (failure rate) | {1/mtts:.6f if mtts > 0 else 0} | 1 / MTTS |
+        | MTTS (runs) | {mtts_runs_display} | Total Runs / Failures |
+        | λ (failure rate) | {lambda_display} | 1 / MTTS |
         | Failures observed | {pooled_result['failure_count']} | Scrap > threshold |
-        | Data source | {'Pooled (' + str(pooled_result['pooled_n']) + ' records)' if pooled_result['pooling_used'] else 'Part-level'} | |
+        | Data source | {data_source} | |
         """)
     
     # TAB 2: RQ1 - MODEL VALIDATION
