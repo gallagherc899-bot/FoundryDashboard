@@ -822,6 +822,36 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
+        # MTTS Formula and Explanation
+        st.markdown("### 📐 Mean Time to Scrap (MTTS) Framework")
+        
+        mtts_col1, mtts_col2 = st.columns([1, 1])
+        
+        with mtts_col1:
+            st.latex(r"MTTS = \frac{\text{Total Parts Produced}}{\text{Number of Scrap Events}}")
+            st.latex(r"R(n) = e^{-n/MTTS}")
+            st.latex(r"\lambda = \frac{1}{MTTS}")
+        
+        with mtts_col2:
+            st.markdown("""
+            **Where:**
+            - **MTTS** = Mean Time to Scrap (in parts)
+            - **R(n)** = Reliability for n parts
+            - **λ** = Hazard rate (scrap events per part)
+            - **n** = Order quantity (parts)
+            """)
+        
+        st.info("""
+        **How It Works:** The auto-threshold equals the average scrap rate for the selected part. 
+        When scrap % exceeds this threshold, it signals a "failure event." The model then identifies 
+        which processes are most likely causing scrap. By addressing these root causes, scrap decreases, 
+        lowering the average scrap rate—creating a **continuous improvement cycle**.
+        
+        **Threshold = Avg Scrap % → Identify Processes → Improve → Lower Scrap → New Threshold → Repeat**
+        """)
+        
+        st.markdown("---")
+        
         # Order quantity input
         order_qty = st.number_input(
             "📦 Order Quantity (parts)",
@@ -1255,23 +1285,102 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Input parameters
-        st.markdown("### 📊 Scenario Parameters")
+        # ================================================================
+        # LINKED PRODUCTION & SCRAP INPUTS
+        # ================================================================
+        # Calculate defaults from dataset (annualized: ÷ 32 months × 12)
+        DATASET_MONTHS = 32  # Dataset spans 32 months
+        
+        # Total weight from all data (annualized)
+        total_weight_all = (df["order_quantity"] * df["piece_weight_lbs"]).sum()
+        default_annual_production = int(total_weight_all / DATASET_MONTHS * 12)
+        
+        # Average scrap rate from dataset
+        default_scrap_rate = df["scrap_percent"].mean()
+        default_annual_scrap_lbs = int(default_annual_production * default_scrap_rate / 100)
+        
+        st.markdown("### 📊 Current Production & Scrap (Linked Fields)")
+        st.caption("These three fields are linked. Updating one will recalculate the others.")
+        
+        # Initialize session state for linked fields
+        if 'annual_production' not in st.session_state:
+            st.session_state.annual_production = default_annual_production
+        if 'annual_scrap_lbs' not in st.session_state:
+            st.session_state.annual_scrap_lbs = default_annual_scrap_lbs
+        if 'current_scrap_rate' not in st.session_state:
+            st.session_state.current_scrap_rate = default_scrap_rate
+        
+        link_col1, link_col2, link_col3 = st.columns(3)
+        
+        with link_col1:
+            new_production = st.number_input(
+                "Annual Production (lbs)",
+                min_value=1000,
+                value=st.session_state.annual_production,
+                step=10000,
+                key="input_production",
+                help="Total pounds produced annually. Default is annualized from 32-month dataset."
+            )
+        
+        with link_col2:
+            new_scrap_lbs = st.number_input(
+                "Annual Scrap (lbs)",
+                min_value=0,
+                value=st.session_state.annual_scrap_lbs,
+                step=1000,
+                key="input_scrap_lbs",
+                help="Total pounds scrapped annually."
+            )
+        
+        with link_col3:
+            new_scrap_rate = st.number_input(
+                "Current Scrap Rate (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(st.session_state.current_scrap_rate),
+                step=0.1,
+                key="input_scrap_rate",
+                help="Scrap rate as percentage of production."
+            )
+        
+        # Determine which field changed and update others
+        # Priority: Rate > Scrap lbs > Production
+        production_changed = new_production != st.session_state.annual_production
+        scrap_lbs_changed = new_scrap_lbs != st.session_state.annual_scrap_lbs
+        rate_changed = abs(new_scrap_rate - st.session_state.current_scrap_rate) > 0.01
+        
+        if rate_changed:
+            # User changed rate → recalculate scrap lbs
+            st.session_state.current_scrap_rate = new_scrap_rate
+            st.session_state.annual_production = new_production
+            st.session_state.annual_scrap_lbs = int(new_production * new_scrap_rate / 100)
+        elif scrap_lbs_changed:
+            # User changed scrap lbs → recalculate rate
+            st.session_state.annual_scrap_lbs = new_scrap_lbs
+            st.session_state.annual_production = new_production
+            if new_production > 0:
+                st.session_state.current_scrap_rate = (new_scrap_lbs / new_production) * 100
+        elif production_changed:
+            # User changed production → recalculate scrap lbs (keep rate)
+            st.session_state.annual_production = new_production
+            st.session_state.annual_scrap_lbs = int(new_production * st.session_state.current_scrap_rate / 100)
+        
+        # Use the linked values
+        annual_production = st.session_state.annual_production
+        annual_scrap_lbs = st.session_state.annual_scrap_lbs
+        current_scrap = st.session_state.current_scrap_rate
+        
+        # Show the linked calculation
+        st.info(f"**Linked Calculation:** {annual_production:,} lbs × {current_scrap:.2f}% = **{annual_scrap_lbs:,} lbs scrap/year**")
+        
+        # ================================================================
+        # TARGET AND COST INPUTS
+        # ================================================================
+        st.markdown("### 🎯 Target & Cost Parameters")
         
         col1, col2 = st.columns(2)
         
-        # Ensure avg_scrap is at least 0.1 to avoid widget errors
-        safe_avg_scrap = max(0.1, float(part_stats["avg_scrap"]))
-        
         with col1:
-            current_scrap = st.number_input(
-                "Current Scrap Rate (%)",
-                min_value=0.0,
-                max_value=50.0,
-                value=safe_avg_scrap,
-                step=0.1
-            )
-            
             # Ensure target doesn't exceed current
             safe_target = max(0.1, current_scrap * 0.5)
             target_scrap = st.number_input(
@@ -1279,29 +1388,33 @@ def main():
                 min_value=0.0,
                 max_value=max(0.1, float(current_scrap)),
                 value=min(safe_target, current_scrap),
-                step=0.1
-            )
-        
-        with col2:
-            annual_production = st.number_input(
-                "Annual Production (lbs)",
-                min_value=1000,
-                value=int(part_stats["total_parts"] * part_stats["piece_weight"] * 12),
-                step=10000
+                step=0.1,
+                help="Your target scrap rate after implementing the PHM system."
             )
             
             material_cost = st.number_input(
                 "Material Cost ($/lb)",
                 min_value=0.10,
                 value=2.50,
-                step=0.10
+                step=0.10,
+                help="Cost per pound of aluminum (typically $2-4/lb)."
             )
-            
+        
+        with col2:
             implementation_cost = st.number_input(
                 "Implementation Cost ($)",
                 min_value=0.0,
                 value=2000.0,
-                step=500.0
+                step=500.0,
+                help="One-time cost to implement the PHM dashboard."
+            )
+            
+            energy_cost = st.number_input(
+                "Energy Cost ($/MMBtu)",
+                min_value=1.0,
+                value=10.0,
+                step=1.0,
+                help="Cost per MMBtu of natural gas (typically $8-15/MMBtu)."
             )
         
         # Calculate impacts
@@ -1310,8 +1423,7 @@ def main():
         )
         
         material_savings = tte_results["avoided_scrap_lbs"] * material_cost
-        energy_cost_per_mmbtu = 10.0
-        energy_savings = tte_results["tte_savings_mmbtu"] * energy_cost_per_mmbtu
+        energy_savings = tte_results["tte_savings_mmbtu"] * energy_cost
         total_savings = material_savings + energy_savings
         
         roi, payback_days = calculate_roi(total_savings, implementation_cost)
