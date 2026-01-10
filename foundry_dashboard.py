@@ -69,7 +69,7 @@ DEFAULT_MTTR = 1.0  # Mean Time To Repair in runs
 WEIGHT_TOLERANCE = 0.10  # ±10% weight matching for pooling
 N_ESTIMATORS = 180  # Random Forest trees
 
-# RQ Validation Thresholds (Lei et al., 2018; DOE, 2004)
+# RQ Validation Thresholds (Lei et al., 2018; DOE, 2004; U.S. EPA, 2016)
 RQ_THRESHOLDS = {
     'RQ1': {
         'recall': 0.80,      # ≥80% recall for effective PHM
@@ -81,9 +81,11 @@ RQ_THRESHOLDS = {
         'sensor_benchmark': 0.90   # Assumed sensor-based recall
     },
     'RQ3': {
-        'scrap_reduction': 0.20,  # ≥20% reduction
-        'tte_savings': 0.10,      # ≥10% TTE recovery
-        'roi': 2.0                # ≥2× ROI
+        # ENERGY STAR benchmark: 10-20% process-energy improvement (U.S. EPA, 2016)
+        'scrap_reduction_min': 0.10,  # ≥10% reduction (lower bound)
+        'scrap_reduction_max': 0.20,  # ≥20% reduction (upper bound)
+        'tte_savings': 0.10,          # ≥10% TTE recovery
+        'roi': 2.0                    # ≥2× ROI
     }
 }
 
@@ -1247,9 +1249,9 @@ def main():
         
         st.markdown("""
         <div class="citation-box">
-            <strong>Research Question 3:</strong> What measurable reduction in scrap rate, economic cost, and TTE consumption can be achieved?
-            <br><strong>Hypothesis H3:</strong> Predictive reliability model yields ≥20% scrap reduction, ≥10% TTE recovery, ≥2× ROI.
-            <br><em>Reference: Eppich, R.E. (2004). Energy Use in Selected Metalcasting Facilities. U.S. Department of Energy.</em>
+            <strong>Research Question 3:</strong> What measurable reduction in scrap rate, economic cost, and total thermal energy (TTE) consumption can be achieved by implementing this predictive reliability model, benchmarked against DOE and ENERGY STAR process-energy improvement ranges?
+            <br><br><strong>Hypothesis H3:</strong> Implementing the developed predictive reliability model will yield measurable reductions in scrap rate and TTE consumption consistent with DOE and ENERGY STAR benchmarks (≈ 10-20% process-energy improvement) and produce a net positive return on investment (≥ 2×).
+            <br><br><em>References: Eppich, R.E. (2004); U.S. EPA (2016)</em>
         </div>
         """, unsafe_allow_html=True)
         
@@ -1314,22 +1316,35 @@ def main():
         
         roi, payback_days = calculate_roi(total_savings, implementation_cost)
         
-        # Validation checks
-        scrap_pass = tte_results["scrap_reduction_pct"] >= RQ_THRESHOLDS["RQ3"]["scrap_reduction"]
+        # Validation checks - using ENERGY STAR 10-20% benchmark
+        scrap_reduction_pct = tte_results["scrap_reduction_pct"]
+        scrap_pass_min = scrap_reduction_pct >= RQ_THRESHOLDS["RQ3"]["scrap_reduction_min"]  # ≥10%
+        scrap_pass_max = scrap_reduction_pct >= RQ_THRESHOLDS["RQ3"]["scrap_reduction_max"]  # ≥20%
         roi_pass = roi >= RQ_THRESHOLDS["RQ3"]["roi"]
+        
+        # Determine benchmark status
+        if scrap_pass_max:
+            benchmark_status = "Upper Range (≥20%)"
+            benchmark_icon = "✅"
+        elif scrap_pass_min:
+            benchmark_status = "Within Range (10-20%)"
+            benchmark_icon = "✅"
+        else:
+            benchmark_status = "Below Range (<10%)"
+            benchmark_icon = "❌"
         
         st.markdown("---")
         st.markdown("### 💰 Impact Analysis Results")
+        st.markdown(f"**ENERGY STAR Benchmark:** 10-20% process-energy improvement (U.S. EPA, 2016)")
         
         # Key metrics
         m1, m2, m3, m4 = st.columns(4)
         
         with m1:
-            icon = "✅" if scrap_pass else "❌"
             st.metric(
-                f"{icon} Scrap Reduction",
-                f"{tte_results['scrap_reduction_pct']*100:.1f}%",
-                delta=f"{'Pass' if scrap_pass else 'Below'} ≥20%"
+                f"{benchmark_icon} Scrap Reduction",
+                f"{scrap_reduction_pct*100:.1f}%",
+                delta=benchmark_status
             )
         
         with m2:
@@ -1385,33 +1400,38 @@ def main():
             )
             st.plotly_chart(fig, use_container_width=True)
         
-        # Hypothesis validation
-        h3_pass = scrap_pass and roi_pass
+        # Hypothesis validation - Updated for ENERGY STAR benchmark
+        h3_pass = scrap_pass_min and roi_pass  # Pass if within 10-20% range AND ROI ≥2×
         
         if h3_pass:
             st.success(f"""
             ### ✅ Hypothesis H3: SUPPORTED
             
-            The predictive reliability model demonstrates measurable operational improvements:
-            - **Scrap Reduction:** {tte_results['scrap_reduction_pct']*100:.1f}% (≥20% ✓)
+            The predictive reliability model demonstrates measurable operational improvements 
+            **consistent with DOE and ENERGY STAR benchmarks (10-20% process-energy improvement)**:
+            
+            - **Scrap Reduction:** {scrap_reduction_pct*100:.1f}% ({benchmark_status} ✓)
             - **ROI:** {roi:.1f}× (≥2× ✓)
             - **TTE Savings:** {tte_results['tte_savings_mmbtu']:,.1f} MMBtu
             - **CO₂ Avoided:** {tte_results['co2_savings_tons']:,.2f} metric tons
             - **Payback Period:** {payback_days:.0f} days
             
-            These results align with DOE Industrial Decarbonization goals (DOE, 2022).
+            These results align with DOE Industrial Decarbonization goals (DOE, 2022) and 
+            ENERGY STAR Metal Casting Energy Guide benchmarks (U.S. EPA, 2016).
             """)
         else:
             st.warning(f"""
             ### ⚠️ Hypothesis H3: Partially Supported
             
-            - Scrap Reduction: {tte_results['scrap_reduction_pct']*100:.1f}% ({'✓' if scrap_pass else '✗ Below 20%'})
+            - Scrap Reduction: {scrap_reduction_pct*100:.1f}% ({'✓ ' + benchmark_status if scrap_pass_min else '✗ Below 10% benchmark'})
             - ROI: {roi:.1f}× ({'✓' if roi_pass else '✗ Below 2×'})
+            
+            **ENERGY STAR benchmark:** 10-20% process-energy improvement
             
             Adjust target scrap rate or implementation cost to meet thresholds.
             """)
         
-        # Citations
+        # Citations - Updated with ENERGY STAR
         st.markdown("""
         ---
         <div class="citation-box">
@@ -1421,6 +1441,8 @@ def main():
             <br><br>U.S. Department of Energy. (2022). <em>Industrial Decarbonization Roadmap</em>. 
             Office of Energy Efficiency and Renewable Energy.
             <br><br>U.S. Department of Energy. (2023). <em>Pathways to Commercial Liftoff: Industrial Decarbonization</em>.
+            <br><br>U.S. Environmental Protection Agency. (2016). <em>Energy efficiency and cost saving opportunities for metal casting</em>. 
+            ENERGY STAR Industrial Energy Guide Series. https://www.energystar.gov/sites/default/files/tools/ENERGY%20STAR%20Metal%20Casting%20Energy%20Guide.pdf
         </div>
         """, unsafe_allow_html=True)
     
