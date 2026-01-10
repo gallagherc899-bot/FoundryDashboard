@@ -1990,20 +1990,17 @@ def main():
         
         st.markdown("""
         <div class="citation-box">
-            <strong>Purpose:</strong> Run all parts through the model and visualize the distribution of 
-            RQ1 and RQ2 validation metrics across the entire dataset.
-            <br><em>This provides aggregate evidence for hypothesis validation across all 359 parts.</em>
+            <strong>Purpose:</strong> Run all parts through the model exactly as they would run on the 
+            Prognostic Model page—including automatic pooling for parts with insufficient data.
+            <br><em>This provides a true representation of model performance across all parts.</em>
         </div>
         """, unsafe_allow_html=True)
         
-        # Minimum records filter
-        min_records = st.slider(
-            "Minimum records per part (for reliable metrics)",
-            min_value=5,
-            max_value=30,
-            value=10,
-            help="Parts with fewer records will use pooled data"
-        )
+        st.info("""
+        **How it works:** Each part is processed using its auto-threshold (average scrap %). 
+        Parts with < 5 records automatically use hierarchical pooling (Weight ±10% + Defect matching) 
+        to ensure reliable predictions—exactly as shown on the Prognostic Model tab.
+        """)
         
         # Run analysis button
         if st.button("🚀 Run Analysis on All Parts", type="primary"):
@@ -2014,6 +2011,7 @@ def main():
             
             # Initialize results storage
             results = []
+            pooled_count = 0
             
             # Progress bar
             progress_bar = st.progress(0)
@@ -2027,13 +2025,19 @@ def main():
                 try:
                     # Get part stats
                     p_stats = get_part_stats(df, part_id)
-                    if p_stats is None or p_stats['n_records'] < 3:
+                    if p_stats is None:
                         continue
                     
-                    # Auto threshold
+                    # Auto threshold (same as Tab 1)
                     threshold = p_stats['avg_scrap']
                     
-                    # Train model for this part
+                    # Check if pooling is needed (same logic as Tab 1)
+                    pooled_result = compute_pooled_prediction(df, part_id, threshold)
+                    used_pooling = pooled_result['pooling_used']
+                    if used_pooling:
+                        pooled_count += 1
+                    
+                    # Train model for this part (uses same logic as Tab 1)
                     model_p, feat_cols_p, metrics_p, cal_p, n_train_p = train_model(
                         df, part_id, defect_cols, threshold
                     )
@@ -2045,6 +2049,8 @@ def main():
                     results.append({
                         'part_id': part_id,
                         'n_records': p_stats['n_records'],
+                        'pooled': used_pooling,
+                        'pooled_n': pooled_result['pooled_n'] if used_pooling else p_stats['n_records'],
                         'avg_scrap': p_stats['avg_scrap'],
                         'recall': metrics_p['recall'] * 100,
                         'precision': metrics_p['precision'] * 100,
@@ -2069,11 +2075,13 @@ def main():
                 
                 # Store in session state for persistence
                 st.session_state['all_parts_results'] = results_df
-                st.success(f"✅ Analysis complete! Processed {len(results_df)} parts.")
+                st.session_state['pooled_count'] = pooled_count
+                st.success(f"✅ Analysis complete! Processed {len(results_df)} parts ({pooled_count} used pooling).")
         
         # Display results if available
         if 'all_parts_results' in st.session_state:
             results_df = st.session_state['all_parts_results']
+            pooled_count = st.session_state.get('pooled_count', 0)
             
             st.markdown("---")
             
@@ -2082,17 +2090,20 @@ def main():
             # ============================================
             st.markdown("### 📊 Summary Statistics")
             
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             
             with col1:
                 st.metric("Parts Analyzed", f"{len(results_df)}")
             with col2:
+                pooled_pct = (results_df['pooled'].sum() / len(results_df)) * 100 if 'pooled' in results_df.columns else 0
+                st.metric("Used Pooling", f"{results_df['pooled'].sum() if 'pooled' in results_df.columns else 0} ({pooled_pct:.0f}%)")
+            with col3:
                 h1_pass_rate = (results_df['h1_pass'].sum() / len(results_df)) * 100
                 st.metric("H1 Pass Rate", f"{h1_pass_rate:.1f}%")
-            with col3:
+            with col4:
                 h2_pass_rate = (results_df['h2_pass'].sum() / len(results_df)) * 100
                 st.metric("H2 Pass Rate", f"{h2_pass_rate:.1f}%")
-            with col4:
+            with col5:
                 avg_recall = results_df['recall'].mean()
                 st.metric("Avg Recall", f"{avg_recall:.1f}%")
             
