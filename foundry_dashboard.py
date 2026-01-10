@@ -69,6 +69,32 @@ DEFAULT_MTTR = 1.0  # Mean Time To Repair in runs
 WEIGHT_TOLERANCE = 0.10  # ±10% weight matching for pooling
 N_ESTIMATORS = 180  # Random Forest trees
 
+# ================================================================
+# HIERARCHICAL POOLING CONFIGURATION
+# For parts with insufficient data (n < 5), pool similar parts
+# Based on: Gu et al. (2014), Koons & Luner (1991), Lin et al. (1997)
+# ================================================================
+POOLING_CONFIG = {
+    'enabled': True,  # Master toggle for pooled predictions
+    'min_part_level_data': 5,  # Minimum rows for part-level prediction
+    'weight_tolerance': 0.10,  # ±10% weight matching
+    'confidence_thresholds': {
+        'HIGH': 30,      # Central Limit Theorem (Kwak & Kim, 2017)
+        'MODERATE': 15,  # ICC minimum (Bujang et al., 2024)
+        'LOW': 5,        # Bayesian minimum threshold
+    }
+}
+
+# Defect rate columns for pooling (actual defect types only)
+DEFECT_RATE_COLUMNS = [
+    'bent_rate', 'outside_process_scrap_rate', 'failed_zyglo_rate',
+    'gouged_rate', 'shift_rate', 'missrun_rate', 'core_rate',
+    'cut_into_rate', 'dirty_pattern_rate', 'crush_rate', 'zyglo_rate',
+    'shrink_rate', 'short_pour_rate', 'runout_rate', 'shrink_porosity_rate',
+    'gas_porosity_rate', 'over_grind_rate', 'sand_rate', 'tear_up_rate',
+    'dross_rate'
+]
+
 # RQ Validation Thresholds (Lei et al., 2018; DOE, 2004; U.S. EPA, 2016)
 RQ_THRESHOLDS = {
     'RQ1': {
@@ -378,6 +404,337 @@ def get_part_stats(df, part_id):
     }
     
     return stats
+
+
+# ================================================================
+# HIERARCHICAL POOLING FUNCTIONS
+# For parts with insufficient data (n < 5), pool similar parts
+# ================================================================
+def get_confidence_tier(n: int) -> dict:
+    """
+    Determine confidence tier based on sample size.
+    
+    Returns dict with level, percentage, statistical_basis, citation
+    """
+    thresholds = POOLING_CONFIG['confidence_thresholds']
+    
+    if n >= thresholds['HIGH']:
+        return {
+            'level': 'HIGH',
+            'threshold_met': 30,
+            'percentage': 95.0,
+            'statistical_basis': 'Central Limit Theorem - sampling distribution approximates normal',
+            'citation': 'Kwak & Kim (2017)'
+        }
+    elif n >= thresholds['MODERATE']:
+        return {
+            'level': 'MODERATE',
+            'threshold_met': 15,
+            'percentage': 80.0,
+            'statistical_basis': 'ICC minimum - adequate for reliability coefficient stability',
+            'citation': 'Bujang et al. (2024)'
+        }
+    elif n >= thresholds['LOW']:
+        return {
+            'level': 'LOW',
+            'threshold_met': 5,
+            'percentage': 60.0,
+            'statistical_basis': 'Bayesian methods applicable with informative priors',
+            'citation': 'van de Schoot et al. (2015)'
+        }
+    else:
+        return {
+            'level': 'INSUFFICIENT',
+            'threshold_met': 0,
+            'percentage': None,
+            'statistical_basis': 'Below minimum sample size for reliable inference',
+            'citation': 'General statistical principle'
+        }
+
+
+def identify_part_defects(df: pd.DataFrame, part_id) -> list:
+    """
+    Identify which defect types are present for a given part.
+    Returns list of defect column names where rate > 0
+    """
+    part_id = str(part_id)
+    part_data = df[df['part_id'] == part_id]
+    present_defects = []
+    
+    for col in DEFECT_RATE_COLUMNS:
+        if col in df.columns and (part_data[col] > 0).any():
+            present_defects.append(col)
+    
+    return present_defects
+
+
+def filter_by_weight(df: pd.DataFrame, target_weight: float, 
+                     tolerance: float = None) -> tuple:
+    """
+    Filter parts by weight within tolerance range.
+    Returns tuple of (matching part IDs list, weight range string)
+    """
+    if tolerance is None:
+        tolerance = POOLING_CONFIG['weight_tolerance']
+    
+    weight_min = target_weight * (1 - tolerance)
+    weight_max = target_weight * (1 + tolerance)
+    
+    weight_col = 'piece_weight_lbs'
+    part_weights = df.groupby('part_id')[weight_col].first()
+    
+    matching_parts = part_weights[
+        (part_weights >= weight_min) & (part_weights <= weight_max)
+    ].index.tolist()
+    
+    weight_range = f"{weight_min:.1f} - {weight_max:.1f} lbs"
+    
+    return matching_parts, weight_range
+
+
+def filter_by_exact_defects(df: pd.DataFrame, part_ids: list,
+                            target_defects: list) -> list:
+    """
+    Filter parts that have at least one of the SAME defect types.
+    """
+    if not target_defects:
+        return part_ids
+    
+    matching_parts = []
+    
+    for pid in part_ids:
+        part_data = df[df['part_id'] == pid]
+        for defect_col in target_defects:
+            if defect_col in df.columns and (part_data[defect_col] > 0).any():
+                matching_parts.append(pid)
+                break
+    
+    return list(set(matching_parts))
+
+
+def filter_by_any_defect(df: pd.DataFrame, part_ids: list) -> list:
+    """
+    Filter parts that have ANY defect type (1 or more).
+    """
+    matching_parts = []
+    
+    for pid in part_ids:
+        part_data = df[df['part_id'] == pid]
+        has_any_defect = False
+        
+        for defect_col in DEFECT_RATE_COLUMNS:
+            if defect_col in df.columns and (part_data[defect_col] > 0).any():
+                has_any_defect = True
+                break
+        
+        if has_any_defect:
+            matching_parts.append(pid)
+    
+    return list(set(matching_parts))
+
+
+def get_pooled_part_details(df: pd.DataFrame, part_ids: list) -> list:
+    """
+    Get detailed information for each pooled part.
+    """
+    details = []
+    weight_col = 'piece_weight_lbs'
+    
+    for pid in part_ids:
+        part_data = df[df['part_id'] == pid]
+        if len(part_data) > 0:
+            defects = identify_part_defects(df, pid)
+            defects_clean = [d.replace('_rate', '').replace('_', ' ').title() for d in defects]
+            details.append({
+                'part_id': pid,
+                'weight': part_data[weight_col].iloc[0],
+                'runs': len(part_data),
+                'defects': defects_clean
+            })
+    
+    return details
+
+
+def compute_pooled_prediction(df: pd.DataFrame, part_id, threshold_pct: float) -> dict:
+    """
+    Compute reliability prediction using hierarchical pooling.
+    
+    Implements a cascading pooling strategy:
+    1. Check if part-level data is sufficient (n >= 5)
+    2. If not, try Weight + Exact Defect matching
+    3. If that doesn't reach HIGH confidence, try Weight + Any Defect
+    4. Report the best available prediction with full transparency
+    
+    References: Gu et al. (2014), Koons & Luner (1991), Lin et al. (1997)
+    """
+    thresholds = POOLING_CONFIG['confidence_thresholds']
+    min_part_data = POOLING_CONFIG['min_part_level_data']
+    weight_tolerance = POOLING_CONFIG['weight_tolerance']
+    
+    weight_col = 'piece_weight_lbs'
+    part_id = str(part_id)
+    
+    # Get part-level data
+    part_data = df[df['part_id'] == part_id]
+    part_n = len(part_data)
+    
+    # Get target characteristics
+    target_weight = part_data[weight_col].iloc[0] if len(part_data) > 0 else 0
+    target_defects = identify_part_defects(df, part_id)
+    target_defects_clean = [d.replace('_rate', '').replace('_', ' ').title() for d in target_defects]
+    
+    result = {
+        'part_id': part_id,
+        'part_level_n': part_n,
+        'part_level_sufficient': part_n >= min_part_data,
+        'target_weight': target_weight,
+        'target_weight_unit': 'lbs',
+        'target_defects': target_defects_clean,
+        'weight_tolerance_pct': weight_tolerance * 100,
+    }
+    
+    # CASE 1: Part-level data is sufficient
+    if part_n >= min_part_data:
+        confidence = get_confidence_tier(part_n)
+        failures = (part_data['scrap_percent'] > threshold_pct).sum()
+        failure_rate = failures / part_n if part_n > 0 else 0
+        
+        # Calculate MTTS
+        if failures > 0:
+            failure_cycles = []
+            runs_since_failure = 0
+            for _, row in part_data.sort_values('week_ending').iterrows():
+                runs_since_failure += 1
+                if row['scrap_percent'] > threshold_pct:
+                    failure_cycles.append(runs_since_failure)
+                    runs_since_failure = 0
+            mtts = np.mean(failure_cycles) if failure_cycles else part_n
+        else:
+            mtts = part_n * 10  # Censored data estimate
+        
+        reliability = np.exp(-1 / mtts) if mtts > 0 else 0
+        
+        result.update({
+            'pooling_method': 'Part-Level (No Pooling Required)',
+            'pooling_used': False,
+            'weight_range': 'N/A',
+            'pooled_n': part_n,
+            'pooled_parts_count': 1,
+            'included_part_ids': [part_id],
+            'confidence': confidence,
+            'mtts_runs': mtts,
+            'reliability_next_run': reliability,
+            'failure_count': failures,
+            'failure_rate': failure_rate,
+            'included_parts_details': [{
+                'part_id': part_id,
+                'weight': target_weight,
+                'runs': part_n,
+                'defects': target_defects_clean
+            }]
+        })
+        return result
+    
+    # CASE 2: Need pooling - try cascading methods
+    
+    # Step 1: Weight filter
+    weight_matched_parts, weight_range = filter_by_weight(df, target_weight, weight_tolerance)
+    
+    # Step 2: Exact defect filter
+    exact_matched_parts = filter_by_exact_defects(df, weight_matched_parts, target_defects)
+    exact_pooled_df = df[df['part_id'].isin(exact_matched_parts)]
+    exact_pooled_n = len(exact_pooled_df)
+    
+    # Step 3: Any defect filter
+    any_matched_parts = filter_by_any_defect(df, weight_matched_parts)
+    any_pooled_df = df[df['part_id'].isin(any_matched_parts)]
+    any_pooled_n = len(any_pooled_df)
+    
+    # Step 4: Select best pooling method
+    if exact_pooled_n >= thresholds['HIGH']:
+        final_parts = exact_matched_parts
+        final_df = exact_pooled_df
+        pooling_method = 'Weight ±10% + Exact Defect Match'
+    elif any_pooled_n >= thresholds['HIGH']:
+        final_parts = any_matched_parts
+        final_df = any_pooled_df
+        pooling_method = 'Weight ±10% + Any Defect (1+ types)'
+    elif exact_pooled_n >= thresholds['MODERATE']:
+        final_parts = exact_matched_parts
+        final_df = exact_pooled_df
+        pooling_method = 'Weight ±10% + Exact Defect Match'
+    elif any_pooled_n >= thresholds['MODERATE']:
+        final_parts = any_matched_parts
+        final_df = any_pooled_df
+        pooling_method = 'Weight ±10% + Any Defect (1+ types)'
+    elif exact_pooled_n >= thresholds['LOW']:
+        final_parts = exact_matched_parts
+        final_df = exact_pooled_df
+        pooling_method = 'Weight ±10% + Exact Defect Match'
+    elif any_pooled_n >= thresholds['LOW']:
+        final_parts = any_matched_parts
+        final_df = any_pooled_df
+        pooling_method = 'Weight ±10% + Any Defect (1+ types)'
+    elif len(weight_matched_parts) >= thresholds['LOW']:
+        final_parts = weight_matched_parts
+        final_df = df[df['part_id'].isin(weight_matched_parts)]
+        pooling_method = 'Weight ±10% Only (No Defect Filter)'
+    else:
+        final_parts = []
+        final_df = pd.DataFrame()
+        pooling_method = 'INSUFFICIENT - No viable pooling available'
+    
+    # Step 5: Calculate pooled metrics
+    pooled_n = len(final_df)
+    confidence = get_confidence_tier(pooled_n)
+    
+    if pooled_n > 0:
+        failures = (final_df['scrap_percent'] > threshold_pct).sum()
+        failure_rate = failures / pooled_n
+        
+        # Calculate pooled MTTS
+        if failures > 0:
+            failure_cycles = []
+            for pid in final_parts:
+                pid_data = final_df[final_df['part_id'] == pid]
+                if 'week_ending' in pid_data.columns:
+                    pid_data = pid_data.sort_values('week_ending')
+                runs_since_failure = 0
+                for _, row in pid_data.iterrows():
+                    runs_since_failure += 1
+                    if row['scrap_percent'] > threshold_pct:
+                        failure_cycles.append(runs_since_failure)
+                        runs_since_failure = 0
+            mtts = np.mean(failure_cycles) if failure_cycles else pooled_n
+        else:
+            mtts = pooled_n * 10  # Censored data estimate
+        
+        reliability = np.exp(-1 / mtts) if mtts > 0 else 0
+    else:
+        failures = 0
+        failure_rate = 0
+        mtts = None
+        reliability = None
+    
+    # Step 6: Get part details for transparency
+    part_details = get_pooled_part_details(df, final_parts)
+    
+    result.update({
+        'pooling_method': pooling_method,
+        'pooling_used': True,
+        'weight_range': weight_range,
+        'pooled_n': pooled_n,
+        'pooled_parts_count': len(final_parts),
+        'included_part_ids': sorted(final_parts),
+        'confidence': confidence,
+        'mtts_runs': mtts,
+        'reliability_next_run': reliability,
+        'failure_count': failures,
+        'failure_rate': failure_rate,
+        'included_parts_details': part_details
+    })
+    
+    return result
 
 
 # ================================================================
@@ -782,21 +1139,65 @@ def main():
         st.warning(f"⚠️ Multiple weights found for Part {selected_part}: {sorted(unique_weights)[:5]}... Using mean: {part_stats['piece_weight']:.2f} lbs")
     
     # ================================================================
-    # COMPUTE ALL METRICS
+    # COMPUTE ALL METRICS (with pooling for low-data parts)
     # ================================================================
     with st.spinner("Computing prognostic model and reliability metrics..."):
-        # Train model
+        # Check if pooling is needed
+        pooled_result = compute_pooled_prediction(df, selected_part, auto_threshold)
+        
+        # Train model (uses pooling internally if needed)
         model, feature_cols, metrics, cal_method, n_train = train_model(
             df, selected_part, defect_cols, auto_threshold
         )
         
-        # Compute MTTS
-        mtts_data = compute_mtts_parts(df, selected_part, auto_threshold)
+        # Compute MTTS (use pooled data if pooling was applied)
+        if pooled_result['pooling_used']:
+            # Use pooled MTTS
+            mtts_data = {
+                "mtts_parts": pooled_result['mtts_runs'] * part_stats['avg_order_qty'] if pooled_result['mtts_runs'] else 0,
+                "mtts_runs": pooled_result['mtts_runs'] or 0,
+                "lambda_parts": 1 / (pooled_result['mtts_runs'] * part_stats['avg_order_qty']) if pooled_result['mtts_runs'] and pooled_result['mtts_runs'] > 0 else 0,
+                "failures": pooled_result['failure_count'],
+                "total_parts": pooled_result['pooled_n'] * part_stats['avg_order_qty'],
+                "total_runs": pooled_result['pooled_n'],
+                "avg_order_qty": part_stats['avg_order_qty']
+            }
+        else:
+            mtts_data = compute_mtts_parts(df, selected_part, auto_threshold)
         
         # Process diagnosis
         process_ranking, top_defects = diagnose_processes(
             df, selected_part, defect_cols, model, feature_cols
         )
+    
+    # ================================================================
+    # POOLING NOTIFICATION (if pooling was used)
+    # ================================================================
+    if pooled_result['pooling_used']:
+        confidence = pooled_result['confidence']
+        st.warning(f"""
+        ⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)
+        
+        **Hierarchical Pooling Applied:** {pooled_result['pooling_method']}
+        
+        | Pooling Details | Value |
+        |-----------------|-------|
+        | Weight Range | {pooled_result['weight_range']} |
+        | Parts Pooled | {pooled_result['pooled_parts_count']} parts |
+        | Total Records | {pooled_result['pooled_n']} records |
+        | Confidence Level | **{confidence['level']}** ({confidence['percentage']}%) |
+        | Statistical Basis | {confidence['statistical_basis']} |
+        
+        *Reference: {confidence['citation']}*
+        """)
+        
+        # Show included parts
+        with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts"):
+            for detail in pooled_result['included_parts_details'][:10]:  # Show first 10
+                defects_str = ", ".join(detail['defects'][:3]) if detail['defects'] else "None"
+                st.markdown(f"- **Part {detail['part_id']}**: {detail['weight']:.1f} lbs, {detail['runs']} runs, Defects: {defects_str}")
+            if len(pooled_result['included_parts_details']) > 10:
+                st.caption(f"...and {len(pooled_result['included_parts_details']) - 10} more parts")
     
     # ================================================================
     # 4 PANEL TABS
