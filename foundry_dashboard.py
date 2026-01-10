@@ -211,31 +211,97 @@ def load_data(filepath):
     
     df = pd.read_csv(filepath)
     
-    # Standardize column names
+    # Standardize column names - lowercase, strip whitespace, replace spaces
     df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
     
-    # Column mapping
+    # Extensive column mapping to handle various naming conventions
     col_map = {
-        "part": "part_id", "partid": "part_id", "part_number": "part_id",
-        "order_qty": "order_quantity", "qty": "order_quantity",
-        "weight": "piece_weight_lbs", "piece_weight": "piece_weight_lbs",
-        "scrap_%": "scrap_percent", "scrap": "scrap_percent",
-        "week_ending_date": "week_ending"
+        # Part ID variations
+        "part": "part_id", 
+        "partid": "part_id", 
+        "part_number": "part_id",
+        "partnumber": "part_id",
+        "part_no": "part_id",
+        
+        # Order quantity variations
+        "order_qty": "order_quantity", 
+        "qty": "order_quantity",
+        "orderqty": "order_quantity",
+        "quantity": "order_quantity",
+        
+        # Weight variations
+        "weight": "piece_weight_lbs", 
+        "piece_weight": "piece_weight_lbs",
+        "pieceweight": "piece_weight_lbs",
+        "part_weight": "piece_weight_lbs",
+        "weight_lbs": "piece_weight_lbs",
+        "lbs": "piece_weight_lbs",
+        
+        # Scrap variations
+        "scrap_%": "scrap_percent", 
+        "scrap": "scrap_percent",
+        "scrap_rate": "scrap_percent",
+        "scraprate": "scrap_percent",
+        "scrap_pct": "scrap_percent",
+        
+        # Date variations
+        "week_ending_date": "week_ending",
+        "weekending": "week_ending",
+        "date": "week_ending",
+        "week": "week_ending"
     }
-    df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
     
-    # Convert types
+    # Apply mapping only for columns that exist
+    for old_name, new_name in col_map.items():
+        if old_name in df.columns and new_name not in df.columns:
+            df.rename(columns={old_name: new_name}, inplace=True)
+    
+    # Ensure required columns exist (with defaults if missing)
+    if "part_id" not in df.columns:
+        # Try to find any column that might be part ID
+        possible_id_cols = [c for c in df.columns if 'part' in c.lower() or 'id' in c.lower()]
+        if possible_id_cols:
+            df["part_id"] = df[possible_id_cols[0]].astype(str)
+        else:
+            df["part_id"] = "UNKNOWN"
+    
+    if "order_quantity" not in df.columns:
+        possible_qty_cols = [c for c in df.columns if 'qty' in c.lower() or 'quantity' in c.lower() or 'order' in c.lower()]
+        if possible_qty_cols:
+            df["order_quantity"] = pd.to_numeric(df[possible_qty_cols[0]], errors="coerce").fillna(100)
+        else:
+            df["order_quantity"] = 100  # Default
+    
+    if "piece_weight_lbs" not in df.columns:
+        possible_weight_cols = [c for c in df.columns if 'weight' in c.lower() or 'lbs' in c.lower()]
+        if possible_weight_cols:
+            df["piece_weight_lbs"] = pd.to_numeric(df[possible_weight_cols[0]], errors="coerce").fillna(1.0)
+        else:
+            df["piece_weight_lbs"] = 1.0  # Default
+    
+    if "scrap_percent" not in df.columns:
+        possible_scrap_cols = [c for c in df.columns if 'scrap' in c.lower()]
+        if possible_scrap_cols:
+            df["scrap_percent"] = pd.to_numeric(df[possible_scrap_cols[0]], errors="coerce").fillna(0)
+        else:
+            df["scrap_percent"] = 0  # Default
+    
+    # Convert types safely
     df["part_id"] = df["part_id"].astype(str).str.strip()
     df["order_quantity"] = pd.to_numeric(df["order_quantity"], errors="coerce").fillna(100)
     df["piece_weight_lbs"] = pd.to_numeric(df["piece_weight_lbs"], errors="coerce").fillna(1.0)
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0)
     
+    # Handle date column
     if "week_ending" in df.columns:
         df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
         df = df.dropna(subset=["week_ending"])
         df = df.sort_values("week_ending")
+    else:
+        # Create a dummy date column if none exists
+        df["week_ending"] = pd.date_range(end=pd.Timestamp.today(), periods=len(df), freq='W')
     
-    # Identify defect columns
+    # Identify defect columns (any column ending in _rate except total)
     defect_cols = [c for c in df.columns if c.endswith("_rate") and "total" not in c.lower()]
     
     return df, defect_cols
