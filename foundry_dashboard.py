@@ -512,6 +512,29 @@ def identify_part_defects(df, part_id):
     return present_defects
 
 
+def get_part_weight(df, part_id):
+    """
+    Get the most representative weight for a part.
+    Uses mode (most common value) if available, otherwise median.
+    This handles cases where a part may have multiple weight entries.
+    """
+    part_data = df[df['part_id'] == str(part_id)]
+    if len(part_data) == 0:
+        return None
+    
+    weights = part_data['piece_weight_lbs'].dropna()
+    if len(weights) == 0:
+        return None
+    
+    # Use mode (most common weight) - more likely to be the correct value
+    mode_vals = weights.mode()
+    if len(mode_vals) > 0:
+        return mode_vals.iloc[0]
+    
+    # Fallback to median if no mode
+    return weights.median()
+
+
 def filter_by_weight(df, target_weight, tolerance=None):
     """Filter parts by weight within ±10% tolerance."""
     if tolerance is None:
@@ -521,7 +544,12 @@ def filter_by_weight(df, target_weight, tolerance=None):
     weight_max = target_weight * (1 + tolerance)
     
     weight_col = 'piece_weight_lbs'
-    part_weights = df.groupby('part_id')[weight_col].first()
+    
+    # Use mode/median for each part's weight instead of first()
+    # This is more robust when parts have multiple records with potentially different weights
+    part_weights = df.groupby('part_id')[weight_col].agg(
+        lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else x.median()
+    )
     
     matching_parts = part_weights[
         (part_weights >= weight_min) & (part_weights <= weight_max)
@@ -590,6 +618,8 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
     2. If not, try Weight ±10% + Exact Defect matching
     3. If that doesn't work, try Weight ±10% + Any Defect
     4. Return best available prediction with full transparency
+    
+    IMPORTANT: Uses mode/median for weight to ensure correct weight matching.
     """
     thresholds = POOLING_CONFIG['confidence_thresholds']
     min_part_data = POOLING_CONFIG['min_part_level_data']
@@ -599,7 +629,11 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
     part_data = df[df['part_id'] == part_id]
     part_n = len(part_data)
     
-    target_weight = part_data['piece_weight_lbs'].iloc[0] if len(part_data) > 0 else 0
+    # Use the robust get_part_weight function instead of .iloc[0]
+    target_weight = get_part_weight(df, part_id)
+    if target_weight is None:
+        target_weight = 0
+    
     target_defects = identify_part_defects(df, part_id)
     target_defects_clean = [d.replace('_rate', '').replace('_', ' ').title() for d in target_defects]
     
@@ -608,6 +642,7 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         'part_level_n': part_n,
         'part_level_sufficient': part_n >= min_part_data,
         'target_weight': target_weight,
+        'weight_used_for_prediction': target_weight,  # NEW: Explicit field for the weight being used
         'target_defects': target_defects_clean,
         'pooling_used': False,
     }
@@ -1537,6 +1572,7 @@ def main():
             | Pooling Details | Value |
             |-----------------|-------|
             | Target Part Weight | {pooled_result['target_weight']:.2f} lbs |
+            | **Weight Used for Prediction** | **{pooled_result.get('weight_used_for_prediction', pooled_result['target_weight']):.2f} lbs** |
             | Target Part Defects | {', '.join(pooled_result['target_defects']) if pooled_result['target_defects'] else 'None detected'} |
             | Weight Range (±10%) | {pooled_result['weight_range']} lbs |
             | Parts Pooled | {pooled_result['pooled_parts_count']} parts |
@@ -1548,12 +1584,24 @@ def main():
             if pooled_result.get('included_part_ids'):
                 with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts"):
                     for pid in pooled_result['included_part_ids'][:20]:
-                        pid_data = df[df['part_id'] == pid]
-                        pid_weight = pid_data['piece_weight_lbs'].iloc[0] if len(pid_data) > 0 else 0
-                        pid_n = len(pid_data)
+                        # Use robust weight function instead of iloc[0]
+                        pid_weight = get_part_weight(df, pid)
+                        if pid_weight is None:
+                            pid_weight = 0
+                        pid_n = len(df[df['part_id'] == pid])
                         st.write(f"• Part {pid}: {pid_weight:.2f} lbs, {pid_n} records")
                     if len(pooled_result['included_part_ids']) > 20:
                         st.write(f"... and {len(pooled_result['included_part_ids']) - 20} more parts")
+        else:
+            # Show weight info for parts with sufficient data (no pooling needed)
+            st.success(f"✅ **Part {selected_part} has sufficient data** ({pooled_result['part_level_n']} records)")
+            st.markdown(f"""
+            | Part Details | Value |
+            |--------------|-------|
+            | **Part Weight Used** | **{pooled_result.get('weight_used_for_prediction', pooled_result['target_weight']):.2f} lbs** |
+            | Records | {pooled_result['part_level_n']} |
+            | Confidence Level | {pooled_result['confidence']} |
+            """)
         
         order_qty = st.slider("Order Quantity (parts)", 1, 5000, 100)
         
