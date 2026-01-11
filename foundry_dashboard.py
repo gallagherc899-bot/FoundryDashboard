@@ -154,6 +154,8 @@ POOLING_CONFIG = {
     'enabled': True,
     'min_part_level_data': 5,
     'weight_tolerance': 0.10,
+    'min_runs_per_pooled_part': 5,  # Filter out parts with < 5 runs (reduces noise)
+    'use_pooled_threshold': True,   # Use pooled avg+std instead of global threshold
     'confidence_thresholds': {
         'HIGH': 30,
         'MODERATE': 15,
@@ -699,51 +701,81 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
     # CASE 2: Need pooling
     result['pooling_used'] = True
     
+    # Get config values
+    min_runs_per_part = POOLING_CONFIG.get('min_runs_per_pooled_part', 5)
+    use_pooled_threshold = POOLING_CONFIG.get('use_pooled_threshold', True)
+    
     # Step 1: Weight filter
     weight_matched_parts, weight_range = filter_by_weight(df, target_weight, weight_tolerance)
     
     # Step 2: Exact defect filter
     exact_matched_parts = filter_by_exact_defects(df, weight_matched_parts, target_defects)
     exact_pooled_df = df[df['part_id'].isin(exact_matched_parts)]
-    exact_pooled_n = len(exact_pooled_df)
     
     # Step 3: Any defect filter
     any_matched_parts = filter_by_any_defect(df, weight_matched_parts)
     any_pooled_df = df[df['part_id'].isin(any_matched_parts)]
-    any_pooled_n = len(any_pooled_df)
     
     # Step 4: Weight only
     weight_only_df = df[df['part_id'].isin(weight_matched_parts)]
-    weight_only_n = len(weight_only_df)
     
-    # Select best pooling method
-    if exact_pooled_n >= thresholds['HIGH']:
-        final_parts = exact_matched_parts
-        final_df = exact_pooled_df
+    # Helper function to apply minimum runs filter
+    def apply_min_runs_filter(pool_df, min_runs):
+        """Filter pool to only include parts with >= min_runs records."""
+        if len(pool_df) == 0:
+            return pool_df, [], []
+        
+        part_run_counts = pool_df.groupby('part_id').size().reset_index(name='runs')
+        qualifying = part_run_counts[part_run_counts['runs'] >= min_runs]['part_id'].tolist()
+        excluded = part_run_counts[part_run_counts['runs'] < min_runs]['part_id'].tolist()
+        
+        filtered_df = pool_df[pool_df['part_id'].isin(qualifying)]
+        return filtered_df, qualifying, excluded
+    
+    # Apply minimum runs filter to each pooling method
+    exact_filtered_df, exact_qualifying, exact_excluded = apply_min_runs_filter(exact_pooled_df, min_runs_per_part)
+    any_filtered_df, any_qualifying, any_excluded = apply_min_runs_filter(any_pooled_df, min_runs_per_part)
+    weight_filtered_df, weight_qualifying, weight_excluded = apply_min_runs_filter(weight_only_df, min_runs_per_part)
+    
+    # Select best pooling method (now using filtered counts)
+    exact_filtered_n = len(exact_filtered_df)
+    any_filtered_n = len(any_filtered_df)
+    weight_filtered_n = len(weight_filtered_df)
+    
+    if exact_filtered_n >= thresholds['HIGH']:
+        final_df = exact_filtered_df
+        final_parts = exact_qualifying
+        excluded_parts = exact_excluded
         pooling_method = 'Weight ±10% + Exact Defect Match'
-    elif any_pooled_n >= thresholds['HIGH']:
-        final_parts = any_matched_parts
-        final_df = any_pooled_df
+    elif any_filtered_n >= thresholds['HIGH']:
+        final_df = any_filtered_df
+        final_parts = any_qualifying
+        excluded_parts = any_excluded
         pooling_method = 'Weight ±10% + Any Defect'
-    elif exact_pooled_n >= thresholds['MODERATE']:
-        final_parts = exact_matched_parts
-        final_df = exact_pooled_df
+    elif exact_filtered_n >= thresholds['MODERATE']:
+        final_df = exact_filtered_df
+        final_parts = exact_qualifying
+        excluded_parts = exact_excluded
         pooling_method = 'Weight ±10% + Exact Defect Match'
-    elif any_pooled_n >= thresholds['MODERATE']:
-        final_parts = any_matched_parts
-        final_df = any_pooled_df
+    elif any_filtered_n >= thresholds['MODERATE']:
+        final_df = any_filtered_df
+        final_parts = any_qualifying
+        excluded_parts = any_excluded
         pooling_method = 'Weight ±10% + Any Defect'
-    elif exact_pooled_n >= thresholds['LOW']:
-        final_parts = exact_matched_parts
-        final_df = exact_pooled_df
+    elif exact_filtered_n >= thresholds['LOW']:
+        final_df = exact_filtered_df
+        final_parts = exact_qualifying
+        excluded_parts = exact_excluded
         pooling_method = 'Weight ±10% + Exact Defect Match'
-    elif any_pooled_n >= thresholds['LOW']:
-        final_parts = any_matched_parts
-        final_df = any_pooled_df
+    elif any_filtered_n >= thresholds['LOW']:
+        final_df = any_filtered_df
+        final_parts = any_qualifying
+        excluded_parts = any_excluded
         pooling_method = 'Weight ±10% + Any Defect'
-    elif weight_only_n >= thresholds['LOW']:
-        final_parts = weight_matched_parts
-        final_df = weight_only_df
+    elif weight_filtered_n >= thresholds['LOW']:
+        final_df = weight_filtered_df
+        final_parts = weight_qualifying
+        excluded_parts = weight_excluded
         pooling_method = 'Weight ±10% Only'
     else:
         # Insufficient data even with pooling
@@ -759,31 +791,58 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
             'reliability_next_run': None,
             'failure_count': 0,
             'failure_rate': 0,
+            'excluded_parts': [],
+            'excluded_parts_info': [],
         })
         return result
     
-    # Compute metrics from pooled data
+    # Compute metrics from filtered pooled data
     pooled_n = len(final_df)
     confidence = get_confidence_tier(pooled_n)
-    failures = (final_df['scrap_percent'] > threshold_pct).sum()
-    failure_rate = failures / pooled_n if pooled_n > 0 else 0
     
     # Calculate total parts produced from pooled data
     pooled_total_parts = final_df['order_quantity'].sum() if 'order_quantity' in final_df.columns else pooled_n
+    
+    # STRATEGY C: Use pooled threshold (avg + std) instead of global threshold
+    if use_pooled_threshold and pooled_n > 1:
+        pooled_avg_scrap = final_df['scrap_percent'].mean()
+        pooled_std_scrap = final_df['scrap_percent'].std()
+        effective_threshold = pooled_avg_scrap + pooled_std_scrap
+        threshold_source = 'pooled'
+    else:
+        pooled_avg_scrap = final_df['scrap_percent'].mean()
+        pooled_std_scrap = final_df['scrap_percent'].std() if pooled_n > 1 else 0
+        effective_threshold = threshold_pct
+        threshold_source = 'global'
+    
+    # Calculate failures using effective threshold
+    failures = (final_df['scrap_percent'] > effective_threshold).sum()
+    failure_rate = failures / pooled_n if pooled_n > 0 else 0
     
     # MTTS (runs) = Total Runs / Failures
     if failures > 0:
         mtts_runs = pooled_n / failures
     else:
-        mtts_runs = pooled_n * 10
+        mtts_runs = pooled_n * 2  # Conservative multiplier when no failures (was 10)
     
     # MTTS (parts) = Total Parts Produced / Failures
     if failures > 0:
         mtts_parts = pooled_total_parts / failures
     else:
-        mtts_parts = pooled_total_parts * 10
+        mtts_parts = pooled_total_parts * 2  # Conservative multiplier when no failures (was 10)
     
     reliability = np.exp(-1 / mtts_runs) if mtts_runs > 0 else 0
+    
+    # Build excluded parts info for disclaimer
+    excluded_parts_info = []
+    for exc_part in excluded_parts:
+        exc_data = df[df['part_id'] == exc_part]
+        if len(exc_data) > 0:
+            excluded_parts_info.append({
+                'part_id': exc_part,
+                'runs': len(exc_data),
+                'avg_scrap': exc_data['scrap_percent'].mean()
+            })
     
     result.update({
         'pooling_method': pooling_method,
@@ -791,6 +850,9 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         'pooled_n': pooled_n,
         'pooled_parts_count': len(final_parts),
         'included_part_ids': final_parts,
+        'excluded_part_ids': excluded_parts,
+        'excluded_parts_info': excluded_parts_info,
+        'min_runs_filter': min_runs_per_part,
         'confidence': confidence,
         'mtts_runs': mtts_runs,
         'mtts_parts': mtts_parts,
@@ -798,6 +860,10 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         'reliability_next_run': reliability,
         'failure_count': failures,
         'failure_rate': failure_rate,
+        'pooled_avg_scrap': pooled_avg_scrap,
+        'pooled_std_scrap': pooled_std_scrap,
+        'effective_threshold': effective_threshold,
+        'threshold_source': threshold_source,
     })
     
     return result
@@ -1590,6 +1656,13 @@ def main():
         if pooled_result['pooling_used']:
             st.warning(f"⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)")
             
+            # Get threshold info
+            effective_threshold = pooled_result.get('effective_threshold', part_threshold)
+            threshold_source = pooled_result.get('threshold_source', 'global')
+            pooled_avg = pooled_result.get('pooled_avg_scrap', 0)
+            pooled_std = pooled_result.get('pooled_std_scrap', 0)
+            min_runs_filter = pooled_result.get('min_runs_filter', 5)
+            
             st.markdown(f"""
             **Hierarchical Pooling Applied:** {pooled_result['pooling_method']}
             
@@ -1599,23 +1672,44 @@ def main():
             | **Weight Used for Prediction** | **{pooled_result.get('weight_used_for_prediction', pooled_result['target_weight']):.2f} lbs** |
             | Target Part Defects | {', '.join(pooled_result['target_defects']) if pooled_result['target_defects'] else 'None detected'} |
             | Weight Range (±10%) | {pooled_result['weight_range']} lbs |
+            | Min Runs Filter | ≥{min_runs_filter} runs per part |
             | Parts Pooled | {pooled_result['pooled_parts_count']} parts |
             | Total Records | {pooled_result['pooled_n']} records |
-            | Confidence Level | {pooled_result['confidence']} |
+            | Confidence Level | {pooled_result['confidence']} ({pooled_result['pooled_n']} runs {'≥30 CLT' if pooled_result['pooled_n'] >= 30 else '< 30'}) |
             """)
             
-            # Show pooled parts
+            # Show threshold calculation
+            if threshold_source == 'pooled':
+                st.info(f"""
+                📊 **Pooled Threshold Calculation:**
+                - Pooled Avg Scrap: {pooled_avg:.2f}%
+                - Pooled Std Dev: {pooled_std:.2f}%
+                - **Effective Threshold: {effective_threshold:.2f}%** (avg + 1 std)
+                
+                *Using pooled data statistics instead of single-part average for more reliable threshold*
+                """)
+            
+            # Show pooled parts with runs info
             if pooled_result.get('included_part_ids'):
-                with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts"):
+                with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts (≥{min_runs_filter} runs each)"):
                     for pid in pooled_result['included_part_ids'][:20]:
-                        # Use robust weight function instead of iloc[0]
                         pid_weight = get_part_weight(df, pid)
                         if pid_weight is None:
                             pid_weight = 0
-                        pid_n = len(df[df['part_id'] == pid])
-                        st.write(f"• Part {pid}: {pid_weight:.2f} lbs, {pid_n} records")
+                        pid_data = df[df['part_id'] == pid]
+                        pid_n = len(pid_data)
+                        pid_avg_scrap = pid_data['scrap_percent'].mean()
+                        st.write(f"• Part {pid}: {pid_weight:.2f} lbs, {pid_n} runs, avg scrap {pid_avg_scrap:.1f}%")
                     if len(pooled_result['included_part_ids']) > 20:
                         st.write(f"... and {len(pooled_result['included_part_ids']) - 20} more parts")
+            
+            # Show excluded parts (filtered out due to insufficient runs)
+            excluded_info = pooled_result.get('excluded_parts_info', [])
+            if excluded_info:
+                with st.expander(f"🚫 View {len(excluded_info)} Excluded Parts (<{min_runs_filter} runs - too noisy)"):
+                    for exc in excluded_info:
+                        st.write(f"• Part {exc['part_id']}: {exc['runs']} runs, avg scrap {exc['avg_scrap']:.1f}%")
+                    st.caption("*Parts with fewer runs are excluded to reduce statistical noise*")
         else:
             # Show weight info for parts with sufficient data (no pooling needed)
             st.success(f"✅ **Part {selected_part} has sufficient data** ({pooled_result['part_level_n']} records)")
@@ -1675,14 +1769,27 @@ def main():
         # Show ALL formulas for transparency
         st.markdown("#### 📐 Calculation Formulas")
         
+        # Get threshold info for display
+        effective_threshold = pooled_result.get('effective_threshold', part_threshold)
+        threshold_source = pooled_result.get('threshold_source', 'part-specific')
+        
         formula_col1, formula_col2 = st.columns(2)
         
         with formula_col1:
-            st.info(f"""
-            **MTTS (parts):** {total_parts_produced:,.0f} parts ÷ {failure_count} failures = **{mtts_parts:,.0f} parts**
-            
-            *"On average, {mtts_parts:,.0f} parts are produced between scrap events"*
-            """)
+            if failure_count > 0:
+                st.info(f"""
+                **MTTS (parts):** {total_parts_produced:,.0f} parts ÷ {failure_count} failures = **{mtts_parts:,.0f} parts**
+                
+                *"On average, {mtts_parts:,.0f} parts are produced between scrap events"*
+                
+                Threshold used: {effective_threshold:.2f}% ({threshold_source})
+                """)
+            else:
+                st.warning(f"""
+                **MTTS (parts):** {total_parts_produced:,.0f} parts × 2 (no failures) = **{mtts_parts:,.0f} parts**
+                
+                *"No failures observed above {effective_threshold:.2f}% threshold - conservative estimate"*
+                """)
             
             st.info(f"""
             **Reliability:** R({order_qty:,}) = e^(-{order_qty:,} / {mtts_parts:,.0f}) = **{reliability*100:.1f}%**
