@@ -821,12 +821,15 @@ def make_xy(df, threshold, defect_cols, use_multi_defect=True, use_temporal=True
     
     # ================================================================
     # THREE-STAGE INHERITED FEATURES (if present)
+    # Only include numeric probability features, NOT categorical tiers
     # ================================================================
-    stage_feats = ["global_scrap_probability", "defect_cluster_probability", 
-                   "global_risk_tier", "cluster_risk_tier"]
+    stage_feats = ["global_scrap_probability", "defect_cluster_probability"]
     for f in stage_feats:
         if f in df.columns:
             feats.append(f)
+    
+    # NOTE: Excluding global_risk_tier and cluster_risk_tier as they are 
+    # categorical strings and would cause "could not convert string to float" errors
     
     # Ensure all features exist
     for f in feats:
