@@ -252,7 +252,9 @@ def load_data(filepath):
         "part_id_anonymized": "part_id", "partid": "part_id",
         "quantity": "order_quantity", "order_qty": "order_quantity",
         "weight": "piece_weight_lbs", "piece_weight": "piece_weight_lbs",
+        "piece_weight_(lbs)": "piece_weight_lbs",  # Handle parentheses in column name
         "scrap_%": "scrap_percent", "scrap": "scrap_percent",
+        "scrap%": "scrap_percent",  # Handle this variant too
         "week_ending_date": "week_ending",
     }
     
