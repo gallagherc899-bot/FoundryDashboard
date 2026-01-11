@@ -1567,19 +1567,24 @@ def main():
     with tab1:
         st.header("Prognostic Model: Predict & Diagnose")
         
+        # Calculate PART-SPECIFIC threshold for this part
+        part_data = df[df['part_id'] == selected_part]
+        part_threshold = part_data['scrap_percent'].mean()
+        
         # Show three-stage info
-        st.markdown("""
+        st.markdown(f"""
         <div class="citation-box">
             <strong>Three-Stage Hierarchical Prediction:</strong><br>
             This prediction combines knowledge from:<br>
-            • <strong>Stage 1</strong>: Foundry-wide patterns (all 359 parts)<br>
+            • <strong>Stage 1</strong>: Foundry-wide patterns (all {df['part_id'].nunique()} parts)<br>
             • <strong>Stage 2</strong>: Top 5 Pareto defect patterns (~80% of scrap)<br>
-            • <strong>Stage 3</strong>: Part-specific calibration
+            • <strong>Stage 3</strong>: Part-specific calibration<br><br>
+            <strong>Part-Specific Threshold:</strong> {part_threshold:.2f}% (Part {selected_part}'s average scrap rate)
         </div>
         """, unsafe_allow_html=True)
         
-        # Get pooled prediction for this part
-        pooled_result = compute_pooled_prediction(df, selected_part, threshold)
+        # Get pooled prediction for this part using PART-SPECIFIC threshold
+        pooled_result = compute_pooled_prediction(df, selected_part, part_threshold)
         
         # Show pooling notification if used
         if pooled_result['pooling_used']:
@@ -1928,8 +1933,8 @@ def main():
         | **MTTS (parts)** | **{mtts_parts_display}** | Total Parts ({total_parts_display}) ÷ Failures ({pooled_result['failure_count']}) |
         | MTTS (runs) | {mtts_runs_display} | Total Runs ({total_runs_display}) ÷ Failures ({pooled_result['failure_count']}) |
         | λ (failure rate) | {lambda_display} | 1 ÷ MTTS (parts) |
-        | Failures observed | {pooled_result['failure_count']} | Runs where Scrap % > {threshold:.2f}% (foundry avg) |
-        | Threshold used | {threshold:.2f}% | Foundry-wide average scrap rate |
+        | Failures observed | {pooled_result['failure_count']} | Runs where Scrap % > {part_threshold:.2f}% (part avg) |
+        | **Threshold used** | **{part_threshold:.2f}%** | **Part-specific average scrap rate** |
         | Data source | {data_source} | |
         """)
     
