@@ -68,6 +68,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 
 # ================================================================
 # SCIKIT-LEARN IMPORTS
@@ -2006,6 +2007,260 @@ def main():
                     
                     mapping_df = pd.DataFrame(mapping_data)
                     st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+        
+        
+        # ================================================================
+        # SCRAP THRESHOLD SENSITIVITY ANALYSIS
+        # ================================================================
+        st.markdown("---")
+        st.markdown("### 📊 Scrap Threshold Sensitivity Analysis")
+        
+        st.markdown("""
+        <div class="citation-box">
+            <strong>Paradigm Shift Demonstration:</strong><br>
+            This analysis shows how reliability metrics respond <em>continuously</em> to different 
+            scrap % threshold definitions—unlike traditional SPC which provides only binary 
+            "in control" / "out of control" assessments.<br><br>
+            <strong>Key Insight:</strong> Reliability is a <em>continuous function</em> of your quality standard.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Calculate reasonable threshold range
+        part_avg_sens = part_data['scrap_percent'].mean()
+        part_std_sens = part_data['scrap_percent'].std()
+        part_min_sens = part_data['scrap_percent'].min()
+        part_max_sens = part_data['scrap_percent'].max()
+        global_avg_sens = df['scrap_percent'].mean()
+        
+        # Slider for manual threshold exploration
+        sens_col1, sens_col2 = st.columns([2, 1])
+        
+        with sens_col1:
+            threshold_slider = st.slider(
+                "🎚️ Scrap % Threshold (Failure Definition)",
+                min_value=0.0,
+                max_value=min(part_max_sens * 1.5, 50.0),
+                value=float(part_threshold),
+                step=0.5,
+                help="Adjust to see how reliability changes when you redefine what counts as a 'failure'",
+                key="threshold_sensitivity_slider"
+            )
+        
+        with sens_col2:
+            st.markdown(f"""
+            **Part Statistics:**
+            - Part Avg: {part_avg_sens:.2f}%
+            - Global Avg: {global_avg_sens:.2f}%
+            - Min: {part_min_sens:.2f}%
+            - Max: {part_max_sens:.2f}%
+            """)
+        
+        # Function to compute sensitivity at a single threshold
+        def compute_single_threshold_metrics(part_df, thresh, qty):
+            """Compute metrics at a single threshold value."""
+            part_df = part_df.sort_values('week_ending').copy()
+            total_runs = len(part_df)
+            total_parts_qty = part_df['order_quantity'].sum() if 'order_quantity' in part_df.columns else total_runs
+            
+            # Count failures
+            failures = (part_df['scrap_percent'] > thresh).sum()
+            
+            # Compute MTTS
+            if failures > 0:
+                parts_since = 0
+                runs_since = 0
+                cycles_parts = []
+                cycles_runs = []
+                
+                for _, row in part_df.iterrows():
+                    oq = row.get('order_quantity', 1)
+                    parts_since += oq
+                    runs_since += 1
+                    
+                    if row['scrap_percent'] > thresh:
+                        cycles_parts.append(parts_since)
+                        cycles_runs.append(runs_since)
+                        parts_since = 0
+                        runs_since = 0
+                
+                mtts_p = np.mean(cycles_parts) if cycles_parts else total_parts_qty
+                mtts_r = np.mean(cycles_runs) if cycles_runs else total_runs
+            else:
+                mtts_p = total_parts_qty * 2
+                mtts_r = total_runs * 2
+            
+            rel = np.exp(-qty / mtts_p) if mtts_p > 0 else 0
+            risk = 1 - rel
+            
+            return {
+                'mtts_parts': mtts_p,
+                'mtts_runs': mtts_r,
+                'reliability': rel * 100,
+                'scrap_risk': risk * 100,
+                'failure_count': failures,
+                'total_runs': total_runs
+            }
+        
+        # Compute at selected threshold
+        sens_result = compute_single_threshold_metrics(part_data, threshold_slider, order_qty)
+        
+        # Display metrics at selected threshold
+        st.markdown(f"#### 📍 Metrics at {threshold_slider:.1f}% Threshold")
+        
+        sens_m1, sens_m2, sens_m3, sens_m4 = st.columns(4)
+        sens_m1.metric("🎲 Scrap Risk", f"{sens_result['scrap_risk']:.1f}%", 
+                       delta=f"{sens_result['scrap_risk'] - scrap_risk*100:.1f}%" if threshold_slider != part_threshold else None)
+        sens_m2.metric("📈 Reliability", f"{sens_result['reliability']:.1f}%",
+                       delta=f"{sens_result['reliability'] - reliability*100:.1f}%" if threshold_slider != part_threshold else None)
+        sens_m3.metric("🔧 MTTS (parts)", f"{sens_result['mtts_parts']:,.0f}")
+        sens_m4.metric("⚠️ Failures", f"{sens_result['failure_count']:.0f} / {sens_result['total_runs']:.0f}")
+        
+        # Generate sensitivity curve data
+        threshold_range = np.linspace(
+            max(0.1, part_min_sens * 0.5),
+            min(part_max_sens * 1.3, 40.0),
+            40
+        )
+        
+        sens_data = []
+        for t in threshold_range:
+            res = compute_single_threshold_metrics(part_data, t, order_qty)
+            sens_data.append({
+                'threshold': t,
+                'reliability': res['reliability'],
+                'scrap_risk': res['scrap_risk'],
+                'mtts_parts': res['mtts_parts'],
+                'failure_count': res['failure_count']
+            })
+        sens_df = pd.DataFrame(sens_data)
+        
+        # Create 2x2 subplot visualization
+        fig_sens = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                "Reliability vs. Threshold",
+                "MTTS vs. Threshold",
+                "Failure Count vs. Threshold",
+                "Scrap Risk vs. Threshold"
+            ),
+            vertical_spacing=0.15,
+            horizontal_spacing=0.1
+        )
+        
+        # 1. Reliability
+        fig_sens.add_trace(go.Scatter(
+            x=sens_df['threshold'], y=sens_df['reliability'],
+            mode='lines', line=dict(color='#1976D2', width=2),
+            fill='tozeroy', fillcolor='rgba(25,118,210,0.2)',
+            showlegend=False
+        ), row=1, col=1)
+        fig_sens.add_trace(go.Scatter(
+            x=[threshold_slider], y=[sens_result['reliability']],
+            mode='markers', marker=dict(size=12, color='#D32F2F', symbol='diamond'),
+            showlegend=False
+        ), row=1, col=1)
+        fig_sens.add_hline(y=80, line_dash="dash", line_color="green", row=1, col=1)
+        fig_sens.add_vline(x=part_threshold, line_dash="dot", line_color="gray", row=1, col=1)
+        
+        # 2. MTTS
+        fig_sens.add_trace(go.Scatter(
+            x=sens_df['threshold'], y=sens_df['mtts_parts'],
+            mode='lines', line=dict(color='#388E3C', width=2),
+            showlegend=False
+        ), row=1, col=2)
+        fig_sens.add_trace(go.Scatter(
+            x=[threshold_slider], y=[sens_result['mtts_parts']],
+            mode='markers', marker=dict(size=12, color='#D32F2F', symbol='diamond'),
+            showlegend=False
+        ), row=1, col=2)
+        fig_sens.add_vline(x=part_threshold, line_dash="dot", line_color="gray", row=1, col=2)
+        
+        # 3. Failure Count
+        fig_sens.add_trace(go.Scatter(
+            x=sens_df['threshold'], y=sens_df['failure_count'],
+            mode='lines', line=dict(color='#F57C00', width=2),
+            showlegend=False
+        ), row=2, col=1)
+        fig_sens.add_trace(go.Scatter(
+            x=[threshold_slider], y=[sens_result['failure_count']],
+            mode='markers', marker=dict(size=12, color='#D32F2F', symbol='diamond'),
+            showlegend=False
+        ), row=2, col=1)
+        fig_sens.add_vline(x=part_threshold, line_dash="dot", line_color="gray", row=2, col=1)
+        
+        # 4. Scrap Risk
+        fig_sens.add_trace(go.Scatter(
+            x=sens_df['threshold'], y=sens_df['scrap_risk'],
+            mode='lines', line=dict(color='#D32F2F', width=2),
+            fill='tozeroy', fillcolor='rgba(211,47,47,0.2)',
+            showlegend=False
+        ), row=2, col=2)
+        fig_sens.add_trace(go.Scatter(
+            x=[threshold_slider], y=[sens_result['scrap_risk']],
+            mode='markers', marker=dict(size=12, color='#D32F2F', symbol='diamond'),
+            showlegend=False
+        ), row=2, col=2)
+        fig_sens.add_hline(y=20, line_dash="dash", line_color="orange", row=2, col=2)
+        fig_sens.add_vline(x=part_threshold, line_dash="dot", line_color="gray", row=2, col=2)
+        
+        # Update axes
+        fig_sens.update_xaxes(title_text="Scrap % Threshold", row=1, col=1)
+        fig_sens.update_xaxes(title_text="Scrap % Threshold", row=1, col=2)
+        fig_sens.update_xaxes(title_text="Scrap % Threshold", row=2, col=1)
+        fig_sens.update_xaxes(title_text="Scrap % Threshold", row=2, col=2)
+        fig_sens.update_yaxes(title_text="Reliability (%)", row=1, col=1)
+        fig_sens.update_yaxes(title_text="MTTS (parts)", row=1, col=2)
+        fig_sens.update_yaxes(title_text="Failures", row=2, col=1)
+        fig_sens.update_yaxes(title_text="Scrap Risk (%)", row=2, col=2)
+        
+        fig_sens.update_layout(
+            height=550,
+            title_text=f"Threshold Sensitivity Analysis for Part {selected_part}",
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig_sens, use_container_width=True)
+        
+        # Interpretation
+        with st.expander("💡 Interpretation Guide"):
+            st.markdown("""
+            **📉 Lower Threshold (Stricter Standard):**
+            - More events count as "failures" → Lower MTTS → Lower reliability
+            - *Use for: Safety-critical parts, high-value castings, strict customers*
+            
+            **📈 Higher Threshold (Lenient Standard):**
+            - Fewer events count as "failures" → Higher MTTS → Higher reliability
+            - *Use for: General production, cost-sensitive orders*
+            
+            **Key Insight:** The gray dotted line shows the part's average scrap rate (current threshold).
+            The green dashed line shows the 80% reliability target.
+            """)
+        
+        # Comparison table at key thresholds
+        with st.expander("📋 Comparison at Key Thresholds"):
+            key_thresh = sorted(set([
+                max(0.5, part_avg_sens - part_std_sens),
+                part_avg_sens,
+                global_avg_sens,
+                part_avg_sens + part_std_sens
+            ]))
+            
+            comp_data = []
+            for kt in key_thresh:
+                kr = compute_single_threshold_metrics(part_data, kt, order_qty)
+                label = "Part Avg" if abs(kt - part_avg_sens) < 0.3 else \
+                        "Global Avg" if abs(kt - global_avg_sens) < 0.3 else \
+                        "Strict" if kt < part_avg_sens else "Lenient"
+                comp_data.append({
+                    'Standard': label,
+                    'Threshold (%)': f"{kt:.2f}",
+                    'Reliability (%)': f"{kr['reliability']:.1f}",
+                    'MTTS (parts)': f"{kr['mtts_parts']:,.0f}",
+                    'Failures': kr['failure_count'],
+                    'Scrap Risk (%)': f"{kr['scrap_risk']:.1f}"
+                })
+            
+            st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
         
         # Reliability Metrics Snapshot
         st.markdown("---")
