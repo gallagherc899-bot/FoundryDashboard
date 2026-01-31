@@ -2039,7 +2039,7 @@ def main():
             threshold_slider = st.slider(
                 "🎚️ Scrap % Threshold (Failure Definition)",
                 min_value=0.0,
-                max_value=min(part_max_sens * 1.5, 50.0),
+                max_value=10.0,
                 value=float(part_threshold),
                 step=0.5,
                 help="Adjust to see how reliability changes when you redefine what counts as a 'failure'",
@@ -2118,7 +2118,7 @@ def main():
         # Generate sensitivity curve data
         threshold_range = np.linspace(
             max(0.1, part_min_sens * 0.5),
-            min(part_max_sens * 1.3, 40.0),
+            10.0,
             40
         )
         
