@@ -2138,13 +2138,13 @@ def main():
         fig_sens = make_subplots(
             rows=2, cols=2,
             subplot_titles=(
-                "Reliability vs. Threshold",
-                "MTTS vs. Threshold",
-                "Failure Count vs. Threshold",
-                "Scrap Risk vs. Threshold"
+                "<b>Reliability vs. Threshold</b>",
+                "<b>MTTS vs. Threshold</b>",
+                "<b>Failure Count vs. Threshold</b>",
+                "<b>Scrap Risk vs. Threshold</b>"
             ),
-            vertical_spacing=0.15,
-            horizontal_spacing=0.1
+            vertical_spacing=0.18,
+            horizontal_spacing=0.12
         )
         
         # 1. Reliability
@@ -2214,10 +2214,16 @@ def main():
         fig_sens.update_yaxes(title_text="Scrap Risk (%)", row=2, col=2)
         
         fig_sens.update_layout(
-            height=550,
-            title_text=f"Threshold Sensitivity Analysis for Part {selected_part}",
-            showlegend=False
+            height=600,
+            title_text=f"<b>Threshold Sensitivity Analysis for Part {selected_part}</b>",
+            title_font_size=18,
+            showlegend=False,
+            margin=dict(t=80, b=60, l=60, r=60)
         )
+        
+        # Make subplot titles larger and clearer
+        for annotation in fig_sens['layout']['annotations']:
+            annotation['font'] = dict(size=14, color='#333333')
         
         st.plotly_chart(fig_sens, use_container_width=True)
         
@@ -2299,6 +2305,243 @@ def main():
         | **Threshold used** | **{part_threshold:.2f}%** | **Part-specific average scrap rate** |
         | Data source | {data_source} | |
         """)
+        
+        # ================================================================
+        # RELIABILITY IMPROVEMENT PLANNER
+        # ================================================================
+        st.markdown("---")
+        st.markdown("### 🎯 Reliability Improvement Planner")
+        
+        st.markdown("""
+        <div class="citation-box">
+            <strong>Decision Support Tool:</strong> Set achievable scrap reduction targets for top defects 
+            to see projected reliability improvement. Industry benchmarks suggest 80% reliability as acceptable 
+            and 90% as world-class (NASA, 1999; Tractian, 2024).
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Get current defect rates for this part
+        part_defect_rates = {}
+        for defect_col in DEFECT_RATE_COLUMNS:
+            if defect_col in part_data.columns:
+                rate = part_data[defect_col].mean() * 100  # Convert to percentage
+                if rate > 0:
+                    part_defect_rates[defect_col] = rate
+        
+        # Sort by rate descending and get top 5
+        sorted_defects = sorted(part_defect_rates.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        if sorted_defects and pooled_result['failure_count'] > 0:
+            # Current state calculations
+            current_failures = pooled_result['failure_count']
+            total_parts_produced = pooled_result.get('total_parts_produced', mtts_parts * current_failures)
+            current_mtts = mtts_parts_val if mtts_parts_val > 0 else 1000
+            current_reliability = reliability * 100
+            
+            # Calculate what portion of failures each defect contributes
+            total_defect_rate = sum(d[1] for d in sorted_defects)
+            
+            st.markdown("#### 📊 Current State vs. Target State")
+            
+            # Create columns for current and target
+            col_header1, col_header2, col_header3, col_header4 = st.columns([2, 1.5, 1.5, 2])
+            col_header1.markdown("**Top 5 Defects**")
+            col_header2.markdown("**Current Rate (%)**")
+            col_header3.markdown("**Target Rate (%)**")
+            col_header4.markdown("**Est. Failure Reduction**")
+            
+            # Store target values
+            target_rates = {}
+            estimated_failure_reductions = {}
+            
+            for i, (defect_col, current_rate) in enumerate(sorted_defects):
+                defect_name = defect_col.replace('_rate', '').replace('_', ' ').title()
+                
+                # Find which process this defect belongs to
+                process_name = "Unknown"
+                for proc, info in PROCESS_DEFECT_MAP.items():
+                    if defect_col in info['defects']:
+                        process_name = proc
+                        break
+                
+                col1, col2, col3, col4 = st.columns([2, 1.5, 1.5, 2])
+                
+                with col1:
+                    icon = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "📍"
+                    st.markdown(f"{icon} **{defect_name}**")
+                    st.caption(f"*Process: {process_name}*")
+                
+                with col2:
+                    st.markdown(f"**{current_rate:.2f}%**")
+                
+                with col3:
+                    # Input field for target rate
+                    target_rate = st.number_input(
+                        f"Target {defect_name}",
+                        min_value=0.0,
+                        max_value=float(current_rate),
+                        value=float(current_rate * 0.7),  # Default to 30% reduction
+                        step=0.1,
+                        key=f"target_{defect_col}_{selected_part}",
+                        label_visibility="collapsed"
+                    )
+                    target_rates[defect_col] = target_rate
+                
+                with col4:
+                    # Calculate estimated failure reduction
+                    if total_defect_rate > 0:
+                        defect_contribution = current_rate / total_defect_rate
+                        rate_reduction_pct = (current_rate - target_rate) / current_rate if current_rate > 0 else 0
+                        estimated_reduction = defect_contribution * rate_reduction_pct * current_failures
+                        estimated_failure_reductions[defect_col] = estimated_reduction
+                        st.markdown(f"**-{estimated_reduction:.1f} failures**")
+                        st.caption(f"({defect_contribution*100:.0f}% × {rate_reduction_pct*100:.0f}% reduction)")
+                    else:
+                        estimated_failure_reductions[defect_col] = 0
+                        st.markdown("—")
+            
+            st.markdown("---")
+            
+            # Calculate projected improvements
+            total_failure_reduction = sum(estimated_failure_reductions.values())
+            projected_failures = max(1, current_failures - total_failure_reduction)
+            
+            if total_parts_produced > 0 and projected_failures > 0:
+                projected_mtts = total_parts_produced / projected_failures
+                projected_reliability = np.exp(-order_qty / projected_mtts) * 100
+            else:
+                projected_mtts = current_mtts * 2
+                projected_reliability = min(99.9, current_reliability + 10)
+            
+            # Display projected outcomes
+            st.markdown("#### 📈 Projected Outcomes")
+            
+            out1, out2, out3, out4 = st.columns(4)
+            
+            reliability_delta = projected_reliability - current_reliability
+            reliability_color = "normal" if reliability_delta > 0 else "inverse"
+            
+            out1.metric(
+                "🎯 Projected Reliability",
+                f"{projected_reliability:.1f}%",
+                delta=f"+{reliability_delta:.1f}%" if reliability_delta > 0 else f"{reliability_delta:.1f}%"
+            )
+            
+            out2.metric(
+                "🔧 Projected MTTS",
+                f"{projected_mtts:,.0f} parts",
+                delta=f"+{projected_mtts - current_mtts:,.0f}"
+            )
+            
+            out3.metric(
+                "⚠️ Projected Failures",
+                f"{projected_failures:.0f}",
+                delta=f"-{total_failure_reduction:.1f}" if total_failure_reduction > 0 else "0"
+            )
+            
+            # Calculate what reliability target is achievable
+            if projected_reliability >= 90:
+                status = "🏆 World-Class (≥90%)"
+                status_color = "#4CAF50"
+            elif projected_reliability >= 80:
+                status = "✅ Acceptable (≥80%)"
+                status_color = "#2196F3"
+            elif projected_reliability >= 70:
+                status = "⚠️ Warning Zone (70-80%)"
+                status_color = "#FF9800"
+            else:
+                status = "🔴 Critical (<70%)"
+                status_color = "#F44336"
+            
+            out4.markdown(f"""
+            <div style="background: {status_color}20; padding: 15px; border-radius: 8px; border-left: 4px solid {status_color};">
+                <strong>Status</strong><br>
+                <span style="font-size: 1.1em;">{status}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Reliability Target Calculator
+            st.markdown("---")
+            st.markdown("#### 🧮 Reliability Target Calculator")
+            st.caption("*What failure rate reduction is needed to achieve a specific reliability target?*")
+            
+            target_reliability = st.slider(
+                "Target Reliability (%)",
+                min_value=int(current_reliability),
+                max_value=99,
+                value=min(90, int(current_reliability) + 10),
+                key=f"target_rel_slider_{selected_part}"
+            )
+            
+            # Calculate required MTTS for target reliability
+            # R = e^(-n/MTTS) → MTTS = -n / ln(R)
+            if target_reliability < 100:
+                required_mtts = -order_qty / np.log(target_reliability / 100)
+                required_failures = total_parts_produced / required_mtts if required_mtts > 0 else 1
+                failures_to_eliminate = current_failures - required_failures
+                
+                # What percentage reduction is needed?
+                pct_reduction_needed = (failures_to_eliminate / current_failures * 100) if current_failures > 0 else 0
+                
+                calc1, calc2, calc3 = st.columns(3)
+                
+                calc1.metric(
+                    "Required MTTS",
+                    f"{required_mtts:,.0f} parts",
+                    delta=f"+{required_mtts - current_mtts:,.0f} from current"
+                )
+                
+                calc2.metric(
+                    "Max Failures Allowed",
+                    f"{required_failures:.1f}",
+                    delta=f"-{failures_to_eliminate:.1f} from current"
+                )
+                
+                calc3.metric(
+                    "Failure Reduction Needed",
+                    f"{pct_reduction_needed:.0f}%",
+                    delta=None
+                )
+                
+                # Actionable recommendation
+                if failures_to_eliminate > 0:
+                    st.info(f"""
+                    **📋 Action Required:** To achieve **{target_reliability}% reliability** for {order_qty:,} part orders:
+                    - Reduce high-scrap runs from **{current_failures:.0f}** to **{required_failures:.0f}** (eliminate {failures_to_eliminate:.1f} failure events)
+                    - This requires approximately **{pct_reduction_needed:.0f}%** overall failure rate reduction
+                    - Focus on top Pareto defects: **{', '.join([d[0].replace('_rate', '').replace('_', ' ').title() for d in sorted_defects[:3]])}**
+                    """)
+                else:
+                    st.success(f"""
+                    **✅ Target Already Achieved:** Current reliability ({current_reliability:.1f}%) already meets 
+                    the {target_reliability}% target for {order_qty:,} part orders.
+                    """)
+            
+            # Literature reference
+            with st.expander("📚 Literature References for Action Thresholds"):
+                st.markdown("""
+                **Industry-Standard Reliability Thresholds:**
+                
+                | Reliability Level | Interpretation | Source |
+                |-------------------|----------------|--------|
+                | **≥90%** | World-class performance | NASA (1999), Tractian (2024) |
+                | **80-90%** | Acceptable/target zone | DoD MIL-STD, Industry benchmarks |
+                | **70-80%** | Warning zone - plan intervention | Manufacturing best practices |
+                | **<70%** | Critical - immediate action required | PHM literature |
+                
+                **Key References:**
+                - NASA (1999). *Reliability, Availability & Maintainability Training*. NASA/TP-2000-207428.
+                - DoD (2018). *DOT&E Reliability Course*. DOTE Reliability Training Materials.
+                - Tractian (2024). *Preventive Maintenance Guide*. Manufacturing facilities operating below 70% preventive work struggle with reliability.
+                
+                **PHM Decision Framework:**
+                - **Scheduling Threshold** → When to START planning (R < 80%)
+                - **Maintenance Threshold** → When to EXECUTE action (R < 70%)  
+                - **Failure Threshold** → Critical intervention required (R < 50%)
+                """)
+        
+        else:
+            st.warning("Insufficient defect data available for this part to generate improvement recommendations.")
     
     # ================================================================
     # TAB 2: RQ1 - MODEL VALIDATION
