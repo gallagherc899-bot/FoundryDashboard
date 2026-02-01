@@ -2057,35 +2057,25 @@ def main():
         
         # Function to compute sensitivity at a single threshold
         def compute_single_threshold_metrics(part_df, thresh, qty):
-            """Compute metrics at a single threshold value."""
+            """Compute metrics at a single threshold value.
+            
+            Uses Total Parts / Failures method for MTTS calculation,
+            consistent with NASA RAM Training (1999) methodology.
+            """
             part_df = part_df.sort_values('week_ending').copy()
             total_runs = len(part_df)
             total_parts_qty = part_df['order_quantity'].sum() if 'order_quantity' in part_df.columns else total_runs
             
-            # Count failures
+            # Count failures (runs where scrap % exceeds threshold)
             failures = (part_df['scrap_percent'] > thresh).sum()
             
-            # Compute MTTS
+            # Compute MTTS using Total/Failures method (NASA RAM standard)
+            # This is consistent with the main Prediction Summary calculation
             if failures > 0:
-                parts_since = 0
-                runs_since = 0
-                cycles_parts = []
-                cycles_runs = []
-                
-                for _, row in part_df.iterrows():
-                    oq = row.get('order_quantity', 1)
-                    parts_since += oq
-                    runs_since += 1
-                    
-                    if row['scrap_percent'] > thresh:
-                        cycles_parts.append(parts_since)
-                        cycles_runs.append(runs_since)
-                        parts_since = 0
-                        runs_since = 0
-                
-                mtts_p = np.mean(cycles_parts) if cycles_parts else total_parts_qty
-                mtts_r = np.mean(cycles_runs) if cycles_runs else total_runs
+                mtts_p = total_parts_qty / failures  # Total Parts / Failures
+                mtts_r = total_runs / failures       # Total Runs / Failures
             else:
+                # No failures = very high MTTS (use 2x total as proxy)
                 mtts_p = total_parts_qty * 2
                 mtts_r = total_runs * 2
             
@@ -2463,9 +2453,9 @@ def main():
             
             target_reliability = st.slider(
                 "Target Reliability (%)",
-                min_value=int(current_reliability),
-                max_value=99,
-                value=min(90, int(current_reliability) + 10),
+                min_value=80,
+                max_value=100,
+                value=90,  # Default to world-class target
                 key=f"target_rel_slider_{selected_part}"
             )
             
@@ -2513,6 +2503,13 @@ def main():
                     **✅ Target Already Achieved:** Current reliability ({current_reliability:.1f}%) already meets 
                     the {target_reliability}% target for {order_qty:,} part orders.
                     """)
+            else:
+                # target_reliability == 100
+                st.warning("""
+                **⚠️ 100% Reliability is Theoretically Unachievable:** 
+                Under the exponential reliability model, 100% reliability requires infinite MTTS (zero failures ever). 
+                This is not practically achievable. Consider targeting 95-99% for near-perfect performance.
+                """)
             
             # Literature reference
             with st.expander("📚 Literature References for Action Thresholds"):
