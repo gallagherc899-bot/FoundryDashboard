@@ -2320,18 +2320,12 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Get current defect rates for this part
-        part_defect_rates = {}
-        for defect_col in DEFECT_RATE_COLUMNS:
-            if defect_col in part_data.columns:
-                rate = part_data[defect_col].mean() * 100  # Convert to percentage
-                if rate > 0:
-                    part_defect_rates[defect_col] = rate
-        
-        # Sort by rate descending and get top 5
-        sorted_defects = sorted(part_defect_rates.items(), key=lambda x: x[1], reverse=True)[:5]
-        
-        if sorted_defects and pooled_result['failure_count'] > 0:
+        # Use defect_data that was already computed earlier (around line 1828)
+        # This contains: Defect, Defect_Code, Historical Rate (%), Predicted Rate (%), Expected Count
+        if defect_data and pooled_result['failure_count'] > 0:
+            # Get top 5 defects
+            sorted_defects = sorted(defect_data, key=lambda x: x['Historical Rate (%)'], reverse=True)[:5]
+            
             # Current state calculations
             current_failures = pooled_result['failure_count']
             total_parts_produced = pooled_result.get('total_parts_produced', mtts_parts * current_failures)
@@ -2339,7 +2333,7 @@ def main():
             current_reliability = reliability * 100
             
             # Calculate what portion of failures each defect contributes
-            total_defect_rate = sum(d[1] for d in sorted_defects)
+            total_defect_rate = sum(d['Historical Rate (%)'] for d in sorted_defects)
             
             st.markdown("#### 📊 Current State vs. Target State")
             
@@ -2354,8 +2348,10 @@ def main():
             target_rates = {}
             estimated_failure_reductions = {}
             
-            for i, (defect_col, current_rate) in enumerate(sorted_defects):
-                defect_name = defect_col.replace('_rate', '').replace('_', ' ').title()
+            for i, defect_info in enumerate(sorted_defects):
+                defect_name = defect_info['Defect']
+                defect_col = defect_info['Defect_Code']
+                current_rate = defect_info['Historical Rate (%)']
                 
                 # Find which process this defect belongs to
                 process_name = "Unknown"
@@ -2505,11 +2501,12 @@ def main():
                 
                 # Actionable recommendation
                 if failures_to_eliminate > 0:
+                    top_defect_names = ', '.join([d['Defect'] for d in sorted_defects[:3]])
                     st.info(f"""
                     **📋 Action Required:** To achieve **{target_reliability}% reliability** for {order_qty:,} part orders:
                     - Reduce high-scrap runs from **{current_failures:.0f}** to **{required_failures:.0f}** (eliminate {failures_to_eliminate:.1f} failure events)
                     - This requires approximately **{pct_reduction_needed:.0f}%** overall failure rate reduction
-                    - Focus on top Pareto defects: **{', '.join([d[0].replace('_rate', '').replace('_', ' ').title() for d in sorted_defects[:3]])}**
+                    - Focus on top Pareto defects: **{top_defect_names}**
                     """)
                 else:
                     st.success(f"""
