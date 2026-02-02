@@ -96,6 +96,31 @@ from scipy import stats
 from datetime import datetime
 
 # ================================================================
+# LIME - LOCAL INTERPRETABLE MODEL-AGNOSTIC EXPLANATIONS
+# ================================================================
+# Reference: Ribeiro, M.T., Singh, S., & Guestrin, C. (2016).
+# "Why Should I Trust You?": Explaining the Predictions of Any Classifier.
+# Proceedings of the 22nd ACM SIGKDD International Conference on
+# Knowledge Discovery and Data Mining, 1135-1144.
+#
+# LIME explains individual predictions by:
+# 1. Perturbing the input features around the instance of interest
+# 2. Getting model predictions for each perturbation
+# 3. Fitting a simple, interpretable model (linear regression) locally
+# 4. Returning feature weights showing each feature's contribution
+#
+# This enables analysts to understand WHY the model made a specific
+# prediction, supporting the NASA mission assurance principle of
+# "dynamic, synthesizing feedback" for decision-making.
+# ================================================================
+try:
+    from lime.lime_tabular import LimeTabularExplainer
+    LIME_AVAILABLE = True
+except ImportError:
+    LIME_AVAILABLE = False
+    # Fallback: LIME not installed
+
+# ================================================================
 # STREAMLIT CONFIGURATION
 # ================================================================
 st.set_page_config(
@@ -1552,6 +1577,124 @@ def diagnose_processes(df, part_id, defect_cols):
     return sorted_processes, sorted_defects
 
 
+# ================================================================
+# LIME LOCAL EXPLANATION FUNCTION
+# ================================================================
+# Reference: Ribeiro, M.T., Singh, S., & Guestrin, C. (2016).
+# "Why Should I Trust You?": Explaining the Predictions of Any Classifier.
+#
+# This function provides instance-level explanations for individual
+# predictions, answering "WHY did the model predict this specific value?"
+# ================================================================
+def explain_prediction_lime(model, X_train, feature_names, instance, num_features=10):
+    """
+    Generate LIME explanation for a single prediction instance.
+    
+    Parameters:
+    -----------
+    model : sklearn model
+        Trained model with predict_proba method
+    X_train : np.array
+        Training data used to fit LIME explainer
+    feature_names : list
+        Names of features
+    instance : np.array
+        Single instance to explain (1D array)
+    num_features : int
+        Number of top features to return
+    
+    Returns:
+    --------
+    dict with:
+        - 'explanation': list of (feature, weight) tuples
+        - 'prediction': model's prediction for this instance
+        - 'prediction_proba': probability prediction
+        - 'intercept': base value from local linear model
+    """
+    if not LIME_AVAILABLE:
+        return {
+            'explanation': [],
+            'prediction': None,
+            'prediction_proba': None,
+            'intercept': 0,
+            'error': 'LIME not installed. Run: pip install lime'
+        }
+    
+    try:
+        # Create LIME explainer
+        explainer = LimeTabularExplainer(
+            training_data=X_train.values if hasattr(X_train, 'values') else X_train,
+            feature_names=feature_names,
+            class_names=['Good', 'Scrap'],
+            mode='classification',
+            discretize_continuous=True,
+            random_state=42
+        )
+        
+        # Ensure instance is 1D array
+        if hasattr(instance, 'values'):
+            instance_array = instance.values.flatten()
+        else:
+            instance_array = np.array(instance).flatten()
+        
+        # Generate explanation
+        exp = explainer.explain_instance(
+            data_row=instance_array,
+            predict_fn=model.predict_proba,
+            num_features=num_features,
+            num_samples=1000  # Number of perturbations
+        )
+        
+        # Get model prediction for this instance
+        proba = model.predict_proba(instance_array.reshape(1, -1))[0]
+        pred_class = np.argmax(proba)
+        
+        # Extract explanation as list of (feature, weight) tuples
+        # Positive weight = increases scrap probability
+        # Negative weight = decreases scrap probability
+        explanation_list = exp.as_list()
+        
+        # Get intercept (base prediction from local model)
+        intercept = exp.intercept[1] if len(exp.intercept) > 1 else exp.intercept[0]
+        
+        return {
+            'explanation': explanation_list,
+            'prediction': pred_class,
+            'prediction_proba': proba[1],  # Probability of scrap
+            'intercept': intercept,
+            'local_pred': exp.local_pred[0] if hasattr(exp, 'local_pred') else None,
+            'error': None
+        }
+        
+    except Exception as e:
+        return {
+            'explanation': [],
+            'prediction': None,
+            'prediction_proba': None,
+            'intercept': 0,
+            'error': str(e)
+        }
+
+
+def format_lime_feature(feature_str):
+    """
+    Format LIME feature string for display.
+    LIME returns strings like "hazard_rate <= 0.15" or "shrink_rate > 2.30"
+    """
+    # Clean up feature names for display
+    feature_str = feature_str.replace('_rate', '')
+    feature_str = feature_str.replace('_', ' ')
+    return feature_str.title()
+
+
+def get_lime_color(weight):
+    """Return color based on weight direction."""
+    if weight > 0:
+        return '#FFCDD2'  # Light red - increases scrap risk
+    else:
+        return '#C8E6C9'  # Light green - decreases scrap risk
+
+
 def calculate_tte_savings(current_scrap, target_scrap, annual_production, energy_per_lb=DOE_BENCHMARKS['average']):
     reduction_pct = (current_scrap - target_scrap) / current_scrap if current_scrap > 0 else 0
     avoided_lbs = annual_production * (current_scrap - target_scrap) / 100
@@ -2007,6 +2150,163 @@ def main():
                     
                     mapping_df = pd.DataFrame(mapping_data)
                     st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+        
+        
+        # ================================================================
+        # LIME: LOCAL INTERPRETABLE MODEL EXPLANATION
+        # ================================================================
+        # Reference: Ribeiro, M.T., Singh, S., & Guestrin, C. (2016).
+        # "Why Should I Trust You?": Explaining the Predictions of Any Classifier.
+        #
+        # This section provides instance-level explanations for WHY the model
+        # made this specific prediction, supporting Zio's (2022) call for
+        # PHM model interpretability and NASA's mission assurance principle
+        # of "dynamic, synthesizing feedback" for decision-making.
+        # ================================================================
+        st.markdown("---")
+        st.markdown("### 🔬 LIME: Local Model Explanation")
+        st.caption("*Why did the model make THIS specific prediction?*")
+        
+        st.markdown("""
+        <div class="citation-box">
+            <strong>LIME (Local Interpretable Model-agnostic Explanations)</strong><br>
+            Unlike global feature importance, LIME explains <em>individual predictions</em> by:
+            <ol>
+                <li>Perturbing the input features around this specific instance</li>
+                <li>Observing how the model's prediction changes</li>
+                <li>Fitting a simple linear model to approximate the complex model locally</li>
+                <li>Returning feature weights showing each feature's contribution</li>
+            </ol>
+            <strong>Reference:</strong> Ribeiro, M.T., Singh, S., & Guestrin, C. (2016). KDD.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if LIME_AVAILABLE:
+            # Get the most recent record for this part to explain
+            part_recent = part_data.sort_values('run_date' if 'run_date' in part_data.columns else part_data.columns[0]).iloc[-1:]
+            
+            if len(part_recent) > 0 and global_model is not None:
+                # Prepare features for this instance
+                try:
+                    model_features = global_model['features']
+                    X_train = global_model['X_train']
+                    cal_model = global_model['cal_model']
+                    
+                    # Ensure all features exist in part_recent
+                    for f in model_features:
+                        if f not in part_recent.columns:
+                            part_recent[f] = 0.0
+                    
+                    instance = part_recent[model_features].fillna(0)
+                    
+                    # Generate LIME explanation
+                    with st.spinner("Generating LIME explanation (perturbing ~1000 samples)..."):
+                        lime_result = explain_prediction_lime(
+                            model=cal_model,
+                            X_train=X_train,
+                            feature_names=model_features,
+                            instance=instance,
+                            num_features=10
+                        )
+                    
+                    if lime_result['error'] is None:
+                        lime_col1, lime_col2 = st.columns([1, 2])
+                        
+                        with lime_col1:
+                            st.markdown("#### 🎯 Prediction Explained")
+                            pred_proba = lime_result['prediction_proba']
+                            st.metric(
+                                "ML Scrap Probability",
+                                f"{pred_proba*100:.1f}%",
+                                help="Model's predicted probability of scrap for this instance"
+                            )
+                            
+                            st.markdown(f"""
+                            **Interpretation:**
+                            - 🔴 **Red** features INCREASE scrap risk
+                            - 🟢 **Green** features DECREASE scrap risk
+                            - Larger bars = stronger influence
+                            """)
+                        
+                        with lime_col2:
+                            st.markdown("#### 📊 Feature Contributions to This Prediction")
+                            
+                            # Create bar chart of LIME weights
+                            if lime_result['explanation']:
+                                lime_df = pd.DataFrame(lime_result['explanation'], columns=['Feature', 'Weight'])
+                                lime_df['Abs_Weight'] = lime_df['Weight'].abs()
+                                lime_df = lime_df.sort_values('Abs_Weight', ascending=True)
+                                
+                                # Color by direction
+                                colors = ['#EF5350' if w > 0 else '#66BB6A' for w in lime_df['Weight']]
+                                
+                                fig_lime = go.Figure(go.Bar(
+                                    x=lime_df['Weight'],
+                                    y=lime_df['Feature'],
+                                    orientation='h',
+                                    marker_color=colors,
+                                    text=[f"{w:+.3f}" for w in lime_df['Weight']],
+                                    textposition='outside'
+                                ))
+                                
+                                fig_lime.update_layout(
+                                    title="LIME Feature Weights (Local Linear Approximation)",
+                                    xaxis_title="Weight (+ increases scrap risk, - decreases)",
+                                    yaxis_title="Feature Condition",
+                                    height=400,
+                                    showlegend=False,
+                                    xaxis=dict(zeroline=True, zerolinewidth=2, zerolinecolor='black')
+                                )
+                                
+                                st.plotly_chart(fig_lime, use_container_width=True)
+                        
+                        # Detailed LIME table
+                        with st.expander("📋 View Detailed LIME Explanation"):
+                            st.markdown("""
+                            **How to Read This Table:**
+                            - **Feature Condition**: The feature value range for this instance
+                            - **Weight**: Contribution to scrap probability (+ increases, - decreases)
+                            - **Direction**: Whether this feature pushes toward scrap or away from scrap
+                            """)
+                            
+                            lime_table = []
+                            for feat, weight in lime_result['explanation']:
+                                direction = "↑ Increases Risk" if weight > 0 else "↓ Decreases Risk"
+                                impact = "High" if abs(weight) > 0.1 else "Medium" if abs(weight) > 0.05 else "Low"
+                                lime_table.append({
+                                    'Feature Condition': feat,
+                                    'Weight': f"{weight:+.4f}",
+                                    'Direction': direction,
+                                    'Impact': impact
+                                })
+                            
+                            lime_detail_df = pd.DataFrame(lime_table)
+                            st.dataframe(lime_detail_df, use_container_width=True, hide_index=True)
+                            
+                            st.info(f"""
+                            **LIME Local Model Summary:**
+                            - Intercept (base prediction): {lime_result['intercept']:.4f}
+                            - Sum of weights + intercept ≈ predicted probability
+                            - This linear approximation is valid only LOCALLY around this instance
+                            """)
+                    
+                    else:
+                        st.error(f"LIME Error: {lime_result['error']}")
+                        
+                except Exception as e:
+                    st.warning(f"Could not generate LIME explanation: {str(e)}")
+        else:
+            st.warning("""
+            ⚠️ **LIME not installed**
+            
+            To enable LIME explanations, install the library:
+            ```
+            pip install lime
+            ```
+            
+            LIME (Local Interpretable Model-agnostic Explanations) provides instance-level 
+            explanations showing WHY the model made each specific prediction.
+            """)
         
         
         # ================================================================
