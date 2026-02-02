@@ -1594,12 +1594,12 @@ def explain_prediction_lime(model, X_train, feature_names, instance, num_feature
     -----------
     model : sklearn model
         Trained model with predict_proba method
-    X_train : np.array
+    X_train : np.array or pd.DataFrame
         Training data used to fit LIME explainer
     feature_names : list
         Names of features
-    instance : np.array
-        Single instance to explain (1D array)
+    instance : np.array or pd.DataFrame
+        Single instance to explain (1D array or single-row DataFrame)
     num_features : int
         Number of top features to return
     
@@ -1610,6 +1610,7 @@ def explain_prediction_lime(model, X_train, feature_names, instance, num_feature
         - 'prediction': model's prediction for this instance
         - 'prediction_proba': probability prediction
         - 'intercept': base value from local linear model
+        - 'error': error message if any, None otherwise
     """
     if not LIME_AVAILABLE:
         return {
@@ -1621,58 +1622,101 @@ def explain_prediction_lime(model, X_train, feature_names, instance, num_feature
         }
     
     try:
+        # Convert X_train to numpy array
+        if hasattr(X_train, 'values'):
+            X_train_array = X_train.values.astype(np.float64)
+        else:
+            X_train_array = np.array(X_train).astype(np.float64)
+        
+        # Handle NaN values in training data
+        X_train_array = np.nan_to_num(X_train_array, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Validate training data
+        if X_train_array.shape[0] < 10:
+            return {
+                'explanation': [],
+                'prediction': None,
+                'prediction_proba': None,
+                'intercept': 0,
+                'error': f'Insufficient training data: {X_train_array.shape[0]} samples (need at least 10)'
+            }
+        
         # Create LIME explainer
         explainer = LimeTabularExplainer(
-            training_data=X_train.values if hasattr(X_train, 'values') else X_train,
-            feature_names=feature_names,
+            training_data=X_train_array,
+            feature_names=list(feature_names),
             class_names=['Good', 'Scrap'],
             mode='classification',
             discretize_continuous=True,
-            random_state=42
+            random_state=42,
+            verbose=False
         )
         
-        # Ensure instance is 1D array
+        # Ensure instance is 1D numpy array
         if hasattr(instance, 'values'):
-            instance_array = instance.values.flatten()
+            instance_array = instance.values.flatten().astype(np.float64)
+        elif hasattr(instance, 'iloc'):
+            instance_array = instance.iloc[0].values.astype(np.float64) if len(instance.shape) > 1 else instance.values.astype(np.float64)
         else:
-            instance_array = np.array(instance).flatten()
+            instance_array = np.array(instance).flatten().astype(np.float64)
+        
+        # Handle NaN values in instance
+        instance_array = np.nan_to_num(instance_array, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Validate instance shape
+        if len(instance_array) != X_train_array.shape[1]:
+            return {
+                'explanation': [],
+                'prediction': None,
+                'prediction_proba': None,
+                'intercept': 0,
+                'error': f'Feature mismatch: instance has {len(instance_array)} features, expected {X_train_array.shape[1]}'
+            }
         
         # Generate explanation
         exp = explainer.explain_instance(
             data_row=instance_array,
             predict_fn=model.predict_proba,
-            num_features=num_features,
-            num_samples=1000  # Number of perturbations
+            num_features=min(num_features, len(feature_names)),
+            num_samples=500  # Reduced for faster computation
         )
         
         # Get model prediction for this instance
         proba = model.predict_proba(instance_array.reshape(1, -1))[0]
-        pred_class = np.argmax(proba)
+        pred_class = int(np.argmax(proba))
         
         # Extract explanation as list of (feature, weight) tuples
-        # Positive weight = increases scrap probability
-        # Negative weight = decreases scrap probability
         explanation_list = exp.as_list()
         
         # Get intercept (base prediction from local model)
-        intercept = exp.intercept[1] if len(exp.intercept) > 1 else exp.intercept[0]
+        if hasattr(exp, 'intercept') and len(exp.intercept) > 1:
+            intercept = float(exp.intercept[1])
+        elif hasattr(exp, 'intercept'):
+            intercept = float(exp.intercept[0]) if len(exp.intercept) > 0 else 0.0
+        else:
+            intercept = 0.0
         
         return {
             'explanation': explanation_list,
             'prediction': pred_class,
-            'prediction_proba': proba[1],  # Probability of scrap
+            'prediction_proba': float(proba[1]),  # Probability of scrap (class 1)
             'intercept': intercept,
-            'local_pred': exp.local_pred[0] if hasattr(exp, 'local_pred') else None,
+            'local_pred': float(exp.local_pred[0]) if hasattr(exp, 'local_pred') and len(exp.local_pred) > 0 else None,
             'error': None
         }
         
     except Exception as e:
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        # Get more detailed error info
+        tb = traceback.format_exc()
         return {
             'explanation': [],
             'prediction': None,
             'prediction_proba': None,
             'intercept': 0,
-            'error': str(e)
+            'error': error_msg,
+            'traceback': tb
         }
 
 
@@ -2292,9 +2336,15 @@ def main():
                     
                     else:
                         st.error(f"LIME Error: {lime_result['error']}")
+                        if 'traceback' in lime_result:
+                            with st.expander("🔍 View Technical Details"):
+                                st.code(lime_result['traceback'])
                         
                 except Exception as e:
-                    st.warning(f"Could not generate LIME explanation: {str(e)}")
+                    import traceback
+                    st.warning(f"Could not generate LIME explanation: {type(e).__name__}: {str(e)}")
+                    with st.expander("🔍 View Technical Details"):
+                        st.code(traceback.format_exc())
         else:
             st.warning("""
             ⚠️ **LIME not installed**
