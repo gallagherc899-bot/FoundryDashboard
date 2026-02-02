@@ -11,6 +11,8 @@ altair
 imbalanced-learn
 shap==0.46.0
 tqdm==4.66.4
+lime>=0.2.0.1
+
 
 
 
