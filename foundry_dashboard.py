@@ -1774,6 +1774,322 @@ def calculate_tte_savings(current_scrap, target_scrap, annual_production, energy
 
 
 # ================================================================
+# ACTION PLAN REPORT GENERATOR
+# ================================================================
+def generate_action_plan_report(
+    part_id,
+    current_state,
+    target_state,
+    defect_targets,
+    lime_insights=None,
+    timestamp=None
+):
+    """
+    Generate a printable action plan report for foundry managers.
+    
+    Parameters:
+    -----------
+    part_id : str/int
+        The part identifier
+    current_state : dict
+        Current metrics including threshold, reliability, mtts, failures, scrap_rate
+    target_state : dict
+        Target metrics including threshold, reliability, mtts, failures
+    defect_targets : list of dict
+        List of defects with current_rate, target_rate, process, estimated_reduction
+    lime_insights : list of dict, optional
+        LIME explanation features with feature, weight, direction
+    timestamp : datetime, optional
+        Report generation timestamp
+    
+    Returns:
+    --------
+    str : Markdown-formatted report
+    """
+    if timestamp is None:
+        timestamp = datetime.now()
+    
+    # Determine overall status
+    if target_state['reliability'] >= 90:
+        status = "🏆 WORLD-CLASS TARGET"
+        status_desc = "Targeting elite manufacturing performance"
+    elif target_state['reliability'] >= 80:
+        status = "✅ ACCEPTABLE TARGET"
+        status_desc = "Targeting industry-standard reliability"
+    elif target_state['reliability'] >= 70:
+        status = "⚠️ IMPROVEMENT TARGET"
+        status_desc = "Working toward acceptable performance"
+    else:
+        status = "🔴 CRITICAL INTERVENTION"
+        status_desc = "Immediate action required"
+    
+    # Build the report
+    report = f"""
+# 🏭 FOUNDRY SCRAP REDUCTION ACTION PLAN
+## Part: {part_id}
+**Generated:** {timestamp.strftime('%Y-%m-%d %H:%M')}
+
+---
+
+## 📊 EXECUTIVE SUMMARY
+
+| Metric | Current State | Target State | Change |
+|--------|---------------|--------------|--------|
+| **Scrap Threshold** | {current_state['threshold']:.2f}% | {target_state['threshold']:.2f}% | {target_state['threshold'] - current_state['threshold']:+.2f}% |
+| **Reliability R(n)** | {current_state['reliability']:.1f}% | {target_state['reliability']:.1f}% | {target_state['reliability'] - current_state['reliability']:+.1f}% |
+| **MTTS (parts)** | {current_state['mtts']:,.0f} | {target_state['mtts']:,.0f} | {target_state['mtts'] - current_state['mtts']:+,.0f} |
+| **Failure Events** | {current_state['failures']:.0f} | {target_state['failures']:.0f} | {target_state['failures'] - current_state['failures']:+.0f} |
+
+**Status:** {status}
+*{status_desc}*
+
+---
+
+## 🎯 DEFECT REDUCTION TARGETS
+
+| Priority | Defect | Process Area | Current Rate | Target Rate | Reduction | Est. Failures Avoided |
+|----------|--------|--------------|--------------|-------------|-----------|----------------------|
+"""
+    
+    # Add defect rows
+    for i, defect in enumerate(defect_targets):
+        priority = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"#{i+1}"
+        reduction_pct = ((defect['current_rate'] - defect['target_rate']) / defect['current_rate'] * 100) if defect['current_rate'] > 0 else 0
+        report += f"| {priority} | {defect['defect_name']} | {defect['process']} | {defect['current_rate']:.2f}% | {defect['target_rate']:.2f}% | {reduction_pct:.0f}% | {defect['estimated_reduction']:.1f} |\n"
+    
+    report += """
+---
+
+## 🔧 ACTION ITEMS BY PROCESS AREA
+
+"""
+    
+    # Group defects by process area
+    process_actions = {}
+    for defect in defect_targets:
+        proc = defect['process']
+        if proc not in process_actions:
+            process_actions[proc] = []
+        if defect['target_rate'] < defect['current_rate']:
+            process_actions[proc].append(defect)
+    
+    # Process-specific recommendations based on Campbell's framework
+    process_recommendations = {
+        "Melting": [
+            "Review melt temperature control (±10°F tolerance)",
+            "Check degassing time and procedure",
+            "Verify hydrogen content testing frequency",
+            "Inspect furnace refractory condition"
+        ],
+        "Pouring": [
+            "Calibrate pour temperature measurement",
+            "Review pour rate and stream continuity",
+            "Check ladle condition and preheating",
+            "Verify mold fill time targets"
+        ],
+        "Gating Design": [
+            "Review riser sizing calculations",
+            "Check feeding distance requirements",
+            "Verify chilling placement",
+            "Run solidification simulation"
+        ],
+        "Sand System": [
+            "Test sand AFS grain fineness",
+            "Check binder ratio and mixing time",
+            "Verify compaction/ramming pressure",
+            "Review sand temperature control"
+        ],
+        "Core Making": [
+            "Inspect core box venting",
+            "Check core strength (dog bone test)",
+            "Verify core coating application",
+            "Review core storage conditions"
+        ],
+        "Shakeout": [
+            "Review cooling time before shakeout",
+            "Check shakeout equipment settings",
+            "Verify handling procedures",
+            "Inspect for thermal stress"
+        ],
+        "Pattern/Tooling": [
+            "Measure pattern dimensional accuracy",
+            "Check pattern wear and surface finish",
+            "Verify draft angles",
+            "Inspect loose piece fit"
+        ],
+        "Inspection": [
+            "Review NDT procedure compliance",
+            "Calibrate inspection equipment",
+            "Verify acceptance criteria documentation",
+            "Check inspector training records"
+        ],
+        "Finishing": [
+            "Review grinding templates/fixtures",
+            "Check grinder wheel specifications",
+            "Verify dimensional inspection after grinding",
+            "Document acceptable surface finish standards"
+        ]
+    }
+    
+    for proc, defects in process_actions.items():
+        if defects:
+            report += f"### {proc}\n\n"
+            report += f"**Targeted Defects:** {', '.join([d['defect_name'] for d in defects])}\n\n"
+            report += "**Recommended Actions:**\n"
+            
+            recommendations = process_recommendations.get(proc, ["Review process parameters", "Consult process engineer"])
+            for rec in recommendations[:4]:  # Limit to top 4 recommendations
+                report += f"- [ ] {rec}\n"
+            report += "\n"
+    
+    # Add LIME insights if available
+    if lime_insights and len(lime_insights) > 0:
+        report += """---
+
+## 🔍 ML MODEL INSIGHTS (LIME Analysis)
+
+**Why the model predicts scrap risk for this part:**
+
+| Feature Condition | Impact | Direction | Interpretation |
+|-------------------|--------|-----------|----------------|
+"""
+        for insight in lime_insights[:8]:  # Top 8 features
+            direction = "↑ Increases Risk" if insight['weight'] > 0 else "↓ Decreases Risk"
+            impact = "HIGH" if abs(insight['weight']) > 0.1 else "MEDIUM" if abs(insight['weight']) > 0.05 else "LOW"
+            report += f"| {insight['feature']} | {impact} | {direction} | Weight: {insight['weight']:+.3f} |\n"
+        
+        report += """
+**Key Insight:** Features with positive weights (↑) are pushing predictions toward scrap. 
+Focus improvement efforts on controlling these factors.
+"""
+    
+    report += f"""
+---
+
+## 📋 IMPLEMENTATION CHECKLIST
+
+### Immediate Actions (This Week)
+- [ ] Review this plan with shift supervisors
+- [ ] Assign process owners to each action item
+- [ ] Establish baseline measurements for target defects
+- [ ] Schedule follow-up review meeting
+
+### Short-Term Actions (This Month)
+- [ ] Implement process adjustments for top 2 defects
+- [ ] Begin data collection on adjusted parameters
+- [ ] Compare actual vs. predicted defect rates
+
+### Verification (Next Month)
+- [ ] Calculate new reliability metrics
+- [ ] Compare to targets in this plan
+- [ ] Document lessons learned
+- [ ] Generate updated action plan if needed
+
+---
+
+## 📈 SUCCESS CRITERIA
+
+This plan is successful when:
+1. **Reliability reaches {target_state['reliability']:.0f}%** (from {current_state['reliability']:.0f}%)
+2. **Failures reduce to {target_state['failures']:.0f}** (from {current_state['failures']:.0f})
+3. **Each targeted defect meets its rate target** (see table above)
+
+---
+
+*Generated by Foundry Prognostic Reliability Dashboard*
+*Reference: Campbell, J. (2015). Complete Casting Handbook. Butterworth-Heinemann.*
+"""
+    
+    return report
+
+
+def generate_scenario_comparison_report(part_id, scenarios, timestamp=None):
+    """
+    Generate a comparison report for multiple threshold scenarios.
+    
+    Parameters:
+    -----------
+    part_id : str/int
+        The part identifier
+    scenarios : list of dict
+        Each scenario contains: name, threshold, reliability, mtts, failures, scrap_risk
+    timestamp : datetime, optional
+        Report generation timestamp
+    
+    Returns:
+    --------
+    str : Markdown-formatted comparison report
+    """
+    if timestamp is None:
+        timestamp = datetime.now()
+    
+    report = f"""
+# 🏭 THRESHOLD SENSITIVITY ANALYSIS
+## Part: {part_id}
+**Generated:** {timestamp.strftime('%Y-%m-%d %H:%M')}
+
+---
+
+## 📊 SCENARIO COMPARISON
+
+| Scenario | Threshold | Scrap Risk | Reliability | MTTS (parts) | Failures | Assessment |
+|----------|-----------|------------|-------------|--------------|----------|------------|
+"""
+    
+    for scenario in scenarios:
+        if scenario['reliability'] >= 80:
+            assessment = "✅ Acceptable"
+        elif scenario['reliability'] >= 70:
+            assessment = "⚠️ Warning"
+        else:
+            assessment = "🔴 Critical"
+        
+        report += f"| {scenario['name']} | {scenario['threshold']:.2f}% | {scenario['scrap_risk']:.1f}% | {scenario['reliability']:.1f}% | {scenario['mtts']:,.0f} | {scenario['failures']:.0f} | {assessment} |\n"
+    
+    report += """
+---
+
+## 🎯 INTERPRETATION GUIDE
+
+**Understanding the Trade-offs:**
+
+- **Stricter Threshold (Lower %)**: More runs classified as "failures" → Lower MTTS → Lower Reliability
+  - *Use for:* Safety-critical parts, high-value castings, strict customer requirements
+  - *Trade-off:* Requires more aggressive process improvement to achieve targets
+
+- **Lenient Threshold (Higher %)**: Fewer runs classified as "failures" → Higher MTTS → Higher Reliability  
+  - *Use for:* General production, cost-sensitive orders, parts with inherent variability
+  - *Trade-off:* May mask opportunities for improvement
+
+---
+
+## 📋 RECOMMENDATION
+
+"""
+    
+    # Find the scenario closest to 80% reliability
+    best_scenario = min(scenarios, key=lambda x: abs(x['reliability'] - 80))
+    
+    report += f"""
+**Recommended Operating Point:** {best_scenario['name']} ({best_scenario['threshold']:.2f}% threshold)
+
+This threshold achieves {best_scenario['reliability']:.1f}% reliability, which is closest to the 
+industry-standard 80% target while being practically achievable.
+
+**Next Steps:**
+1. Adopt {best_scenario['threshold']:.2f}% as the working threshold for this part
+2. Use the Reliability Improvement Planner to identify defect reduction targets
+3. Generate an Action Plan with specific process improvements
+
+---
+
+*Generated by Foundry Prognostic Reliability Dashboard*
+"""
+    
+    return report
+
+
+# ================================================================
 # MAIN APPLICATION
 # ================================================================
 def main():
@@ -2278,6 +2594,9 @@ def main():
                             instance=instance,
                             num_features=10
                         )
+                    
+                    # Store LIME result in session state for action plan report
+                    st.session_state.lime_result = lime_result
                     
                     if lime_result['error'] is None:
                         lime_col1, lime_col2 = st.columns([1, 2])
@@ -2909,6 +3228,157 @@ def main():
                 - **Maintenance Threshold** → When to EXECUTE action (R < 70%)  
                 - **Failure Threshold** → Critical intervention required (R < 50%)
                 """)
+            
+            # ================================================================
+            # ACTION PLAN GENERATION
+            # ================================================================
+            st.markdown("---")
+            st.markdown("### 📄 Generate Action Plan Report")
+            st.caption("*Create a printable action plan based on your threshold and improvement targets*")
+            
+            # Prepare defect targets for report
+            defect_targets_for_report = []
+            for i, defect_info in enumerate(sorted_defects):
+                defect_col = defect_info['Defect_Code']
+                current_rate = defect_info['Historical Rate (%)']
+                target_rate = target_rates.get(defect_col, current_rate * 0.7)
+                
+                # Find process area
+                process_name = "Unknown"
+                for proc, info in PROCESS_DEFECT_MAP.items():
+                    if defect_col in info['defects']:
+                        process_name = proc
+                        break
+                
+                defect_targets_for_report.append({
+                    'defect_name': defect_info['Defect'],
+                    'defect_code': defect_col,
+                    'process': process_name,
+                    'current_rate': current_rate,
+                    'target_rate': target_rate,
+                    'estimated_reduction': estimated_failure_reductions.get(defect_col, 0)
+                })
+            
+            # Prepare LIME insights if available
+            lime_insights_for_report = []
+            if 'lime_result' in st.session_state and st.session_state.lime_result:
+                lime_result = st.session_state.lime_result
+                if lime_result.get('explanation'):
+                    for feature, weight in lime_result['explanation'][:10]:
+                        lime_insights_for_report.append({
+                            'feature': feature,
+                            'weight': weight,
+                            'direction': 'Increases Risk' if weight > 0 else 'Decreases Risk'
+                        })
+            
+            # Current and target state dictionaries
+            current_state_dict = {
+                'threshold': threshold_slider if 'threshold_slider' in dir() else part_threshold,
+                'reliability': current_reliability,
+                'mtts': current_mtts,
+                'failures': current_failures,
+                'scrap_rate': part_data['scrap_percent'].mean()
+            }
+            
+            target_state_dict = {
+                'threshold': threshold_slider if 'threshold_slider' in dir() else part_threshold,
+                'reliability': projected_reliability,
+                'mtts': projected_mtts,
+                'failures': projected_failures
+            }
+            
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                if st.button("📋 Generate Action Plan", key=f"gen_action_plan_{selected_part}", type="primary"):
+                    # Generate the report
+                    action_plan_report = generate_action_plan_report(
+                        part_id=selected_part,
+                        current_state=current_state_dict,
+                        target_state=target_state_dict,
+                        defect_targets=defect_targets_for_report,
+                        lime_insights=lime_insights_for_report
+                    )
+                    
+                    # Store in session state for download
+                    st.session_state[f'action_plan_{selected_part}'] = action_plan_report
+                    st.success("✅ Action Plan generated! Click download button below.")
+            
+            with col_btn2:
+                if st.button("📊 Generate Threshold Comparison", key=f"gen_comparison_{selected_part}"):
+                    # Generate scenarios at key thresholds
+                    scenarios = []
+                    test_thresholds = [
+                        (part_avg_sens * 0.5, "Aggressive (50% of avg)"),
+                        (part_avg_sens * 0.75, "Strict (75% of avg)"),
+                        (part_avg_sens, "Current Average"),
+                        (global_avg_sens, "Foundry Average"),
+                        (part_avg_sens * 1.25, "Lenient (+25%)")
+                    ]
+                    
+                    for thresh, name in test_thresholds:
+                        res = compute_single_threshold_metrics(part_data, thresh, order_qty)
+                        scenarios.append({
+                            'name': name,
+                            'threshold': thresh,
+                            'reliability': res['reliability'],
+                            'mtts': res['mtts_parts'],
+                            'failures': res['failure_count'],
+                            'scrap_risk': res['scrap_risk']
+                        })
+                    
+                    comparison_report = generate_scenario_comparison_report(
+                        part_id=selected_part,
+                        scenarios=scenarios
+                    )
+                    
+                    st.session_state[f'comparison_{selected_part}'] = comparison_report
+                    st.success("✅ Comparison Report generated! Click download button below.")
+            
+            # Download buttons
+            st.markdown("#### 📥 Download Reports")
+            
+            dl_col1, dl_col2 = st.columns(2)
+            
+            with dl_col1:
+                if f'action_plan_{selected_part}' in st.session_state:
+                    st.download_button(
+                        label="⬇️ Download Action Plan (.md)",
+                        data=st.session_state[f'action_plan_{selected_part}'],
+                        file_name=f"action_plan_part_{selected_part}_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown",
+                        key=f"dl_action_{selected_part}"
+                    )
+                else:
+                    st.caption("*Generate an action plan first*")
+            
+            with dl_col2:
+                if f'comparison_{selected_part}' in st.session_state:
+                    st.download_button(
+                        label="⬇️ Download Threshold Comparison (.md)",
+                        data=st.session_state[f'comparison_{selected_part}'],
+                        file_name=f"threshold_comparison_part_{selected_part}_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown",
+                        key=f"dl_comparison_{selected_part}"
+                    )
+                else:
+                    st.caption("*Generate a comparison first*")
+            
+            # Preview section
+            with st.expander("👁️ Preview Generated Reports"):
+                preview_tab1, preview_tab2 = st.tabs(["Action Plan", "Threshold Comparison"])
+                
+                with preview_tab1:
+                    if f'action_plan_{selected_part}' in st.session_state:
+                        st.markdown(st.session_state[f'action_plan_{selected_part}'])
+                    else:
+                        st.info("Click 'Generate Action Plan' to create a report.")
+                
+                with preview_tab2:
+                    if f'comparison_{selected_part}' in st.session_state:
+                        st.markdown(st.session_state[f'comparison_{selected_part}'])
+                    else:
+                        st.info("Click 'Generate Threshold Comparison' to create a report.")
         
         else:
             st.warning("Insufficient defect data available for this part to generate improvement recommendations.")
