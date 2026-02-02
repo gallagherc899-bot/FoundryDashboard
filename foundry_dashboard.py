@@ -1689,19 +1689,45 @@ def explain_prediction_lime(model, X_train, feature_names, instance, num_feature
         explanation_list = exp.as_list()
         
         # Get intercept (base prediction from local model)
-        if hasattr(exp, 'intercept') and len(exp.intercept) > 1:
-            intercept = float(exp.intercept[1])
-        elif hasattr(exp, 'intercept'):
-            intercept = float(exp.intercept[0]) if len(exp.intercept) > 0 else 0.0
-        else:
-            intercept = 0.0
+        # NOTE: exp.intercept is a DICTIONARY keyed by class label, not a list/array
+        # For binary classification explaining class 1 (Scrap), structure is {1: value}
+        intercept = 0.0
+        if hasattr(exp, 'intercept') and exp.intercept:
+            if isinstance(exp.intercept, dict):
+                # LIME returns intercept as dict keyed by class label
+                # Prefer class 1 (Scrap) intercept, fall back to any available
+                if 1 in exp.intercept:
+                    intercept = float(exp.intercept[1])
+                elif exp.intercept:
+                    # Use first available value if class 1 not present
+                    intercept = float(list(exp.intercept.values())[0])
+            else:
+                # Fallback for unexpected format (array-like)
+                try:
+                    intercept = float(exp.intercept[1]) if len(exp.intercept) > 1 else float(exp.intercept[0])
+                except (IndexError, KeyError, TypeError):
+                    intercept = 0.0
+        
+        # Get local prediction value safely
+        local_pred_value = None
+        if hasattr(exp, 'local_pred'):
+            try:
+                if isinstance(exp.local_pred, dict):
+                    # Handle dict format (keyed by class label)
+                    local_pred_value = float(exp.local_pred.get(1, list(exp.local_pred.values())[0]))
+                elif hasattr(exp.local_pred, '__len__') and len(exp.local_pred) > 0:
+                    local_pred_value = float(exp.local_pred[0])
+                else:
+                    local_pred_value = float(exp.local_pred)
+            except (IndexError, KeyError, TypeError, ValueError):
+                local_pred_value = None
         
         return {
             'explanation': explanation_list,
             'prediction': pred_class,
             'prediction_proba': float(proba[1]),  # Probability of scrap (class 1)
             'intercept': intercept,
-            'local_pred': float(exp.local_pred[0]) if hasattr(exp, 'local_pred') and len(exp.local_pred) > 0 else None,
+            'local_pred': local_pred_value,
             'error': None
         }
         
