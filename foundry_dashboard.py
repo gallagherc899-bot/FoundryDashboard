@@ -2362,9 +2362,43 @@ def main():
         default_threshold = pooled_result.get('effective_threshold', part_threshold)
         max_scrap = float(analysis_df['scrap_percent'].max()) if len(analysis_df) > 0 else 50.0
         
+        # DOE/EPA benchmark quick-set buttons (10% and 20% relative reduction)
+        reduction_10 = round(part_threshold * 0.90 * 2) / 2  # Round to nearest 0.5
+        reduction_20 = round(part_threshold * 0.80 * 2) / 2  # Round to nearest 0.5
+        
+        # Initialize session state for slider if not set or out of bounds for current part
+        slider_max = max(max_scrap, default_threshold + 1.0)
+        if 'unified_threshold_slider' not in st.session_state:
+            st.session_state.unified_threshold_slider = min(default_threshold, max_scrap)
+        elif st.session_state.unified_threshold_slider > slider_max:
+            st.session_state.unified_threshold_slider = min(default_threshold, max_scrap)
+        
         st.markdown("#### ⚙️ Scrap Exceedance Threshold")
         st.caption("*Adjust to redefine what counts as a 'failure.' This threshold drives the Failure-Conditional "
                    "Defect Pareto, Root Cause Diagnosis, and Scrap Threshold Sensitivity Analysis below.*")
+        
+        # Quick-set buttons row
+        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns([1.5, 1.5, 1.5, 1.5])
+        with btn_col1:
+            st.caption(f"Part Avg: **{part_threshold:.2f}%**")
+        with btn_col2:
+            if st.button(f"📉 10% Reduction → {reduction_10:.1f}%", 
+                        key="btn_10pct",
+                        help=f"DOE lower bound: 10% relative reduction from {part_threshold:.2f}% avg scrap"):
+                st.session_state.unified_threshold_slider = max(0.5, reduction_10)
+                st.rerun()
+        with btn_col3:
+            if st.button(f"📉 20% Reduction → {reduction_20:.1f}%",
+                        key="btn_20pct", 
+                        help=f"DOE upper bound: 20% relative reduction from {part_threshold:.2f}% avg scrap"):
+                st.session_state.unified_threshold_slider = max(0.5, reduction_20)
+                st.rerun()
+        with btn_col4:
+            if st.button(f"🔄 Reset to Part Avg",
+                        key="btn_reset_threshold",
+                        help=f"Reset to part-specific average: {part_threshold:.2f}%"):
+                st.session_state.unified_threshold_slider = min(default_threshold, max_scrap)
+                st.rerun()
         
         threshold_col1, threshold_col2, threshold_col3 = st.columns([2, 1, 1])
         with threshold_col1:
@@ -2372,7 +2406,6 @@ def main():
                 "🎚️ Scrap % Threshold (Failure Definition)",
                 min_value=0.5,
                 max_value=max(max_scrap, default_threshold + 1.0),
-                value=min(default_threshold, max_scrap),
                 step=0.5,
                 key="unified_threshold_slider",
                 help="Runs with scrap above this threshold are treated as 'failure events' — affects Pareto, reliability metrics, and sensitivity analysis"
@@ -3026,11 +3059,22 @@ def main():
         # Reliability Metrics Snapshot
         st.markdown("---")
         st.markdown("### 📋 Reliability Metrics Snapshot")
+        st.info(f"📍 **Using threshold: {unified_threshold:.1f}%** (set via the Scrap Exceedance Threshold slider above)")
         
-        # Use MTTS (parts) for reliability calculations at different order sizes
-        mtts_parts_val = pooled_result.get('mtts_parts', mtts_parts)
-        if mtts_parts_val is None or mtts_parts_val == 0:
-            mtts_parts_val = mtts_parts
+        # Recalculate MTTS based on unified threshold
+        snapshot_part_data = part_data.sort_values('week_ending').copy() if 'week_ending' in part_data.columns else part_data.copy()
+        snapshot_total_parts = int(snapshot_part_data['order_quantity'].sum()) if 'order_quantity' in snapshot_part_data.columns else len(snapshot_part_data)
+        snapshot_total_runs = len(snapshot_part_data)
+        snapshot_failures = int((snapshot_part_data['scrap_percent'] > unified_threshold).sum())
+        
+        if snapshot_failures > 0:
+            snapshot_mtts_parts = snapshot_total_parts / snapshot_failures
+            snapshot_mtts_runs = snapshot_total_runs / snapshot_failures
+        else:
+            snapshot_mtts_parts = snapshot_total_parts * 2
+            snapshot_mtts_runs = snapshot_total_runs * 2
+        
+        mtts_parts_val = snapshot_mtts_parts
         
         # Calculate reliability at different order quantities (in parts)
         rel_100 = np.exp(-100 / mtts_parts_val) if mtts_parts_val > 0 else 0
@@ -3043,21 +3087,21 @@ def main():
         r10.metric("R(1000 parts)", f"{rel_1000*100:.1f}%")
         
         # Prepare values for table
-        mtts_runs_display = f"{pooled_result['mtts_runs']:.1f}" if pooled_result['mtts_runs'] else "N/A"
-        mtts_parts_display = f"{mtts_parts_val:,.0f}" if mtts_parts_val else "N/A"
+        mtts_runs_display = f"{snapshot_mtts_runs:.1f}"
+        mtts_parts_display = f"{mtts_parts_val:,.0f}"
         lambda_display = f"{1/mtts_parts_val:.6f}" if mtts_parts_val > 0 else "0"
-        total_parts_display = f"{pooled_result.get('total_parts_produced', 0):,}"
-        total_runs_display = f"{pooled_result.get('pooled_n', 0):,}"
+        total_parts_display = f"{snapshot_total_parts:,}"
+        total_runs_display = f"{snapshot_total_runs:,}"
         data_source = f"Pooled ({pooled_result['pooled_n']} records)" if pooled_result['pooling_used'] else f"Part-level ({pooled_result.get('part_level_n', 0)} records)"
         
         st.markdown(f"""
         | Metric | Value | Formula |
         |--------|-------|---------|
-        | **MTTS (parts)** | **{mtts_parts_display}** | Total Parts ({total_parts_display}) ÷ Failures ({pooled_result['failure_count']}) |
-        | MTTS (runs) | {mtts_runs_display} | Total Runs ({total_runs_display}) ÷ Failures ({pooled_result['failure_count']}) |
+        | **MTTS (parts)** | **{mtts_parts_display}** | Total Parts ({total_parts_display}) ÷ Failures ({snapshot_failures}) |
+        | MTTS (runs) | {mtts_runs_display} | Total Runs ({total_runs_display}) ÷ Failures ({snapshot_failures}) |
         | λ (failure rate) | {lambda_display} | 1 ÷ MTTS (parts) |
-        | Failures observed | {pooled_result['failure_count']} | Runs where Scrap % > {part_threshold:.2f}% (part avg) |
-        | **Threshold used** | **{part_threshold:.2f}%** | **Part-specific average scrap rate** |
+        | Failures observed | {snapshot_failures} | Runs where Scrap % > {unified_threshold:.2f}% |
+        | **Threshold used** | **{unified_threshold:.2f}%** | **Unified scrap exceedance threshold** |
         | Data source | {data_source} | |
         """)
         
@@ -3077,15 +3121,15 @@ def main():
         
         # Use defect_data that was already computed earlier
         # This contains: Defect, Defect_Code, Historical Rate (%), Failure Rate (%), Risk Multiplier, Expected Count
-        if defect_data and pooled_result['failure_count'] > 0:
+        if defect_data and snapshot_failures > 0:
             # Get top 5 defects
             sorted_defects = sorted(defect_data, key=lambda x: x['Historical Rate (%)'], reverse=True)[:5]
             
-            # Current state calculations
-            current_failures = pooled_result['failure_count']
-            total_parts_produced = pooled_result.get('total_parts_produced', mtts_parts * current_failures)
+            # Current state calculations using threshold-adjusted values
+            current_failures = snapshot_failures
+            total_parts_produced = snapshot_total_parts
             current_mtts = mtts_parts_val if mtts_parts_val > 0 else 1000
-            current_reliability = reliability * 100
+            current_reliability = np.exp(-order_qty / current_mtts) * 100 if current_mtts > 0 else 0
             
             # Calculate what portion of failures each defect contributes
             total_defect_rate = sum(d['Historical Rate (%)'] for d in sorted_defects)
