@@ -2345,6 +2345,11 @@ def main():
         # ================================================================
         # DETAILED DEFECT ANALYSIS
         # ================================================================
+        # Historical Pareto: P(defect_rate | all runs)
+        # Failure Pareto:    P(defect_rate | scrap > threshold)
+        # The difference reveals which defects are disproportionately present
+        # during failure events — the assignable causes driving scrap.
+        # ================================================================
         st.markdown("### 📊 Detailed Defect Analysis")
         
         # Get data for analysis (use pooled parts if pooling was applied)
@@ -2353,30 +2358,49 @@ def main():
         else:
             analysis_df = df[df['part_id'] == selected_part]
         
-        # Compute defect rates
+        # Get effective threshold for conditional probability calculation
+        effective_threshold = pooled_result.get('effective_threshold', part_threshold)
+        
+        # Split into all runs vs. failure runs (runs exceeding threshold)
+        failure_df = analysis_df[analysis_df['scrap_percent'] > effective_threshold]
+        n_failures = len(failure_df)
+        n_total = len(analysis_df)
+        
+        # Compute defect rates: historical (all runs) vs. failure-conditional
         defect_data = []
         for col in defect_cols:
             if col in analysis_df.columns:
                 hist_rate = analysis_df[col].mean() * 100
                 if hist_rate > 0:
                     defect_name = col.replace('_rate', '').replace('_', ' ').title()
+                    # Conditional rate: average defect rate during failure runs only
+                    if n_failures > 0:
+                        failure_rate = failure_df[col].mean() * 100
+                    else:
+                        failure_rate = hist_rate  # No failures: fall back to historical
+                    
+                    # Risk multiplier: how much more prevalent is this defect during failures?
+                    risk_multiplier = failure_rate / hist_rate if hist_rate > 0 else 1.0
+                    
                     defect_data.append({
                         'Defect': defect_name,
                         'Defect_Code': col,
                         'Historical Rate (%)': hist_rate,
-                        'Predicted Rate (%)': hist_rate,  # Using historical as proxy
+                        'Failure Rate (%)': failure_rate,
+                        'Risk Multiplier': risk_multiplier,
                         'Expected Count': hist_rate / 100 * order_qty
                     })
         
         if defect_data:
-            defect_df = pd.DataFrame(defect_data).sort_values('Historical Rate (%)', ascending=False)
+            defect_df = pd.DataFrame(defect_data)
             
             # Pareto Charts side by side
             pareto_col1, pareto_col2 = st.columns(2)
             
             with pareto_col1:
                 st.markdown("#### 📊 Historical Defect Pareto")
-                hist_data = defect_df.head(10).copy()
+                st.caption(f"*Average defect rates across ALL {n_total} runs*")
+                hist_data = defect_df.sort_values('Historical Rate (%)', ascending=False).head(10).copy()
                 
                 # Create Pareto chart
                 total = hist_data['Historical Rate (%)'].sum()
@@ -2398,7 +2422,7 @@ def main():
                     mode='lines+markers'
                 ))
                 fig_hist.update_layout(
-                    title="Top 10 Historical Defects",
+                    title="Top 10 Historical Defects (All Runs)",
                     xaxis=dict(tickangle=-45),
                     yaxis=dict(title='Rate (%)', side='left'),
                     yaxis2=dict(title='Cumulative %', side='right', overlaying='y', range=[0, 105]),
@@ -2409,18 +2433,38 @@ def main():
                 st.plotly_chart(fig_hist, use_container_width=True)
             
             with pareto_col2:
-                st.markdown("#### 🔮 Predicted Defect Pareto")
-                pred_data = defect_df.head(10).copy()
+                st.markdown("#### 🔮 Failure-Conditional Defect Pareto")
+                if n_failures > 0:
+                    st.caption(f"*Average defect rates during {n_failures} failure runs (scrap > {effective_threshold:.1f}%)*")
+                else:
+                    st.caption(f"*No failure runs above {effective_threshold:.1f}% threshold — showing historical rates*")
                 
-                total_pred = pred_data['Predicted Rate (%)'].sum()
-                pred_data['Cumulative %'] = (pred_data['Predicted Rate (%)'].cumsum() / total_pred * 100) if total_pred > 0 else 0
+                # Sort by FAILURE rate — Pareto order may differ from historical
+                pred_data = defect_df.sort_values('Failure Rate (%)', ascending=False).head(10).copy()
+                
+                total_pred = pred_data['Failure Rate (%)'].sum()
+                pred_data['Cumulative %'] = (pred_data['Failure Rate (%)'].cumsum() / total_pred * 100) if total_pred > 0 else 0
+                
+                # Color bars by risk multiplier: red if elevated during failures, gray if same/lower
+                bar_colors = []
+                for _, row in pred_data.iterrows():
+                    if row['Risk Multiplier'] > 1.5:
+                        bar_colors.append('#C62828')   # Dark red — strongly elevated during failures
+                    elif row['Risk Multiplier'] > 1.1:
+                        bar_colors.append('#E53935')   # Red — moderately elevated
+                    elif row['Risk Multiplier'] > 0.9:
+                        bar_colors.append('#FF8A65')   # Orange — similar to historical
+                    else:
+                        bar_colors.append('#66BB6A')   # Green — lower during failures
                 
                 fig_pred = go.Figure()
                 fig_pred.add_trace(go.Bar(
                     x=pred_data['Defect'],
-                    y=pred_data['Predicted Rate (%)'],
-                    name='Rate (%)',
-                    marker_color='#E53935'
+                    y=pred_data['Failure Rate (%)'],
+                    name='Failure Rate (%)',
+                    marker_color=bar_colors,
+                    text=[f"{m:.1f}×" for m in pred_data['Risk Multiplier']],
+                    textposition='outside'
                 ))
                 fig_pred.add_trace(go.Scatter(
                     x=pred_data['Defect'],
@@ -2431,15 +2475,25 @@ def main():
                     mode='lines+markers'
                 ))
                 fig_pred.update_layout(
-                    title="Top 10 Predicted Defects",
+                    title="Top 10 Defects During Failure Events",
                     xaxis=dict(tickangle=-45),
-                    yaxis=dict(title='Rate (%)', side='left'),
+                    yaxis=dict(title='Failure Rate (%)', side='left'),
                     yaxis2=dict(title='Cumulative %', side='right', overlaying='y', range=[0, 105]),
                     height=400,
                     showlegend=True,
                     legend=dict(x=0.7, y=1)
                 )
                 st.plotly_chart(fig_pred, use_container_width=True)
+            
+            # Risk multiplier insight callout
+            if n_failures > 0:
+                top_risk = defect_df.sort_values('Risk Multiplier', ascending=False).head(3)
+                elevated = top_risk[top_risk['Risk Multiplier'] > 1.1]
+                if len(elevated) > 0:
+                    risk_items = [f"**{row['Defect']}** ({row['Risk Multiplier']:.1f}× historical)" for _, row in elevated.iterrows()]
+                    st.info(f"⚠️ **Defects disproportionately elevated during failure events:** {', '.join(risk_items)}. "
+                           f"These defects are more prevalent when scrap exceeds {effective_threshold:.1f}% than during normal production, "
+                           f"indicating assignable causes for targeted intervention.")
         
         st.markdown("---")
         
@@ -2529,6 +2583,8 @@ def main():
                         mapping_data.append({
                             'Defect': d['Defect'],
                             'Historical Rate (%)': f"{d['Historical Rate (%)']:.2f}",
+                            'Failure Rate (%)': f"{d['Failure Rate (%)']:.2f}",
+                            'Risk Multiplier': f"{d['Risk Multiplier']:.1f}×",
                             'Risk Share (%)': f"{risk_share:.2f}",
                             'Expected Count': f"{d['Expected Count']:.1f}",
                             'Root Cause Process(es)': ', '.join(related_processes) if related_processes else 'Unknown'
@@ -3005,8 +3061,8 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Use defect_data that was already computed earlier (around line 1828)
-        # This contains: Defect, Defect_Code, Historical Rate (%), Predicted Rate (%), Expected Count
+        # Use defect_data that was already computed earlier
+        # This contains: Defect, Defect_Code, Historical Rate (%), Failure Rate (%), Risk Multiplier, Expected Count
         if defect_data and pooled_result['failure_count'] > 0:
             # Get top 5 defects
             sorted_defects = sorted(defect_data, key=lambda x: x['Historical Rate (%)'], reverse=True)[:5]
