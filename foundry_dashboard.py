@@ -2358,13 +2358,35 @@ def main():
         else:
             analysis_df = df[df['part_id'] == selected_part]
         
-        # Get effective threshold for conditional probability calculation
-        effective_threshold = pooled_result.get('effective_threshold', part_threshold)
+        # User-adjustable threshold for failure-conditional Pareto
+        default_threshold = pooled_result.get('effective_threshold', part_threshold)
+        max_scrap = float(analysis_df['scrap_percent'].max()) if len(analysis_df) > 0 else 50.0
         
-        # Split into all runs vs. failure runs (runs exceeding threshold)
-        failure_df = analysis_df[analysis_df['scrap_percent'] > effective_threshold]
+        st.markdown("#### ⚙️ Scrap Exceedance Threshold")
+        st.caption("*Adjust to see which defects dominate at different scrap targets. "
+                   "Lower thresholds include more runs as 'failures,' revealing subtler defect patterns.*")
+        
+        threshold_col1, threshold_col2, threshold_col3 = st.columns([2, 1, 1])
+        with threshold_col1:
+            pareto_threshold = st.slider(
+                "Failure threshold (%)",
+                min_value=0.5,
+                max_value=max(max_scrap, default_threshold + 1.0),
+                value=min(default_threshold, max_scrap),
+                step=0.5,
+                key="pareto_threshold_slider",
+                help="Runs with scrap above this threshold are treated as 'failure events' for the right Pareto chart"
+            )
+        
+        # Count runs at this threshold
+        failure_df = analysis_df[analysis_df['scrap_percent'] > pareto_threshold]
         n_failures = len(failure_df)
         n_total = len(analysis_df)
+        
+        with threshold_col2:
+            st.metric("Failure Runs", f"{n_failures} of {n_total}")
+        with threshold_col3:
+            st.metric("Failure Rate", f"{n_failures/n_total*100:.0f}%" if n_total > 0 else "0%")
         
         # Compute defect rates: historical (all runs) vs. failure-conditional
         defect_data = []
@@ -2435,9 +2457,9 @@ def main():
             with pareto_col2:
                 st.markdown("#### 🔮 Failure-Conditional Defect Pareto")
                 if n_failures > 0:
-                    st.caption(f"*Average defect rates during {n_failures} failure runs (scrap > {effective_threshold:.1f}%)*")
+                    st.caption(f"*Average defect rates during {n_failures} failure runs (scrap > {pareto_threshold:.1f}%)*")
                 else:
-                    st.caption(f"*No failure runs above {effective_threshold:.1f}% threshold — showing historical rates*")
+                    st.caption(f"*No failure runs above {pareto_threshold:.1f}% threshold — showing historical rates*")
                 
                 # Sort by FAILURE rate — Pareto order may differ from historical
                 pred_data = defect_df.sort_values('Failure Rate (%)', ascending=False).head(10).copy()
@@ -2492,7 +2514,7 @@ def main():
                 if len(elevated) > 0:
                     risk_items = [f"**{row['Defect']}** ({row['Risk Multiplier']:.1f}× historical)" for _, row in elevated.iterrows()]
                     st.info(f"⚠️ **Defects disproportionately elevated during failure events:** {', '.join(risk_items)}. "
-                           f"These defects are more prevalent when scrap exceeds {effective_threshold:.1f}% than during normal production, "
+                           f"These defects are more prevalent when scrap exceeds {pareto_threshold:.1f}% than during normal production, "
                            f"indicating assignable causes for targeted intervention.")
         
         st.markdown("---")
