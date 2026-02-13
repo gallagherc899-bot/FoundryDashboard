@@ -2648,8 +2648,31 @@ def main():
         # ================================================================
         st.markdown("### 🏭 Root Cause Process Diagnosis")
         st.caption("*Based on Campbell (2003) process-defect relationships*")
+        st.info(f"📍 **Using threshold: {unified_threshold:.1f}%** — Process contributions computed from "
+                f"**{n_failures} failure runs** (scrap > {unified_threshold:.1f}%), not historical averages.")
         
-        process_ranking, top_defects = diagnose_processes(df, selected_part, defect_cols)
+        # Compute process contributions from FAILURE-CONDITIONAL defect rates
+        # (driven by unified threshold slider, not historical averages)
+        if n_failures > 0 and defect_data:
+            # Use failure rates from the already-computed defect_data
+            failure_defect_rates = {d['Defect_Code']: d['Failure Rate (%)'] / 100 for d in defect_data}
+        else:
+            # Fallback to historical if no failures
+            failure_defect_rates = {d['Defect_Code']: d['Historical Rate (%)'] / 100 for d in defect_data} if defect_data else {}
+        
+        # Compute process scores from failure-conditional rates
+        process_scores = {}
+        for process, info in PROCESS_DEFECT_MAP.items():
+            score = sum(failure_defect_rates.get(d, 0) for d in info['defects'])
+            process_scores[process] = score
+        
+        total_score = sum(process_scores.values())
+        if total_score > 0:
+            process_contributions = {p: (s / total_score) * 100 for p, s in process_scores.items()}
+        else:
+            process_contributions = {p: 0 for p in process_scores}
+        
+        process_ranking = sorted(process_contributions.items(), key=lambda x: x[1], reverse=True)
         
         if process_ranking:
             # Process contribution chart
@@ -2678,7 +2701,7 @@ def main():
                                      '#00796B', '#5D4037', '#455A64', '#C2185B'][:len(process_data)]
                     ))
                     fig_process.update_layout(
-                        title="Process Contributions to Predicted Defects",
+                        title=f"Process Contributions During Failure Events (scrap > {unified_threshold:.1f}%)",
                         xaxis_title="Process",
                         yaxis_title="Contribution (%)",
                         height=350,
