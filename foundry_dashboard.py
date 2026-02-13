@@ -2167,6 +2167,78 @@ def main():
     Features: {len(global_model['features'])} (including inherited: global_scrap_probability, defect_cluster_probability)
     """)
     
+    # ================================================================
+    # VITAL FEW — "MOST WANTED" PARTS
+    # ================================================================
+    # Compute vital few: top scrap-producing parts sorted by total scrap weight
+    foundry_avg_scrap = df['scrap_percent'].mean()
+    
+    # Find the scrap weight column (handles parentheses variants)
+    scrap_weight_col = None
+    for col_name in ['total_scrap_weight_lbs', 'total_scrap_weight_(lbs)']:
+        if col_name in df.columns:
+            scrap_weight_col = col_name
+            break
+    
+    # Find pieces scrapped column
+    pieces_scrapped_col = 'pieces_scrapped' if 'pieces_scrapped' in df.columns else None
+    
+    if scrap_weight_col and pieces_scrapped_col:
+        vital_few_parts = df.groupby('part_id').agg(
+            runs=('scrap_percent', 'count'),
+            avg_scrap=('scrap_percent', 'mean'),
+            total_scrapped=(pieces_scrapped_col, 'sum'),
+            total_scrap_weight=(scrap_weight_col, 'sum'),
+            total_produced=('order_quantity', 'sum')
+        ).reset_index()
+    else:
+        # Fallback: estimate weight from pieces_scrapped * piece_weight
+        vital_few_parts = df.groupby('part_id').agg(
+            runs=('scrap_percent', 'count'),
+            avg_scrap=('scrap_percent', 'mean'),
+            total_produced=('order_quantity', 'sum')
+        ).reset_index()
+        vital_few_parts['total_scrapped'] = 0
+        vital_few_parts['total_scrap_weight'] = 0
+    
+    # Rank by total scrap weight descending
+    vital_few_parts = vital_few_parts.sort_values('total_scrap_weight', ascending=False).reset_index(drop=True)
+    vital_few_parts['cumul_weight'] = vital_few_parts['total_scrap_weight'].cumsum()
+    total_scrap_weight_all = vital_few_parts['total_scrap_weight'].sum()
+    vital_few_parts['cumul_pct'] = vital_few_parts['cumul_weight'] / total_scrap_weight_all * 100
+    
+    # Top 20 by scrap weight = "Most Wanted"
+    most_wanted_df = vital_few_parts.head(20)
+    most_wanted_ids = set(most_wanted_df['part_id'].values)
+    
+    # Pareto 80% threshold
+    pareto_80_df = vital_few_parts[vital_few_parts['cumul_pct'] <= 80]
+    n_pareto_80 = len(pareto_80_df) + 1  # +1 for the part that crosses 80%
+    
+    with st.expander(f"🎯 **VITAL FEW — Top 20 Most-Wanted Parts** (account for {most_wanted_df['total_scrap_weight'].sum()/total_scrap_weight_all*100:.0f}% of total scrap weight)", expanded=False):
+        st.markdown(f"""
+        **Pareto Analysis:** {n_pareto_80} parts ({n_pareto_80/len(vital_few_parts)*100:.0f}% of all parts) 
+        produce 80% of total scrap weight. The top 20 parts below represent the highest-impact 
+        intervention targets — these are where process improvements will most reduce foundry-wide 
+        energy waste and material costs.
+        
+        *Foundry average scrap rate: {foundry_avg_scrap:.2f}% | DOE 10% target: {foundry_avg_scrap*0.90:.2f}% | DOE 20% target: {foundry_avg_scrap*0.80:.2f}%*
+        """)
+        
+        mw_display = []
+        for i, (_, row) in enumerate(most_wanted_df.iterrows()):
+            mw_display.append({
+                'Rank': f"#{i+1}",
+                'Part ID': int(row['part_id']),
+                'Runs': int(row['runs']),
+                'Avg Scrap %': f"{row['avg_scrap']:.2f}%",
+                'Total Scrapped (pcs)': f"{int(row['total_scrapped']):,}",
+                'Total Scrap Weight (lbs)': f"{row['total_scrap_weight']:,.0f}",
+                'Cumul % of Total': f"{row['cumul_pct']:.1f}%"
+            })
+        
+        st.dataframe(pd.DataFrame(mw_display), use_container_width=True, hide_index=True)
+    
     # Part selection
     part_ids = sorted(df["part_id"].unique())
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -2207,6 +2279,29 @@ def main():
             <strong>Part-Specific Threshold:</strong> {part_threshold:.2f}% (Part {selected_part}'s average scrap rate)
         </div>
         """, unsafe_allow_html=True)
+        
+        # ---- MOST WANTED ALERT ----
+        if selected_part in most_wanted_ids:
+            # Get this part's rank and stats
+            mw_row = most_wanted_df[most_wanted_df['part_id'] == selected_part].iloc[0]
+            mw_rank = most_wanted_df.index[most_wanted_df['part_id'] == selected_part][0] + 1
+            pct_of_total = mw_row['total_scrap_weight'] / total_scrap_weight_all * 100
+            
+            st.markdown(f"""
+            <div style="background: #FFEBEE; border-left: 4px solid #D32F2F; padding: 15px; border-radius: 4px; margin: 10px 0;">
+                <strong>🚨 VITAL FEW — Most Wanted #{mw_rank} of 20</strong><br><br>
+                Part {selected_part} is ranked <strong>#{mw_rank}</strong> in total scrap weight contribution 
+                ({mw_row['total_scrap_weight']:,.0f} lbs, <strong>{pct_of_total:.1f}%</strong> of foundry total). 
+                With {int(mw_row['runs'])} production runs and {mw_row['avg_scrap']:.2f}% average scrap, 
+                this part represents a <strong>high-impact intervention target</strong>.<br><br>
+                <strong>Focus areas:</strong> Use the Failure-Conditional Pareto below to identify which defects 
+                are elevated during high-scrap events, the Root Cause Process Diagnosis to trace defects to 
+                Campbell's originating processes, and LIME to validate which features drive the model's 
+                prediction. A 10% improvement in this part's scrap rate across future runs would save an 
+                estimated <strong>{mw_row['total_scrap_weight'] * 0.10 / mw_row['runs']:,.0f} lbs per run</strong> — 
+                compounding with each production cycle.
+            </div>
+            """, unsafe_allow_html=True)
         
         # Get pooled prediction for this part using PART-SPECIFIC threshold
         pooled_result = compute_pooled_prediction(df, selected_part, part_threshold)
@@ -2279,6 +2374,57 @@ def main():
             | Records | {pooled_result['part_level_n']} |
             | Confidence Level | {pooled_result['confidence']} |
             """)
+        
+        # ================================================================
+        # LOW-SCRAP PART NOTIFICATION & POOLING MISMATCH WARNING
+        # ================================================================
+        effective_threshold_check = pooled_result.get('effective_threshold', part_threshold)
+        pooling_used = pooled_result.get('pooling_used', False)
+        
+        # Check 1: Part is already at or below 1% scrap (gold standard)
+        if part_threshold <= 1.0:
+            total_parts_for_part = part_data['order_quantity'].sum()
+            n_runs = len(part_data)
+            st.markdown(f"""
+            <div style="background: #E8F5E9; border-left: 4px solid #4CAF50; padding: 15px; border-radius: 4px; margin: 10px 0;">
+                <strong>✅ Low-Scrap Part — Not a Priority for Intervention</strong><br><br>
+                Part {selected_part} averages <strong>{part_threshold:.2f}% scrap</strong> across 
+                {n_runs} run{'s' if n_runs != 1 else ''} ({total_parts_for_part:,.0f} parts produced). 
+                This is {'at or below' if part_threshold <= 0.5 else 'near'} the DOE 0.5% reduction target.<br><br>
+                Until the majority of parts are below 1% scrap, this part is <strong>not driving costs 
+                due to wasted energy and material</strong>. Improvement efforts should focus on the vital few 
+                parts with scrap rates above the foundry average ({df['scrap_percent'].mean():.2f}%), 
+                which account for the majority of total scrap weight.<br><br>
+                <em>That said, the analysis below still identifies areas where this part's process 
+                could be further refined. Results should be interpreted as optimization opportunities, 
+                not urgent interventions.</em>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Check 2: Pooling inflated the threshold — part's own rate is much lower than pooled rate
+        if pooling_used:
+            pooled_avg_check = pooled_result.get('pooled_avg_scrap', 0)
+            if part_threshold < pooled_avg_check and pooled_avg_check > 0:
+                ratio = pooled_avg_check / part_threshold if part_threshold > 0 else float('inf')
+                if ratio > 1.5:  # Pooled average is 50%+ higher than part's own average
+                    st.markdown(f"""
+                    <div style="background: #FFF3E0; border-left: 4px solid #FF9800; padding: 15px; border-radius: 4px; margin: 10px 0;">
+                        <strong>⚠️ Pooling Context — Use Judgment When Interpreting Results</strong><br><br>
+                        Part {selected_part}'s own average scrap rate is <strong>{part_threshold:.2f}%</strong>, 
+                        but insufficient data ({pooled_result.get('part_level_n', 0)} runs) required pooling with 
+                        similar-weight parts. The pooled population has an average scrap rate of 
+                        <strong>{pooled_avg_check:.2f}%</strong> — 
+                        <strong>{ratio:.1f}× higher</strong> than this part's history.<br><br>
+                        The effective threshold ({effective_threshold_check:.2f}%) and failure population 
+                        are derived from the pooled data and <strong>may not reflect this specific part's 
+                        actual defect patterns</strong>. The elevated scrap rates in the pooled population 
+                        are driven by other parts with similar weight but different process characteristics.<br><br>
+                        <strong>Recommendation:</strong> Consider the Pareto analysis and process diagnosis below 
+                        as indicative of general risk factors for parts in this weight class, not as a specific 
+                        diagnosis for Part {selected_part}. As more production runs accumulate for this part, 
+                        the dashboard will transition to part-specific analysis with higher confidence.
+                    </div>
+                    """, unsafe_allow_html=True)
         
         # Default order quantity to part's historical average
         avg_order_for_part = df[df['part_id'] == selected_part]['order_quantity'].mean()
