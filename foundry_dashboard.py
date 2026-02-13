@@ -2250,7 +2250,13 @@ def main():
             | Confidence Level | {pooled_result['confidence']} |
             """)
         
-        order_qty = st.slider("Order Quantity (parts)", 1, 5000, 100)
+        # Default order quantity to part's historical average
+        avg_order_for_part = df[df['part_id'] == selected_part]['order_quantity'].mean()
+        if pd.isna(avg_order_for_part) or avg_order_for_part < 1:
+            avg_order_for_part = 100
+        default_order_qty = int(min(5000, max(1, round(avg_order_for_part))))
+        
+        order_qty = st.slider("Order Quantity (parts)", 1, 5000, default_order_qty)
         
         # Use pooled MTTS (parts) if available - this is the CORRECTED calculation
         if pooled_result.get('mtts_parts') is not None:
