@@ -135,7 +135,6 @@ st.set_page_config(
 # ================================================================
 RANDOM_STATE = 42
 DEFAULT_CSV_PATH = "anonymized_parts.csv"
-DEFAULT_MTTR = 1.0
 WEIGHT_TOLERANCE = 0.10
 N_ESTIMATORS = 180
 MIN_SAMPLES_LEAF = 5
@@ -2281,13 +2280,6 @@ def main():
         reliability = np.exp(-order_qty / mtts_parts) if mtts_parts > 0 else 0
         scrap_risk = 1 - reliability
         
-        # Availability calculation
-        avg_order_qty = df[df['part_id'] == selected_part]['order_quantity'].mean()
-        if pd.isna(avg_order_qty) or avg_order_qty == 0:
-            avg_order_qty = 100
-        mttr_parts = DEFAULT_MTTR * avg_order_qty  # Convert MTTR to parts
-        availability = mtts_parts / (mtts_parts + mttr_parts) if mtts_parts > 0 else 0
-        
         st.markdown("### 🎯 Prediction Summary")
         
         # Get threshold info for display
@@ -2307,18 +2299,13 @@ def main():
             — *No failures observed above {effective_threshold:.2f}% threshold — conservative estimate*
             """)
         
-        # Generate curve data: n from 1 to max(2*MTTS, 5000, order_qty*1.5)
+        # Generate curve data: n from 1 to max(2.5*MTTS, 5000, order_qty*1.5)
         curve_max_n = int(max(mtts_parts * 2.5, 5000, order_qty * 1.5))
         n_points = np.linspace(1, curve_max_n, 500)
         
         # Compute curves
         rel_curve = np.exp(-n_points / mtts_parts) * 100 if mtts_parts > 0 else np.zeros_like(n_points)
         risk_curve = 100 - rel_curve
-        # Availability: MTTS / (MTTS + MTTR) — MTTR is fixed, but availability concept  
-        # as function of n: A(n) = MTTS / (MTTS + MTTR) is constant w.r.t. order size
-        # Instead, show "probability of completing order without needing rework cycle"
-        # which maps to reliability. For availability, show steady-state availability.
-        avail_curve = (mtts_parts / (mtts_parts + mttr_parts)) * 100 * np.ones_like(n_points) if (mtts_parts + mttr_parts) > 0 else np.zeros_like(n_points)
         
         # e^(-1) point: n = MTTS, R(MTTS) = 36.8%, Risk = 63.2%
         e_inv = np.exp(-1) * 100  # 36.8%
@@ -2327,10 +2314,9 @@ def main():
         # Current values at order_qty
         current_rel = reliability * 100
         current_risk = scrap_risk * 100
-        current_avail = availability * 100
         
-        # --- Three-column layout: Reliability | Scrap Risk | Availability ---
-        pred_col1, pred_col2, pred_col3 = st.columns(3)
+        # --- Two-column layout: Reliability | Scrap Risk ---
+        pred_col1, pred_col2 = st.columns(2)
         
         # === RELIABILITY CHART ===
         with pred_col1:
@@ -2444,67 +2430,6 @@ def main():
             st.caption(f"F({order_qty:,}) = 1 - R({order_qty:,}) = 1 - {current_rel:.1f}% = **{current_risk:.1f}%**")
             st.caption(f'*"Probability of experiencing a scrap event during this order"*')
         
-        # === AVAILABILITY CHART ===
-        with pred_col3:
-            fig_avail = go.Figure()
-            
-            # Availability is steady-state A = MTTS / (MTTS + MTTR), constant w.r.t. n
-            # But we can show it as a horizontal band with the reliability curve overlaid
-            # to show how availability relates to reliability
-            # Actually: show availability as constant line, and overlay R(n) faded for context
-            
-            fig_avail.add_trace(go.Scatter(
-                x=n_points, y=avail_curve,
-                mode='lines', line=dict(color='#2E7D32', width=2.5),
-                fill='tozeroy', fillcolor='rgba(46,125,50,0.1)',
-                name='Availability', showlegend=False
-            ))
-            
-            # Overlay faded reliability curve for context
-            fig_avail.add_trace(go.Scatter(
-                x=n_points, y=rel_curve,
-                mode='lines', line=dict(color='#1976D2', width=1, dash='dot'),
-                name='R(n) reference', showlegend=False, opacity=0.4
-            ))
-            
-            # Vertical line at n = MTTS
-            fig_avail.add_vline(
-                x=mtts_parts, line_dash="dash", line_color="#E53935", line_width=1.5,
-                annotation_text=f"MTTS={mtts_parts:,.0f}",
-                annotation_position="top right",
-                annotation_font=dict(size=10, color="#E53935")
-            )
-            
-            # Current order quantity marker on availability line
-            fig_avail.add_trace(go.Scatter(
-                x=[order_qty], y=[current_avail],
-                mode='markers+text',
-                marker=dict(size=12, color='#2E7D32', symbol='diamond',
-                           line=dict(width=2, color='white')),
-                text=[f'{current_avail:.1f}%'],
-                textposition='top center',
-                textfont=dict(size=11, color='#2E7D32'),
-                name='Current', showlegend=False
-            ))
-            
-            fig_avail.update_layout(
-                title=dict(text="<b>Availability A</b>", font=dict(size=14)),
-                xaxis_title="Parts (n)",
-                yaxis_title="Availability (%)",
-                yaxis=dict(range=[0, 105]),
-                height=300, margin=dict(l=50, r=20, t=40, b=50),
-                plot_bgcolor='white',
-                xaxis=dict(gridcolor='#f0f0f0'),
-                yaxis_gridcolor='#f0f0f0'
-            )
-            st.plotly_chart(fig_avail, use_container_width=True)
-            
-            # Current value
-            st.metric("⚡ Availability", f"{current_avail:.1f}%")
-            
-            # Formula
-            st.caption(f"A = MTTS ÷ (MTTS + MTTR) = {mtts_parts:,.0f} ÷ ({mtts_parts:,.0f} + {mttr_parts:,.0f}) = **{current_avail:.1f}%**")
-            st.caption(f'*"Steady-state proportion of production vs. rework time"*')
         
         st.markdown("---")
         
