@@ -2290,55 +2290,221 @@ def main():
         
         st.markdown("### 🎯 Prediction Summary")
         
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("🎲 Scrap Risk", f"{scrap_risk*100:.1f}%")
-        m2.metric("📈 Reliability R(n)", f"{reliability*100:.1f}%")
-        m3.metric("⚡ Availability", f"{availability*100:.1f}%")
-        m4.metric("🔧 MTTS", f"{mtts_parts:,.0f} parts")
-        
-        # Show ALL formulas for transparency
-        st.markdown("#### 📐 Calculation Formulas")
-        
         # Get threshold info for display
         effective_threshold = pooled_result.get('effective_threshold', part_threshold)
         threshold_source = pooled_result.get('threshold_source', 'part-specific')
         
-        formula_col1, formula_col2 = st.columns(2)
-        
-        with formula_col1:
-            if failure_count > 0:
-                st.info(f"""
-                **MTTS (parts):** {total_parts_produced:,.0f} parts ÷ {failure_count} failures = **{mtts_parts:,.0f} parts**
-                
-                *"On average, {mtts_parts:,.0f} parts are produced between scrap events"*
-                
-                Threshold used: {effective_threshold:.2f}% ({threshold_source})
-                """)
-            else:
-                st.warning(f"""
-                **MTTS (parts):** {total_parts_produced:,.0f} parts × 2 (no failures) = **{mtts_parts:,.0f} parts**
-                
-                *"No failures observed above {effective_threshold:.2f}% threshold - conservative estimate"*
-                """)
-            
-            st.info(f"""
-            **Reliability:** R({order_qty:,}) = e^(-{order_qty:,} / {mtts_parts:,.0f}) = **{reliability*100:.1f}%**
-            
-            *"Probability of completing {order_qty:,} parts without a scrap event"*
+        # MTTS info bar
+        if failure_count > 0:
+            st.success(f"""
+            **MTTS (parts):** {total_parts_produced:,.0f} parts ÷ {failure_count} failures = **{mtts_parts:,.0f} parts** 
+            — *On average, {mtts_parts:,.0f} parts produced between scrap events* 
+            (Threshold: {effective_threshold:.2f}%, {threshold_source})
+            """)
+        else:
+            st.warning(f"""
+            **MTTS (parts):** {total_parts_produced:,.0f} parts × 2 (no failures) = **{mtts_parts:,.0f} parts** 
+            — *No failures observed above {effective_threshold:.2f}% threshold — conservative estimate*
             """)
         
-        with formula_col2:
-            st.info(f"""
-            **Scrap Risk:** 1 - R({order_qty:,}) = 1 - {reliability*100:.1f}% = **{scrap_risk*100:.1f}%**
+        # Generate curve data: n from 1 to max(2*MTTS, 5000, order_qty*1.5)
+        curve_max_n = int(max(mtts_parts * 2.5, 5000, order_qty * 1.5))
+        n_points = np.linspace(1, curve_max_n, 500)
+        
+        # Compute curves
+        rel_curve = np.exp(-n_points / mtts_parts) * 100 if mtts_parts > 0 else np.zeros_like(n_points)
+        risk_curve = 100 - rel_curve
+        # Availability: MTTS / (MTTS + MTTR) — MTTR is fixed, but availability concept  
+        # as function of n: A(n) = MTTS / (MTTS + MTTR) is constant w.r.t. order size
+        # Instead, show "probability of completing order without needing rework cycle"
+        # which maps to reliability. For availability, show steady-state availability.
+        avail_curve = (mtts_parts / (mtts_parts + mttr_parts)) * 100 * np.ones_like(n_points) if (mtts_parts + mttr_parts) > 0 else np.zeros_like(n_points)
+        
+        # e^(-1) point: n = MTTS, R(MTTS) = 36.8%, Risk = 63.2%
+        e_inv = np.exp(-1) * 100  # 36.8%
+        e_inv_risk = 100 - e_inv  # 63.2%
+        
+        # Current values at order_qty
+        current_rel = reliability * 100
+        current_risk = scrap_risk * 100
+        current_avail = availability * 100
+        
+        # --- Three-column layout: Reliability | Scrap Risk | Availability ---
+        pred_col1, pred_col2, pred_col3 = st.columns(3)
+        
+        # === RELIABILITY CHART ===
+        with pred_col1:
+            fig_rel = go.Figure()
             
-            *"Probability of experiencing a scrap event during this order"*
-            """)
+            # Reliability curve
+            fig_rel.add_trace(go.Scatter(
+                x=n_points, y=rel_curve,
+                mode='lines', line=dict(color='#1976D2', width=2.5),
+                fill='tozeroy', fillcolor='rgba(25,118,210,0.1)',
+                name='R(n)', showlegend=False
+            ))
             
-            st.info(f"""
-            **Availability:** {mtts_parts:,.0f} ÷ ({mtts_parts:,.0f} + {mttr_parts:,.0f}) = **{availability*100:.1f}%**
+            # Vertical line at n = MTTS (e^-1 characteristic life)
+            fig_rel.add_vline(
+                x=mtts_parts, line_dash="dash", line_color="#E53935", line_width=1.5,
+                annotation_text=f"e⁻¹ = {e_inv:.1f}% at n={mtts_parts:,.0f}",
+                annotation_position="top right",
+                annotation_font=dict(size=10, color="#E53935")
+            )
             
-            *"Proportion of time available for production vs. rework"*
-            """)
+            # Horizontal reference line at e^-1 = 36.8%
+            fig_rel.add_hline(
+                y=e_inv, line_dash="dot", line_color="#E53935", line_width=1, opacity=0.5
+            )
+            
+            # Current order quantity marker
+            fig_rel.add_trace(go.Scatter(
+                x=[order_qty], y=[current_rel],
+                mode='markers+text',
+                marker=dict(size=12, color='#1976D2', symbol='diamond', 
+                           line=dict(width=2, color='white')),
+                text=[f'{current_rel:.1f}%'],
+                textposition='top center',
+                textfont=dict(size=11, color='#1976D2'),
+                name='Current Order', showlegend=False
+            ))
+            
+            fig_rel.update_layout(
+                title=dict(text="<b>Reliability R(n)</b>", font=dict(size=14)),
+                xaxis_title="Parts (n)",
+                yaxis_title="Reliability (%)",
+                yaxis=dict(range=[0, 105]),
+                height=300, margin=dict(l=50, r=20, t=40, b=50),
+                plot_bgcolor='white',
+                xaxis=dict(gridcolor='#f0f0f0'),
+                yaxis_gridcolor='#f0f0f0'
+            )
+            st.plotly_chart(fig_rel, use_container_width=True)
+            
+            # Current value
+            st.metric("📈 Reliability R(n)", f"{current_rel:.1f}%")
+            
+            # Formula
+            st.caption(f"R({order_qty:,}) = e^(-{order_qty:,} / {mtts_parts:,.0f}) = **{current_rel:.1f}%**")
+            st.caption(f'*"Probability of completing {order_qty:,} parts without a scrap event"*')
+        
+        # === SCRAP RISK CHART ===
+        with pred_col2:
+            fig_risk = go.Figure()
+            
+            # Risk curve
+            fig_risk.add_trace(go.Scatter(
+                x=n_points, y=risk_curve,
+                mode='lines', line=dict(color='#E53935', width=2.5),
+                fill='tozeroy', fillcolor='rgba(229,57,53,0.1)',
+                name='Scrap Risk', showlegend=False
+            ))
+            
+            # Vertical line at n = MTTS (e^-1 characteristic life)
+            fig_risk.add_vline(
+                x=mtts_parts, line_dash="dash", line_color="#1976D2", line_width=1.5,
+                annotation_text=f"e⁻¹ → Risk={e_inv_risk:.1f}% at n={mtts_parts:,.0f}",
+                annotation_position="top left",
+                annotation_font=dict(size=10, color="#1976D2")
+            )
+            
+            # Horizontal reference line at 1 - e^-1 = 63.2%
+            fig_risk.add_hline(
+                y=e_inv_risk, line_dash="dot", line_color="#1976D2", line_width=1, opacity=0.5
+            )
+            
+            # Current order quantity marker
+            fig_risk.add_trace(go.Scatter(
+                x=[order_qty], y=[current_risk],
+                mode='markers+text',
+                marker=dict(size=12, color='#E53935', symbol='diamond',
+                           line=dict(width=2, color='white')),
+                text=[f'{current_risk:.1f}%'],
+                textposition='top center',
+                textfont=dict(size=11, color='#E53935'),
+                name='Current Order', showlegend=False
+            ))
+            
+            fig_risk.update_layout(
+                title=dict(text="<b>Scrap Risk F(n)</b>", font=dict(size=14)),
+                xaxis_title="Parts (n)",
+                yaxis_title="Scrap Risk (%)",
+                yaxis=dict(range=[0, 105]),
+                height=300, margin=dict(l=50, r=20, t=40, b=50),
+                plot_bgcolor='white',
+                xaxis=dict(gridcolor='#f0f0f0'),
+                yaxis_gridcolor='#f0f0f0'
+            )
+            st.plotly_chart(fig_risk, use_container_width=True)
+            
+            # Current value
+            st.metric("🎲 Scrap Risk", f"{current_risk:.1f}%")
+            
+            # Formula
+            st.caption(f"F({order_qty:,}) = 1 - R({order_qty:,}) = 1 - {current_rel:.1f}% = **{current_risk:.1f}%**")
+            st.caption(f'*"Probability of experiencing a scrap event during this order"*')
+        
+        # === AVAILABILITY CHART ===
+        with pred_col3:
+            fig_avail = go.Figure()
+            
+            # Availability is steady-state A = MTTS / (MTTS + MTTR), constant w.r.t. n
+            # But we can show it as a horizontal band with the reliability curve overlaid
+            # to show how availability relates to reliability
+            # Actually: show availability as constant line, and overlay R(n) faded for context
+            
+            fig_avail.add_trace(go.Scatter(
+                x=n_points, y=avail_curve,
+                mode='lines', line=dict(color='#2E7D32', width=2.5),
+                fill='tozeroy', fillcolor='rgba(46,125,50,0.1)',
+                name='Availability', showlegend=False
+            ))
+            
+            # Overlay faded reliability curve for context
+            fig_avail.add_trace(go.Scatter(
+                x=n_points, y=rel_curve,
+                mode='lines', line=dict(color='#1976D2', width=1, dash='dot'),
+                name='R(n) reference', showlegend=False, opacity=0.4
+            ))
+            
+            # Vertical line at n = MTTS
+            fig_avail.add_vline(
+                x=mtts_parts, line_dash="dash", line_color="#E53935", line_width=1.5,
+                annotation_text=f"MTTS={mtts_parts:,.0f}",
+                annotation_position="top right",
+                annotation_font=dict(size=10, color="#E53935")
+            )
+            
+            # Current order quantity marker on availability line
+            fig_avail.add_trace(go.Scatter(
+                x=[order_qty], y=[current_avail],
+                mode='markers+text',
+                marker=dict(size=12, color='#2E7D32', symbol='diamond',
+                           line=dict(width=2, color='white')),
+                text=[f'{current_avail:.1f}%'],
+                textposition='top center',
+                textfont=dict(size=11, color='#2E7D32'),
+                name='Current', showlegend=False
+            ))
+            
+            fig_avail.update_layout(
+                title=dict(text="<b>Availability A</b>", font=dict(size=14)),
+                xaxis_title="Parts (n)",
+                yaxis_title="Availability (%)",
+                yaxis=dict(range=[0, 105]),
+                height=300, margin=dict(l=50, r=20, t=40, b=50),
+                plot_bgcolor='white',
+                xaxis=dict(gridcolor='#f0f0f0'),
+                yaxis_gridcolor='#f0f0f0'
+            )
+            st.plotly_chart(fig_avail, use_container_width=True)
+            
+            # Current value
+            st.metric("⚡ Availability", f"{current_avail:.1f}%")
+            
+            # Formula
+            st.caption(f"A = MTTS ÷ (MTTS + MTTR) = {mtts_parts:,.0f} ÷ ({mtts_parts:,.0f} + {mttr_parts:,.0f}) = **{current_avail:.1f}%**")
+            st.caption(f'*"Steady-state proportion of production vs. rework time"*')
         
         st.markdown("---")
         
