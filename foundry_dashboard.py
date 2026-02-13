@@ -161,17 +161,46 @@ RQ_THRESHOLDS = {
     'RQ3': {'scrap_reduction_min': 0.10, 'scrap_reduction_max': 0.20, 'roi_min': 2.0}
 }
 
-# Campbell Process-Defect Mapping
+# ================================================================
+# PROCESS-DEFECT MAPPING
+# ================================================================
+# Derived from Campbell, J. (2003). Castings Practice: The 10 Rules
+# of Castings. Elsevier Butterworth-Heinemann.
+#
+# Dataset defect terminology was aligned with Campbell's casting defect
+# taxonomy. Each defect column mapped to the originating process stage
+# per Campbell's 10 Rules. This is a proof-of-concept mapping —
+# individual foundries must validate against their specific processes.
+# See "Campbell Framework Reference" tab for full rationale.
+# ================================================================
 PROCESS_DEFECT_MAP = {
-    "Melting": {"defects": ["dross_rate", "gas_porosity_rate"], "description": "Metal preparation, temperature control"},
-    "Pouring": {"defects": ["misrun_rate", "missrun_rate", "short_pour_rate", "runout_rate"], "description": "Pour temperature, rate control"},
-    "Gating Design": {"defects": ["shrink_rate", "shrink_porosity_rate", "tear_up_rate"], "description": "Runner/riser sizing, feeding"},
-    "Sand System": {"defects": ["sand_rate", "dirty_pattern_rate"], "description": "Sand preparation, binder ratio"},
-    "Core Making": {"defects": ["core_rate", "crush_rate", "shift_rate"], "description": "Core integrity, venting"},
-    "Shakeout": {"defects": ["bent_rate"], "description": "Casting extraction, cooling"},
-    "Pattern/Tooling": {"defects": ["gouged_rate"], "description": "Pattern accuracy, wear"},
-    "Inspection": {"defects": ["outside_process_scrap_rate", "zyglo_rate", "failed_zyglo_rate"], "description": "Quality control, NDT"},
-    "Finishing": {"defects": ["over_grind_rate", "cut_into_rate"], "description": "Grinding, machining"}
+    "Melting": {"defects": ["dross_rate", "gas_porosity_rate"], 
+                "description": "Metal preparation, temperature control",
+                "campbell_rule": "Rule 1: Achieve a Good Quality Melt"},
+    "Pouring": {"defects": ["misrun_rate", "missrun_rate", "short_pour_rate", "runout_rate"], 
+                "description": "Pour temperature, rate control",
+                "campbell_rule": "Rule 2: Avoid Turbulent Entrainment"},
+    "Gating Design": {"defects": ["shrink_rate", "shrink_porosity_rate", "tear_up_rate"], 
+                      "description": "Runner/riser sizing, feeding",
+                      "campbell_rule": "Rule 6: Avoid Shrinkage Damage"},
+    "Sand System": {"defects": ["sand_rate", "dirty_pattern_rate"], 
+                    "description": "Sand preparation, binder ratio",
+                    "campbell_rule": "Rules 2-3 (secondary)"},
+    "Core Making": {"defects": ["core_rate", "crush_rate", "shift_rate"], 
+                    "description": "Core integrity, venting",
+                    "campbell_rule": "Rule 5: Avoid Core Blows"},
+    "Shakeout": {"defects": ["bent_rate"], 
+                 "description": "Casting extraction, cooling",
+                 "campbell_rule": "Rule 9: Reduce Residual Stress"},
+    "Pattern/Tooling": {"defects": ["gouged_rate"], 
+                        "description": "Pattern accuracy, wear",
+                        "campbell_rule": "Rule 10: Provide Location Points"},
+    "Inspection": {"defects": ["outside_process_scrap_rate", "zyglo_rate", "failed_zyglo_rate"], 
+                   "description": "Quality control, NDT",
+                   "campbell_rule": "Detection stage (not process-origin)"},
+    "Finishing": {"defects": ["over_grind_rate", "cut_into_rate"], 
+                  "description": "Grinding, machining",
+                  "campbell_rule": "Post-casting operations"}
 }
 
 # Hierarchical Pooling Configuration
@@ -2153,9 +2182,10 @@ def main():
             st.metric("📋 Records", f"{part_stats['n_records']}")
     
     # TABS
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "🔮 Prognostic Model", "📊 RQ1: Model Validation", 
-        "⚙️ RQ2: Reliability & PHM", "💰 RQ3: Operational Impact", "📈 All Parts Summary"
+        "⚙️ RQ2: Reliability & PHM", "💰 RQ3: Operational Impact", "📈 All Parts Summary",
+        "📖 Campbell Framework Reference"
     ])
     
     # TAB 1: PROGNOSTIC MODEL
@@ -2692,10 +2722,12 @@ def main():
                     for i, (process, contribution) in enumerate(process_data[:5]):
                         icon = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "📍"
                         color = '#FFEBEE' if i == 0 else '#FFF3E0' if i == 1 else '#E3F2FD' if i == 2 else '#F5F5F5'
+                        campbell_ref = PROCESS_DEFECT_MAP[process].get('campbell_rule', '')
                         st.markdown(f"""
                         <div style="background: {color}; padding: 10px; border-radius: 8px; margin: 5px 0;">
                             {icon} <strong>{process}</strong>: {contribution:.1f}%
                             <br><small>{PROCESS_DEFECT_MAP[process]['description']}</small>
+                            <br><small><em>Campbell (2003): {campbell_ref}</em></small>
                         </div>
                         """, unsafe_allow_html=True)
                 
@@ -2725,6 +2757,7 @@ def main():
                     defect_names = [d.replace('_rate', '').replace('_', ' ').title() for d in defects]
                     process_table.append({
                         'Process': process,
+                        'Campbell Rule': PROCESS_DEFECT_MAP[process].get('campbell_rule', ''),
                         'Contribution (%)': f"{contribution:.1f}",
                         f'Risk Share (of {scrap_risk*100:.1f}%)': f"{risk_share:.2f}",
                         'Related Defects': ', '.join(defect_names),
@@ -2746,9 +2779,11 @@ def main():
                         defect_code = d['Defect_Code']
                         # Find which processes this defect maps to
                         related_processes = []
+                        campbell_rules = []
                         for proc, info in PROCESS_DEFECT_MAP.items():
                             if defect_code in info['defects']:
                                 related_processes.append(proc)
+                                campbell_rules.append(info.get('campbell_rule', ''))
                         
                         if total_defect_rate > 0:
                             risk_share = (d['Historical Rate (%)'] / total_defect_rate) * scrap_risk * 100
@@ -2762,7 +2797,8 @@ def main():
                             'Risk Multiplier': f"{d['Risk Multiplier']:.1f}×",
                             'Risk Share (%)': f"{risk_share:.2f}",
                             'Expected Count': f"{d['Expected Count']:.1f}",
-                            'Root Cause Process(es)': ', '.join(related_processes) if related_processes else 'Unknown'
+                            'Root Cause Process(es)': ', '.join(related_processes) if related_processes else 'Unknown',
+                            'Campbell Rule': ', '.join(campbell_rules) if campbell_rules else ''
                         })
                     
                     mapping_df = pd.DataFrame(mapping_data)
@@ -3818,6 +3854,194 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 file_name="all_parts_results.csv",
                 mime="text/csv"
             )
+    # ================================================================
+    # TAB 6: CAMPBELL FRAMEWORK REFERENCE
+    # ================================================================
+    with tab6:
+        st.header("Campbell's 10 Rules of Castings: Process-Defect Framework")
+        
+        st.markdown("""
+        <div class="citation-box">
+            <strong>Source:</strong> Campbell, J. (2003). <em>Castings Practice: The 10 Rules of Castings</em>. 
+            Elsevier Butterworth-Heinemann. ISBN 07506 4791 4.<br><br>
+            <strong>Application:</strong> The process-defect mappings used in this dashboard's Root Cause Process 
+            Diagnosis are derived from Campbell's framework. The dataset's defect terminology was aligned with 
+            Campbell's casting defect taxonomy, and defects were mapped to the originating process stages he identifies.
+            Individual foundries would need to validate these mappings against their specific process configurations.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # ---- Campbell's 10 Rules Overview ----
+        st.markdown("### The 10 Rules of Castings")
+        st.caption("*Campbell's framework identifies 10 critical rules governing casting quality. "
+                   "Each rule maps to specific process stages and the defects that arise when the rule is violated.*")
+        
+        rules_data = [
+            {"Rule": "1", "Name": "Achieve a Good Quality Melt", 
+             "Process Stage": "Melting & Holding",
+             "Defects When Violated": "Dross, gas porosity, bifilm inclusions, oxide skins",
+             "Campbell's Guidance": "Melt must be substantially free from non-metallic inclusions and bifilms. "
+                                    "Gas in solution and alloy impurities (e.g., Fe in Al) act as bifilm-opening agents."},
+            {"Rule": "2", "Name": "Avoid Turbulent Entrainment", 
+             "Process Stage": "Pouring & Filling System",
+             "Defects When Violated": "Misruns, sand inclusions, random porosity, oxide folds",
+             "Campbell's Guidance": "Critical velocity ~0.5 m/s must not be exceeded. Turbulent filling creates "
+                                    "'the standard legacy: random inclusions, random porosity, and misruns.' "
+                                    "Most so-called sand problems are actually filling system problems."},
+            {"Rule": "3", "Name": "Avoid Laminar Entrainment of Surface Film", 
+             "Process Stage": "Filling System Design",
+             "Defects When Violated": "Surface oxide folds, lap defects, cold shuts",
+             "Campbell's Guidance": "The liquid front must expand continuously. Progress only uphill in an "
+                                    "uninterrupted advance. Only bottom gating is permissible; no falling or "
+                                    "sliding downhill of liquid metal."},
+            {"Rule": "4", "Name": "Avoid Bubble Damage", 
+             "Process Stage": "Gating Design & Pouring",
+             "Defects When Violated": "Gas bubbles, bubble trails, subsurface porosity",
+             "Campbell's Guidance": "No bubbles of air entrained by the filling system should pass through the "
+                                    "liquid metal. Requires proper offset step pouring basin, avoidance of wells "
+                                    "or volume-increasing features."},
+            {"Rule": "5", "Name": "Avoid Core Blows", 
+             "Process Stage": "Core Making",
+             "Defects When Violated": "Core gas porosity, blow holes, internal voids",
+             "Campbell's Guidance": "Cores must be of sufficiently low gas content and/or adequately vented. "
+                                    "No use of clay-based repair paste unless demonstrated fully dried."},
+            {"Rule": "6", "Name": "Avoid Shrinkage Damage", 
+             "Process Stage": "Gating/Feeding/Riser Design",
+             "Defects When Violated": "Shrinkage porosity, shrinkage cavities, hot tears",
+             "Campbell's Guidance": "No feeding uphill in larger sections due to unreliable pressure gradient "
+                                    "and convection complications. Demonstrate good feeding by following all Feeding Rules."},
+            {"Rule": "7", "Name": "Avoid Convection Damage", 
+             "Process Stage": "Thermal Management",
+             "Defects When Violated": "Channel segregation, convection-driven porosity redistribution",
+             "Campbell's Guidance": "Assess freezing time vs. convection damage time. Thin and thick sections "
+                                    "avoid problems automatically; intermediate sections require design intervention."},
+            {"Rule": "8", "Name": "Reduce Segregation Damage", 
+             "Process Stage": "Alloy & Process Control",
+             "Defects When Violated": "Chemical segregation, out-of-spec composition zones",
+             "Campbell's Guidance": "Predict segregation to be within specification limits. Avoid channel "
+                                    "segregation formation if possible."},
+            {"Rule": "9", "Name": "Reduce Residual Stress", 
+             "Process Stage": "Shakeout & Heat Treatment",
+             "Defects When Violated": "Distortion, cracking, residual stress failures",
+             "Campbell's Guidance": "No quenching into water following solution treatment of light alloys. "
+                                    "Polymer quenchant or forced air quench acceptable if stress shown negligible."},
+            {"Rule": "10", "Name": "Provide Location Points", 
+             "Process Stage": "Pattern/Tooling Design",
+             "Defects When Violated": "Dimensional non-conformance, assembly failures",
+             "Campbell's Guidance": "All castings to be provided with agreed location points for dimensional "
+                                    "checking and machining pickup."}
+        ]
+        
+        rules_df = pd.DataFrame(rules_data)
+        st.dataframe(rules_df, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        
+        # ---- Dashboard Mapping ----
+        st.markdown("### Dashboard Process-Defect Mapping")
+        st.caption("*How dataset defect columns were mapped to Campbell's process stages*")
+        
+        st.info("**Methodology:** The anonymized dataset uses defect rate terminology (e.g., `dross_rate`, "
+                "`gas_porosity_rate`, `sand_rate`) that aligns with Campbell's casting defect taxonomy. "
+                "Each defect column was mapped to the originating process stage identified by Campbell's 10 Rules. "
+                "This mapping is a **proof-of-concept** -- individual foundries must validate these mappings against "
+                "their specific equipment, process flows, and defect classification systems.")
+        
+        mapping_data = [
+            {"Dashboard Process": "Melting", "Dataset Defect Columns": "dross_rate, gas_porosity_rate",
+             "Campbell Rule(s)": "Rule 1: Good Quality Melt",
+             "Rationale": "Campbell identifies dross and gas porosity as direct consequences of melt quality -- "
+                         "bifilms, oxide skins, and dissolved gas originate in the melting and holding stages (Ch. 1)."},
+            {"Dashboard Process": "Pouring", "Dataset Defect Columns": "misrun_rate, missrun_rate, short_pour_rate, runout_rate",
+             "Campbell Rule(s)": "Rule 2: Avoid Turbulent Entrainment",
+             "Rationale": "Campbell states misruns result from 'unpredictable ebb and flow during filling' -- "
+                         "turbulent entrainment during pouring. Short pours and runouts are filling interruptions (Ch. 2)."},
+            {"Dashboard Process": "Gating Design", "Dataset Defect Columns": "shrink_rate, shrink_porosity_rate, tear_up_rate",
+             "Campbell Rule(s)": "Rule 6: Avoid Shrinkage Damage",
+             "Rationale": "Shrinkage porosity and hot tears arise from inadequate feeding system design -- "
+                         "runner/riser sizing and feeding path geometry (Ch. 6, Feeding Rules 1-7)."},
+            {"Dashboard Process": "Sand System", "Dataset Defect Columns": "sand_rate, dirty_pattern_rate",
+             "Campbell Rule(s)": "Rules 2-3 (secondary)",
+             "Rationale": "Campbell notes most 'sand problems such as mould erosion and sand inclusions' are "
+                         "actually consequences of poor filling systems, but sand preparation (binder ratio, "
+                         "moisture content) remains an independent process variable (Ch. 2)."},
+            {"Dashboard Process": "Core Making", "Dataset Defect Columns": "core_rate, crush_rate, shift_rate",
+             "Campbell Rule(s)": "Rule 5: Avoid Core Blows",
+             "Rationale": "Core integrity, venting, and gas content directly control core-related defects. "
+                         "Crush and shift are mechanical core failures during mould assembly or pouring (Ch. 5)."},
+            {"Dashboard Process": "Shakeout", "Dataset Defect Columns": "bent_rate",
+             "Campbell Rule(s)": "Rule 9: Reduce Residual Stress",
+             "Rationale": "Bent castings result from mechanical damage during extraction or residual stress "
+                         "from premature shakeout before adequate cooling (Ch. 9)."},
+            {"Dashboard Process": "Pattern/Tooling", "Dataset Defect Columns": "gouged_rate",
+             "Campbell Rule(s)": "Rule 10: Provide Location Points (extended)",
+             "Rationale": "Gouging is a surface defect consistent with pattern wear, damage, or dimensional "
+                         "degradation. Campbell emphasizes pattern/tooling accuracy for dimensional conformance (Ch. 10)."},
+            {"Dashboard Process": "Inspection", "Dataset Defect Columns": "outside_process_scrap_rate, zyglo_rate, failed_zyglo_rate",
+             "Campbell Rule(s)": "Detection, not origination",
+             "Rationale": "These are detection-stage classifications, not process-origin defects. Zyglo (fluorescent "
+                         "penetrant) reveals subsurface cracks that may originate from Rules 1, 2, 6, or 9. "
+                         "'Outside process scrap' is vendor/customer-attributed. Mapped to Inspection as the "
+                         "classifying stage -- this is a known limitation of the dataset's terminology."},
+            {"Dashboard Process": "Finishing", "Dataset Defect Columns": "over_grind_rate, cut_into_rate",
+             "Campbell Rule(s)": "Post-casting operations",
+             "Rationale": "Over-grinding and cut-into defects occur during finishing operations (grinding, machining) "
+                         "after the casting is solidified. These are process-induced defects not directly covered by "
+                         "Campbell's 10 Rules, which focus on the casting process itself."}
+        ]
+        
+        mapping_df = pd.DataFrame(mapping_data)
+        st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        
+        # ---- Limitations and Validation ----
+        st.markdown("### Mapping Limitations & Validation Requirements")
+        
+        col_lim1, col_lim2 = st.columns(2)
+        
+        with col_lim1:
+            st.markdown("""
+            **What This Mapping IS:**
+            - A proof-of-concept alignment between dataset terminology and Campbell's (2003) established 
+              casting defect taxonomy
+            - A demonstration that ML-predicted defect patterns can be traced to originating process stages 
+              using domain knowledge frameworks
+            - A template that any foundry can adapt by validating mappings against their specific processes
+            """)
+        
+        with col_lim2:
+            st.markdown("""
+            **What This Mapping IS NOT:**
+            - A validated mapping for any specific foundry's process configuration
+            - A claim that every defect has a single originating process (many defects have multiple 
+              potential causes -- e.g., porosity can originate from Rules 1, 2, 4, 5, or 6)
+            - A substitute for foundry-specific root cause analysis using their own process data and 
+              engineering expertise
+            """)
+        
+        st.markdown("---")
+        
+        st.markdown("### Foundry Implementation Guidance")
+        st.info("""
+        **For foundries adopting this framework:**
+        
+        1. **Map your defect codes** to Campbell's taxonomy -- your classification system may use different 
+           terminology than this dataset
+        2. **Validate process-defect relationships** using your own historical data -- run failure-conditional 
+           Pareto analysis to confirm which defects are actually elevated during your high-scrap events
+        3. **Iterate the mapping** -- Campbell's Rules provide the theoretical foundation, but your specific 
+           equipment, alloys, and process parameters determine the actual defect-process relationships
+        4. **Use LIME explanations** to validate -- if the model identifies sand_rate as a top contributor but 
+           your sand system is well-controlled, the mapping may need adjustment for your foundry
+        """)
+        
+        st.markdown("---")
+        st.caption("*Campbell, J. (2003). Castings Practice: The 10 Rules of Castings. Elsevier Butterworth-Heinemann. "
+                   "Process-defect mappings derived from Campbell's framework as a proof-of-concept. "
+                   "Individual foundries must validate mappings against their specific process configurations.*")
     
     st.markdown("---")
     st.caption("🏭 Foundry Dashboard V3 | Global Model with Multi-Defect + Temporal + MTTS Features | 6-2-1 Split")
