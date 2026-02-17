@@ -2292,11 +2292,45 @@ def main():
         
         st.markdown("### 🎯 Prediction Summary")
         
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("🎲 Scrap Risk", f"{scrap_risk*100:.1f}%")
-        m2.metric("📈 Reliability R(n)", f"{reliability*100:.1f}%")
-        m3.metric("⚡ Availability", f"{availability*100:.1f}%")
-        m4.metric("🔧 MTTS", f"{mtts_parts:,.0f} parts")
+        # === DUAL METRIC DISPLAY for parts below CLT ===
+        if pooled_result.get('show_dual'):
+            pool_comp = pooled_result.get('pooled_comparison')
+            
+            # Part-level metrics row
+            st.markdown("**📊 Part-Level Prediction** *(from this part's data)*")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("🎲 Scrap Risk", f"{scrap_risk*100:.1f}%")
+            m2.metric("📈 Reliability R(n)", f"{reliability*100:.1f}%")
+            m3.metric("⚡ Availability", f"{availability*100:.1f}%")
+            m4.metric("🔧 MTTS", f"{mtts_parts:,.0f} parts")
+            
+            # Pooled metrics row
+            if pool_comp is not None:
+                pool_mtts_p = pool_comp['mtts_parts']
+                pool_rel = np.exp(-order_qty / pool_mtts_p) if pool_mtts_p > 0 else 0
+                pool_scrap_risk = 1 - pool_rel
+                pool_avail = pool_mtts_p / (pool_mtts_p + mttr_parts) if pool_mtts_p > 0 else 0
+                
+                st.markdown(f"**🔄 Pooled Comparison** *({pool_comp['n_parts']} similar parts, {pool_comp['n_records']} runs)*")
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("🎲 Scrap Risk", f"{pool_scrap_risk*100:.1f}%",
+                          delta=f"{(pool_scrap_risk - scrap_risk)*100:+.1f}%", delta_color="inverse")
+                p2.metric("📈 Reliability R(n)", f"{pool_rel*100:.1f}%",
+                          delta=f"{(pool_rel - reliability)*100:+.1f}%")
+                p3.metric("⚡ Availability", f"{pool_avail*100:.1f}%",
+                          delta=f"{(pool_avail - availability)*100:+.1f}%")
+                p4.metric("🔧 MTTS", f"{pool_mtts_p:,.0f} parts",
+                          delta=f"{pool_mtts_p - mtts_parts:+,.0f}")
+                
+                st.caption("*Deltas show how the pooled estimate differs from the part-level estimate. "
+                           "When results diverge significantly, experienced foundry judgment should be applied.*")
+        else:
+            # Standard single-row display for ≥30 run parts
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("🎲 Scrap Risk", f"{scrap_risk*100:.1f}%")
+            m2.metric("📈 Reliability R(n)", f"{reliability*100:.1f}%")
+            m3.metric("⚡ Availability", f"{availability*100:.1f}%")
+            m4.metric("🔧 MTTS", f"{mtts_parts:,.0f} parts")
         
         # Show ALL formulas for transparency
         st.markdown("#### 📐 Calculation Formulas")
