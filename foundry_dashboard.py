@@ -135,6 +135,7 @@ st.set_page_config(
 # ================================================================
 RANDOM_STATE = 42
 DEFAULT_CSV_PATH = "anonymized_parts.csv"
+DEFAULT_MTTR = 1.0
 WEIGHT_TOLERANCE = 0.10
 N_ESTIMATORS = 180
 MIN_SAMPLES_LEAF = 5
@@ -161,46 +162,17 @@ RQ_THRESHOLDS = {
     'RQ3': {'scrap_reduction_min': 0.10, 'scrap_reduction_max': 0.20, 'roi_min': 2.0}
 }
 
-# ================================================================
-# PROCESS-DEFECT MAPPING
-# ================================================================
-# Derived from Campbell, J. (2003). Castings Practice: The 10 Rules
-# of Castings. Elsevier Butterworth-Heinemann.
-#
-# Dataset defect terminology was aligned with Campbell's casting defect
-# taxonomy. Each defect column mapped to the originating process stage
-# per Campbell's 10 Rules. This is a proof-of-concept mapping —
-# individual foundries must validate against their specific processes.
-# See "Campbell Framework Reference" tab for full rationale.
-# ================================================================
+# Campbell Process-Defect Mapping
 PROCESS_DEFECT_MAP = {
-    "Melting": {"defects": ["dross_rate", "gas_porosity_rate"], 
-                "description": "Metal preparation, temperature control",
-                "campbell_rule": "Rule 1: Achieve a Good Quality Melt"},
-    "Pouring": {"defects": ["misrun_rate", "missrun_rate", "short_pour_rate", "runout_rate"], 
-                "description": "Pour temperature, rate control",
-                "campbell_rule": "Rule 2: Avoid Turbulent Entrainment"},
-    "Gating Design": {"defects": ["shrink_rate", "shrink_porosity_rate", "tear_up_rate"], 
-                      "description": "Runner/riser sizing, feeding",
-                      "campbell_rule": "Rule 6: Avoid Shrinkage Damage"},
-    "Sand System": {"defects": ["sand_rate", "dirty_pattern_rate"], 
-                    "description": "Sand preparation, binder ratio",
-                    "campbell_rule": "Rules 2-3 (secondary)"},
-    "Core Making": {"defects": ["core_rate", "crush_rate", "shift_rate"], 
-                    "description": "Core integrity, venting",
-                    "campbell_rule": "Rule 5: Avoid Core Blows"},
-    "Shakeout": {"defects": ["bent_rate"], 
-                 "description": "Casting extraction, cooling",
-                 "campbell_rule": "Rule 9: Reduce Residual Stress"},
-    "Pattern/Tooling": {"defects": ["gouged_rate"], 
-                        "description": "Pattern accuracy, wear",
-                        "campbell_rule": "Rule 10: Provide Location Points"},
-    "Inspection": {"defects": ["outside_process_scrap_rate", "zyglo_rate", "failed_zyglo_rate"], 
-                   "description": "Quality control, NDT",
-                   "campbell_rule": "Detection stage (not process-origin)"},
-    "Finishing": {"defects": ["over_grind_rate", "cut_into_rate"], 
-                  "description": "Grinding, machining",
-                  "campbell_rule": "Post-casting operations"}
+    "Melting": {"defects": ["dross_rate", "gas_porosity_rate"], "description": "Metal preparation, temperature control"},
+    "Pouring": {"defects": ["misrun_rate", "missrun_rate", "short_pour_rate", "runout_rate"], "description": "Pour temperature, rate control"},
+    "Gating Design": {"defects": ["shrink_rate", "shrink_porosity_rate", "tear_up_rate"], "description": "Runner/riser sizing, feeding"},
+    "Sand System": {"defects": ["sand_rate", "dirty_pattern_rate"], "description": "Sand preparation, binder ratio"},
+    "Core Making": {"defects": ["core_rate", "crush_rate", "shift_rate"], "description": "Core integrity, venting"},
+    "Shakeout": {"defects": ["bent_rate"], "description": "Casting extraction, cooling"},
+    "Pattern/Tooling": {"defects": ["gouged_rate"], "description": "Pattern accuracy, wear"},
+    "Inspection": {"defects": ["outside_process_scrap_rate", "zyglo_rate", "failed_zyglo_rate"], "description": "Quality control, NDT"},
+    "Finishing": {"defects": ["over_grind_rate", "cut_into_rate"], "description": "Grinding, machining"}
 }
 
 # Hierarchical Pooling Configuration
@@ -216,6 +188,9 @@ POOLING_CONFIG = {
         'LOW': 5,
     }
 }
+
+# Central Limit Theorem threshold - below this, show dual results
+CLT_THRESHOLD = 30
 
 # ================================================================
 # THREE-STAGE HIERARCHICAL LEARNING CONFIGURATION
@@ -715,8 +690,8 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         'threshold_used': threshold_pct,
     }
     
-    # CASE 1: Part-level data is sufficient
-    if part_n >= min_part_data:
+    # CASE 1: Part-level data meets CLT threshold (≥30 runs) - fully sufficient
+    if part_n >= CLT_THRESHOLD:
         confidence = get_confidence_tier(part_n)
         failures = (part_data['scrap_percent'] > threshold_pct).sum()
         failure_rate = failures / part_n if part_n > 0 else 0
@@ -736,8 +711,9 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         reliability = np.exp(-1 / mtts_runs) if mtts_runs > 0 else 0
         
         result.update({
-            'pooling_method': 'Part-Level (No Pooling Required)',
+            'pooling_method': 'Part-Level (CLT Satisfied, ≥30 runs)',
             'pooling_used': False,
+            'show_dual': False,
             'weight_range': 'N/A',
             'pooled_n': part_n,
             'pooled_parts_count': 1,
@@ -752,8 +728,143 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         })
         return result
     
-    # CASE 2: Need pooling
+    # CASE 2: Part has some data (≥5 runs) but below CLT threshold (<30)
+    # Show DUAL results: part-level prediction AND pooled comparison
+    if part_n >= min_part_data:
+        # Compute part-level metrics first
+        part_failures = (part_data['scrap_percent'] > threshold_pct).sum()
+        part_failure_rate = part_failures / part_n if part_n > 0 else 0
+        part_avg_scrap = part_data['scrap_percent'].mean()
+        
+        if part_failures > 0:
+            part_mtts_runs = part_n / part_failures
+            part_mtts_parts = total_parts_produced / part_failures
+        else:
+            part_mtts_runs = part_n * 10
+            part_mtts_parts = total_parts_produced * 10
+        
+        part_reliability = np.exp(-1 / part_mtts_runs) if part_mtts_runs > 0 else 0
+        
+        # Store part-level metrics for dual display
+        part_level_metrics = {
+            'n_records': part_n,
+            'avg_scrap': part_avg_scrap,
+            'failures': part_failures,
+            'failure_rate': part_failure_rate,
+            'mtts_runs': part_mtts_runs,
+            'mtts_parts': part_mtts_parts,
+            'total_parts_produced': total_parts_produced,
+            'reliability': part_reliability,
+            'confidence': get_confidence_tier(part_n),
+        }
+        
+        # Now compute pooled metrics (fall through to pooling logic below)
+        # Set flag so display knows to show both
+        result['show_dual'] = True
+        result['part_level_metrics'] = part_level_metrics
+        
+        # Use part-level as the PRIMARY prediction (model actually saw this data)
+        result.update({
+            'pooling_used': False,  # Primary prediction is part-level
+            'pooled_n': part_n,
+            'pooled_parts_count': 1,
+            'included_part_ids': [part_id],
+            'confidence': part_level_metrics['confidence'],
+            'mtts_runs': part_mtts_runs,
+            'mtts_parts': part_mtts_parts,
+            'total_parts_produced': total_parts_produced,
+            'reliability_next_run': part_reliability,
+            'failure_count': part_failures,
+            'failure_rate': part_failure_rate,
+        })
+        
+        # === Compute pooled comparison data ===
+        min_runs_per_part = POOLING_CONFIG.get('min_runs_per_pooled_part', 5)
+        use_pooled_threshold = POOLING_CONFIG.get('use_pooled_threshold', True)
+        
+        weight_matched_parts, weight_range = filter_by_weight(df, target_weight, weight_tolerance)
+        exact_matched_parts = filter_by_exact_defects(df, weight_matched_parts, target_defects)
+        exact_pooled_df = df[df['part_id'].isin(exact_matched_parts)]
+        any_matched_parts = filter_by_any_defect(df, weight_matched_parts)
+        any_pooled_df = df[df['part_id'].isin(any_matched_parts)]
+        weight_only_df = df[df['part_id'].isin(weight_matched_parts)]
+        
+        def apply_min_runs_filter_dual(pool_df, min_runs):
+            if len(pool_df) == 0:
+                return pool_df, [], []
+            part_run_counts = pool_df.groupby('part_id').size().reset_index(name='runs')
+            qualifying = part_run_counts[part_run_counts['runs'] >= min_runs]['part_id'].tolist()
+            excluded = part_run_counts[part_run_counts['runs'] < min_runs]['part_id'].tolist()
+            return pool_df[pool_df['part_id'].isin(qualifying)], qualifying, excluded
+        
+        exact_filtered_df, exact_qualifying, _ = apply_min_runs_filter_dual(exact_pooled_df, min_runs_per_part)
+        any_filtered_df, any_qualifying, _ = apply_min_runs_filter_dual(any_pooled_df, min_runs_per_part)
+        weight_filtered_df, weight_qualifying, _ = apply_min_runs_filter_dual(weight_only_df, min_runs_per_part)
+        
+        # Select best pool
+        pool_final_df = None
+        pool_final_parts = []
+        pool_method = 'No pool available'
+        
+        for candidate_df, candidate_parts, method_name in [
+            (exact_filtered_df, exact_qualifying, 'Weight ±10% + Exact Defect Match'),
+            (any_filtered_df, any_qualifying, 'Weight ±10% + Any Defect'),
+            (weight_filtered_df, weight_qualifying, 'Weight ±10% Only'),
+        ]:
+            if len(candidate_df) >= 5:
+                pool_final_df = candidate_df
+                pool_final_parts = candidate_parts
+                pool_method = method_name
+                break
+        
+        if pool_final_df is not None and len(pool_final_df) > 0:
+            pool_n = len(pool_final_df)
+            pool_avg_scrap = pool_final_df['scrap_percent'].mean()
+            pool_std_scrap = pool_final_df['scrap_percent'].std() if pool_n > 1 else 0
+            pool_total_parts = pool_final_df['order_quantity'].sum() if 'order_quantity' in pool_final_df.columns else pool_n
+            
+            if use_pooled_threshold and pool_n > 1:
+                pool_effective_threshold = pool_avg_scrap + pool_std_scrap
+            else:
+                pool_effective_threshold = threshold_pct
+            
+            pool_failures = (pool_final_df['scrap_percent'] > pool_effective_threshold).sum()
+            pool_failure_rate = pool_failures / pool_n if pool_n > 0 else 0
+            
+            if pool_failures > 0:
+                pool_mtts_runs = pool_n / pool_failures
+                pool_mtts_parts = pool_total_parts / pool_failures
+            else:
+                pool_mtts_runs = pool_n * 2
+                pool_mtts_parts = pool_total_parts * 2
+            
+            pool_reliability = np.exp(-1 / pool_mtts_runs) if pool_mtts_runs > 0 else 0
+            
+            result['pooled_comparison'] = {
+                'method': pool_method,
+                'n_records': pool_n,
+                'n_parts': len(pool_final_parts),
+                'included_part_ids': pool_final_parts,
+                'avg_scrap': pool_avg_scrap,
+                'std_scrap': pool_std_scrap,
+                'effective_threshold': pool_effective_threshold,
+                'failures': pool_failures,
+                'failure_rate': pool_failure_rate,
+                'mtts_runs': pool_mtts_runs,
+                'mtts_parts': pool_mtts_parts,
+                'total_parts_produced': pool_total_parts,
+                'reliability': pool_reliability,
+                'confidence': get_confidence_tier(pool_n),
+                'weight_range': weight_range,
+            }
+        else:
+            result['pooled_comparison'] = None
+        
+        return result
+    
+    # CASE 3: Very low data (<5 runs) - pooling only
     result['pooling_used'] = True
+    result['show_dual'] = False
     
     # Get config values
     min_runs_per_part = POOLING_CONFIG.get('min_runs_per_pooled_part', 5)
@@ -2167,78 +2278,6 @@ def main():
     Features: {len(global_model['features'])} (including inherited: global_scrap_probability, defect_cluster_probability)
     """)
     
-    # ================================================================
-    # VITAL FEW — "MOST WANTED" PARTS
-    # ================================================================
-    # Compute vital few: top scrap-producing parts sorted by total scrap weight
-    foundry_avg_scrap = df['scrap_percent'].mean()
-    
-    # Find the scrap weight column (handles parentheses variants)
-    scrap_weight_col = None
-    for col_name in ['total_scrap_weight_lbs', 'total_scrap_weight_(lbs)']:
-        if col_name in df.columns:
-            scrap_weight_col = col_name
-            break
-    
-    # Find pieces scrapped column
-    pieces_scrapped_col = 'pieces_scrapped' if 'pieces_scrapped' in df.columns else None
-    
-    if scrap_weight_col and pieces_scrapped_col:
-        vital_few_parts = df.groupby('part_id').agg(
-            runs=('scrap_percent', 'count'),
-            avg_scrap=('scrap_percent', 'mean'),
-            total_scrapped=(pieces_scrapped_col, 'sum'),
-            total_scrap_weight=(scrap_weight_col, 'sum'),
-            total_produced=('order_quantity', 'sum')
-        ).reset_index()
-    else:
-        # Fallback: estimate weight from pieces_scrapped * piece_weight
-        vital_few_parts = df.groupby('part_id').agg(
-            runs=('scrap_percent', 'count'),
-            avg_scrap=('scrap_percent', 'mean'),
-            total_produced=('order_quantity', 'sum')
-        ).reset_index()
-        vital_few_parts['total_scrapped'] = 0
-        vital_few_parts['total_scrap_weight'] = 0
-    
-    # Rank by total scrap weight descending
-    vital_few_parts = vital_few_parts.sort_values('total_scrap_weight', ascending=False).reset_index(drop=True)
-    vital_few_parts['cumul_weight'] = vital_few_parts['total_scrap_weight'].cumsum()
-    total_scrap_weight_all = vital_few_parts['total_scrap_weight'].sum()
-    vital_few_parts['cumul_pct'] = vital_few_parts['cumul_weight'] / total_scrap_weight_all * 100
-    
-    # Top 20 by scrap weight = "Most Wanted"
-    most_wanted_df = vital_few_parts.head(20)
-    most_wanted_ids = set(most_wanted_df['part_id'].values)
-    
-    # Pareto 80% threshold
-    pareto_80_df = vital_few_parts[vital_few_parts['cumul_pct'] <= 80]
-    n_pareto_80 = len(pareto_80_df) + 1  # +1 for the part that crosses 80%
-    
-    with st.expander(f"🎯 **VITAL FEW — Top 20 Most-Wanted Parts** (account for {most_wanted_df['total_scrap_weight'].sum()/total_scrap_weight_all*100:.0f}% of total scrap weight)", expanded=False):
-        st.markdown(f"""
-        **Pareto Analysis:** {n_pareto_80} parts ({n_pareto_80/len(vital_few_parts)*100:.0f}% of all parts) 
-        produce 80% of total scrap weight. The top 20 parts below represent the highest-impact 
-        intervention targets — these are where process improvements will most reduce foundry-wide 
-        energy waste and material costs.
-        
-        *Foundry average scrap rate: {foundry_avg_scrap:.2f}% | DOE 10% target: {foundry_avg_scrap*0.90:.2f}% | DOE 20% target: {foundry_avg_scrap*0.80:.2f}%*
-        """)
-        
-        mw_display = []
-        for i, (_, row) in enumerate(most_wanted_df.iterrows()):
-            mw_display.append({
-                'Rank': f"#{i+1}",
-                'Part ID': int(row['part_id']),
-                'Runs': int(row['runs']),
-                'Avg Scrap %': f"{row['avg_scrap']:.2f}%",
-                'Total Scrapped (pcs)': f"{int(row['total_scrapped']):,}",
-                'Total Scrap Weight (lbs)': f"{row['total_scrap_weight']:,.0f}",
-                'Cumul % of Total': f"{row['cumul_pct']:.1f}%"
-            })
-        
-        st.dataframe(pd.DataFrame(mw_display), use_container_width=True, hide_index=True)
-    
     # Part selection
     part_ids = sorted(df["part_id"].unique())
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -2254,10 +2293,9 @@ def main():
             st.metric("📋 Records", f"{part_stats['n_records']}")
     
     # TABS
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔮 Prognostic Model", "📊 RQ1: Model Validation", 
-        "⚙️ RQ2: Reliability & PHM", "💰 RQ3: Operational Impact", "📈 All Parts Summary",
-        "📖 Campbell Framework Reference"
+        "⚙️ RQ2: Reliability & PHM", "💰 RQ3: Operational Impact", "📈 All Parts Summary"
     ])
     
     # TAB 1: PROGNOSTIC MODEL
@@ -2280,34 +2318,98 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # ---- MOST WANTED ALERT ----
-        if selected_part in most_wanted_ids:
-            # Get this part's rank and stats
-            mw_row = most_wanted_df[most_wanted_df['part_id'] == selected_part].iloc[0]
-            mw_rank = most_wanted_df.index[most_wanted_df['part_id'] == selected_part][0] + 1
-            pct_of_total = mw_row['total_scrap_weight'] / total_scrap_weight_all * 100
-            
-            st.markdown(f"""
-            <div style="background: #FFEBEE; border-left: 4px solid #D32F2F; padding: 15px; border-radius: 4px; margin: 10px 0;">
-                <strong>🚨 VITAL FEW — Most Wanted #{mw_rank} of 20</strong><br><br>
-                Part {selected_part} is ranked <strong>#{mw_rank}</strong> in total scrap weight contribution 
-                ({mw_row['total_scrap_weight']:,.0f} lbs, <strong>{pct_of_total:.1f}%</strong> of foundry total). 
-                With {int(mw_row['runs'])} production runs and {mw_row['avg_scrap']:.2f}% average scrap, 
-                this part represents a <strong>high-impact intervention target</strong>.<br><br>
-                <strong>Focus areas:</strong> Use the Failure-Conditional Pareto below to identify which defects 
-                are elevated during high-scrap events, the Root Cause Process Diagnosis to trace defects to 
-                Campbell's originating processes, and LIME to validate which features drive the model's 
-                prediction. A 10% improvement in this part's scrap rate across future runs would save an 
-                estimated <strong>{mw_row['total_scrap_weight'] * 0.10 / mw_row['runs']:,.0f} lbs per run</strong> — 
-                compounding with each production cycle.
-            </div>
-            """, unsafe_allow_html=True)
-        
         # Get pooled prediction for this part using PART-SPECIFIC threshold
         pooled_result = compute_pooled_prediction(df, selected_part, part_threshold)
         
         # Show pooling notification if used
-        if pooled_result['pooling_used']:
+        if pooled_result.get('show_dual'):
+            # ================================================================
+            # DUAL DISPLAY: Part has 5-29 runs (below CLT threshold)
+            # Show both part-level and pooled results for comparison
+            # ================================================================
+            part_metrics = pooled_result['part_level_metrics']
+            pool_comp = pooled_result.get('pooled_comparison')
+            
+            st.warning(f"""⚠️ **Part {selected_part} has {part_metrics['n_records']} production runs — below the 30-run 
+            Central Limit Theorem (CLT) threshold for full statistical confidence.** Two results are shown below: 
+            the model's prediction using this part's actual data, and a pooled comparison from similar parts. 
+            Experienced foundry judgment should be applied when interpreting these results.""")
+            
+            dual_col1, dual_col2 = st.columns(2)
+            
+            with dual_col1:
+                st.markdown("### 📊 Part-Level Prediction")
+                st.markdown(f"*Based on Part {selected_part}'s own {part_metrics['n_records']} production runs*")
+                
+                st.metric("Current Avg Scrap %", f"{part_metrics['avg_scrap']:.2f}%")
+                
+                st.markdown(f"""
+                | Part-Level Details | Value |
+                |---------------------|-------|
+                | Records | {part_metrics['n_records']} |
+                | Confidence | {part_metrics['confidence']} |
+                | Failures (above {part_threshold:.2f}%) | {part_metrics['failures']} |
+                | Failure Rate | {part_metrics['failure_rate']*100:.1f}% |
+                | MTTS (runs) | {part_metrics['mtts_runs']:.1f} |
+                | MTTS (parts) | {part_metrics['mtts_parts']:,.0f} |
+                | Reliability (next run) | {part_metrics['reliability']*100:.1f}% |
+                """)
+                
+                st.caption("⚠️ *< 30 runs — interpret with caution*")
+            
+            with dual_col2:
+                if pool_comp is not None:
+                    st.markdown("### 🔄 Pooled Comparison")
+                    st.markdown(f"*Based on {pool_comp['n_parts']} similar parts ({pool_comp['n_records']} total runs)*")
+                    
+                    st.metric("Pooled Avg Scrap %", f"{pool_comp['avg_scrap']:.2f}%")
+                    
+                    st.markdown(f"""
+                    | Pooled Details | Value |
+                    |----------------|-------|
+                    | Pooling Method | {pool_comp['method']} |
+                    | Weight Range | {pool_comp['weight_range']} lbs |
+                    | Total Records | {pool_comp['n_records']} |
+                    | Confidence | {pool_comp['confidence']} |
+                    | Pooled Threshold | {pool_comp['effective_threshold']:.2f}% (avg + 1σ) |
+                    | Failures | {pool_comp['failures']} |
+                    | Failure Rate | {pool_comp['failure_rate']*100:.1f}% |
+                    | MTTS (runs) | {pool_comp['mtts_runs']:.1f} |
+                    | MTTS (parts) | {pool_comp['mtts_parts']:,.0f} |
+                    | Reliability (next run) | {pool_comp['reliability']*100:.1f}% |
+                    """)
+                    
+                    # Show pooled parts
+                    if pool_comp.get('included_part_ids'):
+                        with st.expander(f"📋 View {pool_comp['n_parts']} Parts in Pool"):
+                            for pid in pool_comp['included_part_ids'][:20]:
+                                pid_weight = get_part_weight(df, pid)
+                                if pid_weight is None:
+                                    pid_weight = 0
+                                pid_data = df[df['part_id'] == pid]
+                                pid_n = len(pid_data)
+                                pid_avg_scrap = pid_data['scrap_percent'].mean()
+                                st.write(f"• Part {pid}: {pid_weight:.2f} lbs, {pid_n} runs, avg scrap {pid_avg_scrap:.1f}%")
+                            if len(pool_comp['included_part_ids']) > 20:
+                                st.write(f"... and {len(pool_comp['included_part_ids']) - 20} more parts")
+                else:
+                    st.markdown("### 🔄 Pooled Comparison")
+                    st.info("No suitable pool found (insufficient similar parts by weight/defect profile).")
+            
+            st.markdown("---")
+            st.info("""
+            💡 **How to interpret dual results:** The **Part-Level Prediction** (left) reflects what the model 
+            learned from this specific part's history. The **Pooled Comparison** (right) shows what similar 
+            parts (matched by weight ±10% and defect profile) have experienced. When the two results 
+            agree, confidence is higher. When they diverge, experienced foundry judgment is essential — 
+            the part may have unique characteristics not captured by the pool, or the part's limited 
+            history may not yet reflect its true behavior.
+            """)
+        
+        elif pooled_result['pooling_used']:
+            # ================================================================
+            # POOLING ONLY: Part has <5 runs - not enough for part-level
+            # ================================================================
             st.warning(f"⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)")
             
             # Get threshold info
@@ -2365,8 +2467,10 @@ def main():
                         st.write(f"• Part {exc['part_id']}: {exc['runs']} runs, avg scrap {exc['avg_scrap']:.1f}%")
                     st.caption("*Parts with fewer runs are excluded to reduce statistical noise*")
         else:
-            # Show weight info for parts with sufficient data (no pooling needed)
-            st.success(f"✅ **Part {selected_part} has sufficient data** ({pooled_result['part_level_n']} records)")
+            # ================================================================
+            # FULL CONFIDENCE: Part has ≥30 runs (CLT satisfied)
+            # ================================================================
+            st.success(f"✅ **Part {selected_part} has sufficient data** ({pooled_result['part_level_n']} records, ≥30 CLT threshold)")
             st.markdown(f"""
             | Part Details | Value |
             |--------------|-------|
@@ -2375,64 +2479,7 @@ def main():
             | Confidence Level | {pooled_result['confidence']} |
             """)
         
-        # ================================================================
-        # LOW-SCRAP PART NOTIFICATION & POOLING MISMATCH WARNING
-        # ================================================================
-        effective_threshold_check = pooled_result.get('effective_threshold', part_threshold)
-        pooling_used = pooled_result.get('pooling_used', False)
-        
-        # Check 1: Part is already at or below 1% scrap (gold standard)
-        if part_threshold <= 1.0:
-            total_parts_for_part = part_data['order_quantity'].sum()
-            n_runs = len(part_data)
-            st.markdown(f"""
-            <div style="background: #E8F5E9; border-left: 4px solid #4CAF50; padding: 15px; border-radius: 4px; margin: 10px 0;">
-                <strong>✅ Low-Scrap Part — Not a Priority for Intervention</strong><br><br>
-                Part {selected_part} averages <strong>{part_threshold:.2f}% scrap</strong> across 
-                {n_runs} run{'s' if n_runs != 1 else ''} ({total_parts_for_part:,.0f} parts produced). 
-                This is {'at or below' if part_threshold <= 0.5 else 'near'} the DOE 0.5% reduction target.<br><br>
-                Until the majority of parts are below 1% scrap, this part is <strong>not driving costs 
-                due to wasted energy and material</strong>. Improvement efforts should focus on the vital few 
-                parts with scrap rates above the foundry average ({df['scrap_percent'].mean():.2f}%), 
-                which account for the majority of total scrap weight.<br><br>
-                <em>That said, the analysis below still identifies areas where this part's process 
-                could be further refined. Results should be interpreted as optimization opportunities, 
-                not urgent interventions.</em>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Check 2: Pooling inflated the threshold — part's own rate is much lower than pooled rate
-        if pooling_used:
-            pooled_avg_check = pooled_result.get('pooled_avg_scrap', 0)
-            if part_threshold < pooled_avg_check and pooled_avg_check > 0:
-                ratio = pooled_avg_check / part_threshold if part_threshold > 0 else float('inf')
-                if ratio > 1.5:  # Pooled average is 50%+ higher than part's own average
-                    st.markdown(f"""
-                    <div style="background: #FFF3E0; border-left: 4px solid #FF9800; padding: 15px; border-radius: 4px; margin: 10px 0;">
-                        <strong>⚠️ Pooling Context — Use Judgment When Interpreting Results</strong><br><br>
-                        Part {selected_part}'s own average scrap rate is <strong>{part_threshold:.2f}%</strong>, 
-                        but insufficient data ({pooled_result.get('part_level_n', 0)} runs) required pooling with 
-                        similar-weight parts. The pooled population has an average scrap rate of 
-                        <strong>{pooled_avg_check:.2f}%</strong> — 
-                        <strong>{ratio:.1f}× higher</strong> than this part's history.<br><br>
-                        The effective threshold ({effective_threshold_check:.2f}%) and failure population 
-                        are derived from the pooled data and <strong>may not reflect this specific part's 
-                        actual defect patterns</strong>. The elevated scrap rates in the pooled population 
-                        are driven by other parts with similar weight but different process characteristics.<br><br>
-                        <strong>Recommendation:</strong> Consider the Pareto analysis and process diagnosis below 
-                        as indicative of general risk factors for parts in this weight class, not as a specific 
-                        diagnosis for Part {selected_part}. As more production runs accumulate for this part, 
-                        the dashboard will transition to part-specific analysis with higher confidence.
-                    </div>
-                    """, unsafe_allow_html=True)
-        
-        # Default order quantity to part's historical average
-        avg_order_for_part = df[df['part_id'] == selected_part]['order_quantity'].mean()
-        if pd.isna(avg_order_for_part) or avg_order_for_part < 1:
-            avg_order_for_part = 100
-        default_order_qty = int(min(5000, max(1, round(avg_order_for_part))))
-        
-        order_qty = st.slider("Order Quantity (parts)", 1, 5000, default_order_qty)
+        order_qty = st.slider("Order Quantity (parts)", 1, 5000, 100)
         
         # Use pooled MTTS (parts) if available - this is the CORRECTED calculation
         if pooled_result.get('mtts_parts') is not None:
@@ -2462,166 +2509,69 @@ def main():
         reliability = np.exp(-order_qty / mtts_parts) if mtts_parts > 0 else 0
         scrap_risk = 1 - reliability
         
+        # Availability calculation
+        avg_order_qty = df[df['part_id'] == selected_part]['order_quantity'].mean()
+        if pd.isna(avg_order_qty) or avg_order_qty == 0:
+            avg_order_qty = 100
+        mttr_parts = DEFAULT_MTTR * avg_order_qty  # Convert MTTR to parts
+        availability = mtts_parts / (mtts_parts + mttr_parts) if mtts_parts > 0 else 0
+        
         st.markdown("### 🎯 Prediction Summary")
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("🎲 Scrap Risk", f"{scrap_risk*100:.1f}%")
+        m2.metric("📈 Reliability R(n)", f"{reliability*100:.1f}%")
+        m3.metric("⚡ Availability", f"{availability*100:.1f}%")
+        m4.metric("🔧 MTTS", f"{mtts_parts:,.0f} parts")
+        
+        # Show ALL formulas for transparency
+        st.markdown("#### 📐 Calculation Formulas")
         
         # Get threshold info for display
         effective_threshold = pooled_result.get('effective_threshold', part_threshold)
         threshold_source = pooled_result.get('threshold_source', 'part-specific')
         
-        # MTTS info bar
-        if failure_count > 0:
-            st.success(f"""
-            **MTTS (parts):** {total_parts_produced:,.0f} parts ÷ {failure_count} failures = **{mtts_parts:,.0f} parts** 
-            — *On average, {mtts_parts:,.0f} parts produced between scrap events* 
-            (Threshold: {effective_threshold:.2f}%, {threshold_source})
+        formula_col1, formula_col2 = st.columns(2)
+        
+        with formula_col1:
+            if failure_count > 0:
+                st.info(f"""
+                **MTTS (parts):** {total_parts_produced:,.0f} parts ÷ {failure_count} failures = **{mtts_parts:,.0f} parts**
+                
+                *"On average, {mtts_parts:,.0f} parts are produced between scrap events"*
+                
+                Threshold used: {effective_threshold:.2f}% ({threshold_source})
+                """)
+            else:
+                st.warning(f"""
+                **MTTS (parts):** {total_parts_produced:,.0f} parts × 2 (no failures) = **{mtts_parts:,.0f} parts**
+                
+                *"No failures observed above {effective_threshold:.2f}% threshold - conservative estimate"*
+                """)
+            
+            st.info(f"""
+            **Reliability:** R({order_qty:,}) = e^(-{order_qty:,} / {mtts_parts:,.0f}) = **{reliability*100:.1f}%**
+            
+            *"Probability of completing {order_qty:,} parts without a scrap event"*
             """)
-        else:
-            st.warning(f"""
-            **MTTS (parts):** {total_parts_produced:,.0f} parts × 2 (no failures) = **{mtts_parts:,.0f} parts** 
-            — *No failures observed above {effective_threshold:.2f}% threshold — conservative estimate*
+        
+        with formula_col2:
+            st.info(f"""
+            **Scrap Risk:** 1 - R({order_qty:,}) = 1 - {reliability*100:.1f}% = **{scrap_risk*100:.1f}%**
+            
+            *"Probability of experiencing a scrap event during this order"*
             """)
-        
-        # Generate curve data: n from 1 to max(2.5*MTTS, 5000, order_qty*1.5)
-        curve_max_n = int(max(mtts_parts * 2.5, 5000, order_qty * 1.5))
-        n_points = np.linspace(1, curve_max_n, 500)
-        
-        # Compute curves
-        rel_curve = np.exp(-n_points / mtts_parts) * 100 if mtts_parts > 0 else np.zeros_like(n_points)
-        risk_curve = 100 - rel_curve
-        
-        # e^(-1) point: n = MTTS, R(MTTS) = 36.8%, Risk = 63.2%
-        e_inv = np.exp(-1) * 100  # 36.8%
-        e_inv_risk = 100 - e_inv  # 63.2%
-        
-        # Current values at order_qty
-        current_rel = reliability * 100
-        current_risk = scrap_risk * 100
-        
-        # --- Two-column layout: Reliability | Scrap Risk ---
-        pred_col1, pred_col2 = st.columns(2)
-        
-        # === RELIABILITY CHART ===
-        with pred_col1:
-            fig_rel = go.Figure()
             
-            # Reliability curve
-            fig_rel.add_trace(go.Scatter(
-                x=n_points, y=rel_curve,
-                mode='lines', line=dict(color='#1976D2', width=2.5),
-                fill='tozeroy', fillcolor='rgba(25,118,210,0.1)',
-                name='R(n)', showlegend=False
-            ))
+            st.info(f"""
+            **Availability:** {mtts_parts:,.0f} ÷ ({mtts_parts:,.0f} + {mttr_parts:,.0f}) = **{availability*100:.1f}%**
             
-            # Vertical line at n = MTTS (e^-1 characteristic life)
-            fig_rel.add_vline(
-                x=mtts_parts, line_dash="dash", line_color="#E53935", line_width=1.5,
-                annotation_text=f"e⁻¹ = {e_inv:.1f}% at n={mtts_parts:,.0f}",
-                annotation_position="top right",
-                annotation_font=dict(size=10, color="#E53935")
-            )
-            
-            # Horizontal reference line at e^-1 = 36.8%
-            fig_rel.add_hline(
-                y=e_inv, line_dash="dot", line_color="#E53935", line_width=1, opacity=0.5
-            )
-            
-            # Current order quantity marker
-            fig_rel.add_trace(go.Scatter(
-                x=[order_qty], y=[current_rel],
-                mode='markers+text',
-                marker=dict(size=12, color='#1976D2', symbol='diamond', 
-                           line=dict(width=2, color='white')),
-                text=[f'{current_rel:.1f}%'],
-                textposition='top center',
-                textfont=dict(size=11, color='#1976D2'),
-                name='Current Order', showlegend=False
-            ))
-            
-            fig_rel.update_layout(
-                title=dict(text="<b>Reliability R(n)</b>", font=dict(size=14)),
-                xaxis_title="Parts (n)",
-                yaxis_title="Reliability (%)",
-                yaxis=dict(range=[0, 105]),
-                height=300, margin=dict(l=50, r=20, t=40, b=50),
-                plot_bgcolor='white',
-                xaxis=dict(gridcolor='#f0f0f0'),
-                yaxis_gridcolor='#f0f0f0'
-            )
-            st.plotly_chart(fig_rel, use_container_width=True)
-            
-            # Current value
-            st.metric("📈 Reliability R(n)", f"{current_rel:.1f}%")
-            
-            # Formula
-            st.caption(f"R({order_qty:,}) = e^(-{order_qty:,} / {mtts_parts:,.0f}) = **{current_rel:.1f}%**")
-            st.caption(f'*"Probability of completing {order_qty:,} parts without a scrap event"*')
-        
-        # === SCRAP RISK CHART ===
-        with pred_col2:
-            fig_risk = go.Figure()
-            
-            # Risk curve
-            fig_risk.add_trace(go.Scatter(
-                x=n_points, y=risk_curve,
-                mode='lines', line=dict(color='#E53935', width=2.5),
-                fill='tozeroy', fillcolor='rgba(229,57,53,0.1)',
-                name='Scrap Risk', showlegend=False
-            ))
-            
-            # Vertical line at n = MTTS (e^-1 characteristic life)
-            fig_risk.add_vline(
-                x=mtts_parts, line_dash="dash", line_color="#1976D2", line_width=1.5,
-                annotation_text=f"e⁻¹ → Risk={e_inv_risk:.1f}% at n={mtts_parts:,.0f}",
-                annotation_position="top left",
-                annotation_font=dict(size=10, color="#1976D2")
-            )
-            
-            # Horizontal reference line at 1 - e^-1 = 63.2%
-            fig_risk.add_hline(
-                y=e_inv_risk, line_dash="dot", line_color="#1976D2", line_width=1, opacity=0.5
-            )
-            
-            # Current order quantity marker
-            fig_risk.add_trace(go.Scatter(
-                x=[order_qty], y=[current_risk],
-                mode='markers+text',
-                marker=dict(size=12, color='#E53935', symbol='diamond',
-                           line=dict(width=2, color='white')),
-                text=[f'{current_risk:.1f}%'],
-                textposition='top center',
-                textfont=dict(size=11, color='#E53935'),
-                name='Current Order', showlegend=False
-            ))
-            
-            fig_risk.update_layout(
-                title=dict(text="<b>Scrap Risk F(n)</b>", font=dict(size=14)),
-                xaxis_title="Parts (n)",
-                yaxis_title="Scrap Risk (%)",
-                yaxis=dict(range=[0, 105]),
-                height=300, margin=dict(l=50, r=20, t=40, b=50),
-                plot_bgcolor='white',
-                xaxis=dict(gridcolor='#f0f0f0'),
-                yaxis_gridcolor='#f0f0f0'
-            )
-            st.plotly_chart(fig_risk, use_container_width=True)
-            
-            # Current value
-            st.metric("🎲 Scrap Risk", f"{current_risk:.1f}%")
-            
-            # Formula
-            st.caption(f"F({order_qty:,}) = 1 - R({order_qty:,}) = 1 - {current_rel:.1f}% = **{current_risk:.1f}%**")
-            st.caption(f'*"Probability of experiencing a scrap event during this order"*')
-        
+            *"Proportion of time available for production vs. rework"*
+            """)
         
         st.markdown("---")
         
         # ================================================================
         # DETAILED DEFECT ANALYSIS
-        # ================================================================
-        # Historical Pareto: P(defect_rate | all runs)
-        # Failure Pareto:    P(defect_rate | scrap > threshold)
-        # The difference reveals which defects are disproportionately present
-        # during failure events — the assignable causes driving scrap.
         # ================================================================
         st.markdown("### 📊 Detailed Defect Analysis")
         
@@ -2631,104 +2581,30 @@ def main():
         else:
             analysis_df = df[df['part_id'] == selected_part]
         
-        # User-adjustable threshold for failure-conditional Pareto
-        default_threshold = pooled_result.get('effective_threshold', part_threshold)
-        max_scrap = float(analysis_df['scrap_percent'].max()) if len(analysis_df) > 0 else 50.0
-        
-        # DOE/EPA benchmark quick-set buttons (10% and 20% relative reduction)
-        reduction_10 = round(part_threshold * 0.90 * 2) / 2  # Round to nearest 0.5
-        reduction_20 = round(part_threshold * 0.80 * 2) / 2  # Round to nearest 0.5
-        
-        # Initialize session state for slider if not set or out of bounds for current part
-        slider_max = max(max_scrap, default_threshold + 1.0)
-        if 'unified_threshold_slider' not in st.session_state:
-            st.session_state.unified_threshold_slider = min(default_threshold, max_scrap)
-        elif st.session_state.unified_threshold_slider > slider_max:
-            st.session_state.unified_threshold_slider = min(default_threshold, max_scrap)
-        
-        st.markdown("#### ⚙️ Scrap Exceedance Threshold")
-        st.caption("*Adjust to redefine what counts as a 'failure.' This threshold drives the Failure-Conditional "
-                   "Defect Pareto, Root Cause Diagnosis, and Scrap Threshold Sensitivity Analysis below.*")
-        
-        # Quick-set buttons row
-        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns([1.5, 1.5, 1.5, 1.5])
-        with btn_col1:
-            st.caption(f"Part Avg: **{part_threshold:.2f}%**")
-        with btn_col2:
-            if st.button(f"📉 10% Reduction → {reduction_10:.1f}%", 
-                        key="btn_10pct",
-                        help=f"DOE lower bound: 10% relative reduction from {part_threshold:.2f}% avg scrap"):
-                st.session_state.unified_threshold_slider = max(0.5, reduction_10)
-                st.rerun()
-        with btn_col3:
-            if st.button(f"📉 20% Reduction → {reduction_20:.1f}%",
-                        key="btn_20pct", 
-                        help=f"DOE upper bound: 20% relative reduction from {part_threshold:.2f}% avg scrap"):
-                st.session_state.unified_threshold_slider = max(0.5, reduction_20)
-                st.rerun()
-        with btn_col4:
-            if st.button(f"🔄 Reset to Part Avg",
-                        key="btn_reset_threshold",
-                        help=f"Reset to part-specific average: {part_threshold:.2f}%"):
-                st.session_state.unified_threshold_slider = min(default_threshold, max_scrap)
-                st.rerun()
-        
-        threshold_col1, threshold_col2, threshold_col3 = st.columns([2, 1, 1])
-        with threshold_col1:
-            unified_threshold = st.slider(
-                "🎚️ Scrap % Threshold (Failure Definition)",
-                min_value=0.5,
-                max_value=max(max_scrap, default_threshold + 1.0),
-                step=0.5,
-                key="unified_threshold_slider",
-                help="Runs with scrap above this threshold are treated as 'failure events' — affects Pareto, reliability metrics, and sensitivity analysis"
-            )
-        
-        # Count runs at this threshold
-        failure_df = analysis_df[analysis_df['scrap_percent'] > unified_threshold]
-        n_failures = len(failure_df)
-        n_total = len(analysis_df)
-        
-        with threshold_col2:
-            st.metric("Failure Runs", f"{n_failures} of {n_total}")
-        with threshold_col3:
-            st.metric("Failure Rate", f"{n_failures/n_total*100:.0f}%" if n_total > 0 else "0%")
-        
-        # Compute defect rates: historical (all runs) vs. failure-conditional
+        # Compute defect rates
         defect_data = []
         for col in defect_cols:
             if col in analysis_df.columns:
                 hist_rate = analysis_df[col].mean() * 100
                 if hist_rate > 0:
                     defect_name = col.replace('_rate', '').replace('_', ' ').title()
-                    # Conditional rate: average defect rate during failure runs only
-                    if n_failures > 0:
-                        failure_rate = failure_df[col].mean() * 100
-                    else:
-                        failure_rate = hist_rate  # No failures: fall back to historical
-                    
-                    # Risk multiplier: how much more prevalent is this defect during failures?
-                    risk_multiplier = failure_rate / hist_rate if hist_rate > 0 else 1.0
-                    
                     defect_data.append({
                         'Defect': defect_name,
                         'Defect_Code': col,
                         'Historical Rate (%)': hist_rate,
-                        'Failure Rate (%)': failure_rate,
-                        'Risk Multiplier': risk_multiplier,
+                        'Predicted Rate (%)': hist_rate,  # Using historical as proxy
                         'Expected Count': hist_rate / 100 * order_qty
                     })
         
         if defect_data:
-            defect_df = pd.DataFrame(defect_data)
+            defect_df = pd.DataFrame(defect_data).sort_values('Historical Rate (%)', ascending=False)
             
             # Pareto Charts side by side
             pareto_col1, pareto_col2 = st.columns(2)
             
             with pareto_col1:
                 st.markdown("#### 📊 Historical Defect Pareto")
-                st.caption(f"*Average defect rates across ALL {n_total} runs*")
-                hist_data = defect_df.sort_values('Historical Rate (%)', ascending=False).head(10).copy()
+                hist_data = defect_df.head(10).copy()
                 
                 # Create Pareto chart
                 total = hist_data['Historical Rate (%)'].sum()
@@ -2750,7 +2626,7 @@ def main():
                     mode='lines+markers'
                 ))
                 fig_hist.update_layout(
-                    title="Top 10 Historical Defects (All Runs)",
+                    title="Top 10 Historical Defects",
                     xaxis=dict(tickangle=-45),
                     yaxis=dict(title='Rate (%)', side='left'),
                     yaxis2=dict(title='Cumulative %', side='right', overlaying='y', range=[0, 105]),
@@ -2761,38 +2637,18 @@ def main():
                 st.plotly_chart(fig_hist, use_container_width=True)
             
             with pareto_col2:
-                st.markdown("#### 🔮 Failure-Conditional Defect Pareto")
-                if n_failures > 0:
-                    st.caption(f"*Average defect rates during {n_failures} failure runs (scrap > {unified_threshold:.1f}%)*")
-                else:
-                    st.caption(f"*No failure runs above {unified_threshold:.1f}% threshold — showing historical rates*")
+                st.markdown("#### 🔮 Predicted Defect Pareto")
+                pred_data = defect_df.head(10).copy()
                 
-                # Sort by FAILURE rate — Pareto order may differ from historical
-                pred_data = defect_df.sort_values('Failure Rate (%)', ascending=False).head(10).copy()
-                
-                total_pred = pred_data['Failure Rate (%)'].sum()
-                pred_data['Cumulative %'] = (pred_data['Failure Rate (%)'].cumsum() / total_pred * 100) if total_pred > 0 else 0
-                
-                # Color bars by risk multiplier: red if elevated during failures, gray if same/lower
-                bar_colors = []
-                for _, row in pred_data.iterrows():
-                    if row['Risk Multiplier'] > 1.5:
-                        bar_colors.append('#C62828')   # Dark red — strongly elevated during failures
-                    elif row['Risk Multiplier'] > 1.1:
-                        bar_colors.append('#E53935')   # Red — moderately elevated
-                    elif row['Risk Multiplier'] > 0.9:
-                        bar_colors.append('#FF8A65')   # Orange — similar to historical
-                    else:
-                        bar_colors.append('#66BB6A')   # Green — lower during failures
+                total_pred = pred_data['Predicted Rate (%)'].sum()
+                pred_data['Cumulative %'] = (pred_data['Predicted Rate (%)'].cumsum() / total_pred * 100) if total_pred > 0 else 0
                 
                 fig_pred = go.Figure()
                 fig_pred.add_trace(go.Bar(
                     x=pred_data['Defect'],
-                    y=pred_data['Failure Rate (%)'],
-                    name='Failure Rate (%)',
-                    marker_color=bar_colors,
-                    text=[f"{m:.1f}×" for m in pred_data['Risk Multiplier']],
-                    textposition='outside'
+                    y=pred_data['Predicted Rate (%)'],
+                    name='Rate (%)',
+                    marker_color='#E53935'
                 ))
                 fig_pred.add_trace(go.Scatter(
                     x=pred_data['Defect'],
@@ -2803,25 +2659,15 @@ def main():
                     mode='lines+markers'
                 ))
                 fig_pred.update_layout(
-                    title="Top 10 Defects During Failure Events",
+                    title="Top 10 Predicted Defects",
                     xaxis=dict(tickangle=-45),
-                    yaxis=dict(title='Failure Rate (%)', side='left'),
+                    yaxis=dict(title='Rate (%)', side='left'),
                     yaxis2=dict(title='Cumulative %', side='right', overlaying='y', range=[0, 105]),
                     height=400,
                     showlegend=True,
                     legend=dict(x=0.7, y=1)
                 )
                 st.plotly_chart(fig_pred, use_container_width=True)
-            
-            # Risk multiplier insight callout
-            if n_failures > 0:
-                top_risk = defect_df.sort_values('Risk Multiplier', ascending=False).head(3)
-                elevated = top_risk[top_risk['Risk Multiplier'] > 1.1]
-                if len(elevated) > 0:
-                    risk_items = [f"**{row['Defect']}** ({row['Risk Multiplier']:.1f}× historical)" for _, row in elevated.iterrows()]
-                    st.info(f"⚠️ **Defects disproportionately elevated during failure events:** {', '.join(risk_items)}. "
-                           f"These defects are more prevalent when scrap exceeds {unified_threshold:.1f}% than during normal production, "
-                           f"indicating assignable causes for targeted intervention.")
         
         st.markdown("---")
         
@@ -2830,31 +2676,8 @@ def main():
         # ================================================================
         st.markdown("### 🏭 Root Cause Process Diagnosis")
         st.caption("*Based on Campbell (2003) process-defect relationships*")
-        st.info(f"📍 **Using threshold: {unified_threshold:.1f}%** — Process contributions computed from "
-                f"**{n_failures} failure runs** (scrap > {unified_threshold:.1f}%), not historical averages.")
         
-        # Compute process contributions from FAILURE-CONDITIONAL defect rates
-        # (driven by unified threshold slider, not historical averages)
-        if n_failures > 0 and defect_data:
-            # Use failure rates from the already-computed defect_data
-            failure_defect_rates = {d['Defect_Code']: d['Failure Rate (%)'] / 100 for d in defect_data}
-        else:
-            # Fallback to historical if no failures
-            failure_defect_rates = {d['Defect_Code']: d['Historical Rate (%)'] / 100 for d in defect_data} if defect_data else {}
-        
-        # Compute process scores from failure-conditional rates
-        process_scores = {}
-        for process, info in PROCESS_DEFECT_MAP.items():
-            score = sum(failure_defect_rates.get(d, 0) for d in info['defects'])
-            process_scores[process] = score
-        
-        total_score = sum(process_scores.values())
-        if total_score > 0:
-            process_contributions = {p: (s / total_score) * 100 for p, s in process_scores.items()}
-        else:
-            process_contributions = {p: 0 for p in process_scores}
-        
-        process_ranking = sorted(process_contributions.items(), key=lambda x: x[1], reverse=True)
+        process_ranking, top_defects = diagnose_processes(df, selected_part, defect_cols)
         
         if process_ranking:
             # Process contribution chart
@@ -2868,12 +2691,10 @@ def main():
                     for i, (process, contribution) in enumerate(process_data[:5]):
                         icon = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "📍"
                         color = '#FFEBEE' if i == 0 else '#FFF3E0' if i == 1 else '#E3F2FD' if i == 2 else '#F5F5F5'
-                        campbell_ref = PROCESS_DEFECT_MAP[process].get('campbell_rule', '')
                         st.markdown(f"""
                         <div style="background: {color}; padding: 10px; border-radius: 8px; margin: 5px 0;">
                             {icon} <strong>{process}</strong>: {contribution:.1f}%
                             <br><small>{PROCESS_DEFECT_MAP[process]['description']}</small>
-                            <br><small><em>Campbell (2003): {campbell_ref}</em></small>
                         </div>
                         """, unsafe_allow_html=True)
                 
@@ -2885,7 +2706,7 @@ def main():
                                      '#00796B', '#5D4037', '#455A64', '#C2185B'][:len(process_data)]
                     ))
                     fig_process.update_layout(
-                        title=f"Process Contributions During Failure Events (scrap > {unified_threshold:.1f}%)",
+                        title="Process Contributions to Predicted Defects",
                         xaxis_title="Process",
                         yaxis_title="Contribution (%)",
                         height=350,
@@ -2903,7 +2724,6 @@ def main():
                     defect_names = [d.replace('_rate', '').replace('_', ' ').title() for d in defects]
                     process_table.append({
                         'Process': process,
-                        'Campbell Rule': PROCESS_DEFECT_MAP[process].get('campbell_rule', ''),
                         'Contribution (%)': f"{contribution:.1f}",
                         f'Risk Share (of {scrap_risk*100:.1f}%)': f"{risk_share:.2f}",
                         'Related Defects': ', '.join(defect_names),
@@ -2925,11 +2745,9 @@ def main():
                         defect_code = d['Defect_Code']
                         # Find which processes this defect maps to
                         related_processes = []
-                        campbell_rules = []
                         for proc, info in PROCESS_DEFECT_MAP.items():
                             if defect_code in info['defects']:
                                 related_processes.append(proc)
-                                campbell_rules.append(info.get('campbell_rule', ''))
                         
                         if total_defect_rate > 0:
                             risk_share = (d['Historical Rate (%)'] / total_defect_rate) * scrap_risk * 100
@@ -2939,12 +2757,9 @@ def main():
                         mapping_data.append({
                             'Defect': d['Defect'],
                             'Historical Rate (%)': f"{d['Historical Rate (%)']:.2f}",
-                            'Failure Rate (%)': f"{d['Failure Rate (%)']:.2f}",
-                            'Risk Multiplier': f"{d['Risk Multiplier']:.1f}×",
                             'Risk Share (%)': f"{risk_share:.2f}",
                             'Expected Count': f"{d['Expected Count']:.1f}",
-                            'Root Cause Process(es)': ', '.join(related_processes) if related_processes else 'Unknown',
-                            'Campbell Rule': ', '.join(campbell_rules) if campbell_rules else ''
+                            'Root Cause Process(es)': ', '.join(related_processes) if related_processes else 'Unknown'
                         })
                     
                     mapping_df = pd.DataFrame(mapping_data)
@@ -3140,13 +2955,21 @@ def main():
         part_max_sens = part_data['scrap_percent'].max()
         global_avg_sens = df['scrap_percent'].mean()
         
-        # Use the unified threshold slider from the Detailed Defect Analysis section
-        threshold_slider = unified_threshold
+        # Slider for manual threshold exploration
+        sens_col1, sens_col2 = st.columns([2, 1])
         
-        st.info(f"📍 **Using threshold: {threshold_slider:.1f}%** (set via the Scrap Exceedance Threshold slider above)")
+        with sens_col1:
+            threshold_slider = st.slider(
+                "🎚️ Scrap % Threshold (Failure Definition)",
+                min_value=0.0,
+                max_value=10.0,
+                value=float(part_threshold),
+                step=0.5,
+                help="Adjust to see how reliability changes when you redefine what counts as a 'failure'",
+                key="threshold_sensitivity_slider"
+            )
         
-        sens_stats_col1, sens_stats_col2 = st.columns([1, 1])
-        with sens_stats_col1:
+        with sens_col2:
             st.markdown(f"""
             **Part Statistics:**
             - Part Avg: {part_avg_sens:.2f}%
@@ -3361,22 +3184,11 @@ def main():
         # Reliability Metrics Snapshot
         st.markdown("---")
         st.markdown("### 📋 Reliability Metrics Snapshot")
-        st.info(f"📍 **Using threshold: {unified_threshold:.1f}%** (set via the Scrap Exceedance Threshold slider above)")
         
-        # Recalculate MTTS based on unified threshold
-        snapshot_part_data = part_data.sort_values('week_ending').copy() if 'week_ending' in part_data.columns else part_data.copy()
-        snapshot_total_parts = int(snapshot_part_data['order_quantity'].sum()) if 'order_quantity' in snapshot_part_data.columns else len(snapshot_part_data)
-        snapshot_total_runs = len(snapshot_part_data)
-        snapshot_failures = int((snapshot_part_data['scrap_percent'] > unified_threshold).sum())
-        
-        if snapshot_failures > 0:
-            snapshot_mtts_parts = snapshot_total_parts / snapshot_failures
-            snapshot_mtts_runs = snapshot_total_runs / snapshot_failures
-        else:
-            snapshot_mtts_parts = snapshot_total_parts * 2
-            snapshot_mtts_runs = snapshot_total_runs * 2
-        
-        mtts_parts_val = snapshot_mtts_parts
+        # Use MTTS (parts) for reliability calculations at different order sizes
+        mtts_parts_val = pooled_result.get('mtts_parts', mtts_parts)
+        if mtts_parts_val is None or mtts_parts_val == 0:
+            mtts_parts_val = mtts_parts
         
         # Calculate reliability at different order quantities (in parts)
         rel_100 = np.exp(-100 / mtts_parts_val) if mtts_parts_val > 0 else 0
@@ -3389,38 +3201,178 @@ def main():
         r10.metric("R(1000 parts)", f"{rel_1000*100:.1f}%")
         
         # Prepare values for table
-        mtts_runs_display = f"{snapshot_mtts_runs:.1f}"
-        mtts_parts_display = f"{mtts_parts_val:,.0f}"
+        mtts_runs_display = f"{pooled_result['mtts_runs']:.1f}" if pooled_result['mtts_runs'] else "N/A"
+        mtts_parts_display = f"{mtts_parts_val:,.0f}" if mtts_parts_val else "N/A"
         lambda_display = f"{1/mtts_parts_val:.6f}" if mtts_parts_val > 0 else "0"
-        total_parts_display = f"{snapshot_total_parts:,}"
-        total_runs_display = f"{snapshot_total_runs:,}"
+        total_parts_display = f"{pooled_result.get('total_parts_produced', 0):,}"
+        total_runs_display = f"{pooled_result.get('pooled_n', 0):,}"
         data_source = f"Pooled ({pooled_result['pooled_n']} records)" if pooled_result['pooling_used'] else f"Part-level ({pooled_result.get('part_level_n', 0)} records)"
         
         st.markdown(f"""
         | Metric | Value | Formula |
         |--------|-------|---------|
-        | **MTTS (parts)** | **{mtts_parts_display}** | Total Parts ({total_parts_display}) ÷ Failures ({snapshot_failures}) |
-        | MTTS (runs) | {mtts_runs_display} | Total Runs ({total_runs_display}) ÷ Failures ({snapshot_failures}) |
+        | **MTTS (parts)** | **{mtts_parts_display}** | Total Parts ({total_parts_display}) ÷ Failures ({pooled_result['failure_count']}) |
+        | MTTS (runs) | {mtts_runs_display} | Total Runs ({total_runs_display}) ÷ Failures ({pooled_result['failure_count']}) |
         | λ (failure rate) | {lambda_display} | 1 ÷ MTTS (parts) |
-        | Failures observed | {snapshot_failures} | Runs where Scrap % > {unified_threshold:.2f}% |
-        | **Threshold used** | **{unified_threshold:.2f}%** | **Unified scrap exceedance threshold** |
+        | Failures observed | {pooled_result['failure_count']} | Runs where Scrap % > {part_threshold:.2f}% (part avg) |
+        | **Threshold used** | **{part_threshold:.2f}%** | **Part-specific average scrap rate** |
         | Data source | {data_source} | |
         """)
         
         # ================================================================
-        # RELIABILITY TARGET CALCULATOR
+        # RELIABILITY IMPROVEMENT PLANNER
         # ================================================================
         st.markdown("---")
-        st.markdown("### 🧮 Reliability Target Calculator")
-        st.caption("*What MTTS is needed to achieve a specific reliability target for this order size?*")
+        st.markdown("### 🎯 Reliability Improvement Planner")
         
-        if defect_data and snapshot_failures > 0:
-            # Current state from threshold-adjusted values
-            current_failures = snapshot_failures
-            total_parts_produced = snapshot_total_parts
-            current_mtts = mtts_parts_val if mtts_parts_val > 0 else 1000
-            current_reliability = np.exp(-order_qty / current_mtts) * 100 if current_mtts > 0 else 0
+        st.markdown("""
+        <div class="citation-box">
+            <strong>Decision Support Tool:</strong> Set achievable scrap reduction targets for top defects 
+            to see projected reliability improvement. Industry benchmarks suggest 80% reliability as acceptable 
+            and 90% as world-class (NASA, 1999; Tractian, 2024).
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Use defect_data that was already computed earlier (around line 1828)
+        # This contains: Defect, Defect_Code, Historical Rate (%), Predicted Rate (%), Expected Count
+        if defect_data and pooled_result['failure_count'] > 0:
+            # Get top 5 defects
             sorted_defects = sorted(defect_data, key=lambda x: x['Historical Rate (%)'], reverse=True)[:5]
+            
+            # Current state calculations
+            current_failures = pooled_result['failure_count']
+            total_parts_produced = pooled_result.get('total_parts_produced', mtts_parts * current_failures)
+            current_mtts = mtts_parts_val if mtts_parts_val > 0 else 1000
+            current_reliability = reliability * 100
+            
+            # Calculate what portion of failures each defect contributes
+            total_defect_rate = sum(d['Historical Rate (%)'] for d in sorted_defects)
+            
+            st.markdown("#### 📊 Current State vs. Target State")
+            
+            # Create columns for current and target
+            col_header1, col_header2, col_header3, col_header4 = st.columns([2, 1.5, 1.5, 2])
+            col_header1.markdown("**Top 5 Defects**")
+            col_header2.markdown("**Current Rate (%)**")
+            col_header3.markdown("**Target Rate (%)**")
+            col_header4.markdown("**Est. Failure Reduction**")
+            
+            # Store target values
+            target_rates = {}
+            estimated_failure_reductions = {}
+            
+            for i, defect_info in enumerate(sorted_defects):
+                defect_name = defect_info['Defect']
+                defect_col = defect_info['Defect_Code']
+                current_rate = defect_info['Historical Rate (%)']
+                
+                # Find which process this defect belongs to
+                process_name = "Unknown"
+                for proc, info in PROCESS_DEFECT_MAP.items():
+                    if defect_col in info['defects']:
+                        process_name = proc
+                        break
+                
+                col1, col2, col3, col4 = st.columns([2, 1.5, 1.5, 2])
+                
+                with col1:
+                    icon = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "📍"
+                    st.markdown(f"{icon} **{defect_name}**")
+                    st.caption(f"*Process: {process_name}*")
+                
+                with col2:
+                    st.markdown(f"**{current_rate:.2f}%**")
+                
+                with col3:
+                    # Input field for target rate
+                    target_rate = st.number_input(
+                        f"Target {defect_name}",
+                        min_value=0.0,
+                        max_value=float(current_rate),
+                        value=float(current_rate * 0.7),  # Default to 30% reduction
+                        step=0.1,
+                        key=f"target_{defect_col}_{selected_part}",
+                        label_visibility="collapsed"
+                    )
+                    target_rates[defect_col] = target_rate
+                
+                with col4:
+                    # Calculate estimated failure reduction
+                    if total_defect_rate > 0:
+                        defect_contribution = current_rate / total_defect_rate
+                        rate_reduction_pct = (current_rate - target_rate) / current_rate if current_rate > 0 else 0
+                        estimated_reduction = defect_contribution * rate_reduction_pct * current_failures
+                        estimated_failure_reductions[defect_col] = estimated_reduction
+                        st.markdown(f"**-{estimated_reduction:.1f} failures**")
+                        st.caption(f"({defect_contribution*100:.0f}% × {rate_reduction_pct*100:.0f}% reduction)")
+                    else:
+                        estimated_failure_reductions[defect_col] = 0
+                        st.markdown("—")
+            
+            st.markdown("---")
+            
+            # Calculate projected improvements
+            total_failure_reduction = sum(estimated_failure_reductions.values())
+            projected_failures = max(1, current_failures - total_failure_reduction)
+            
+            if total_parts_produced > 0 and projected_failures > 0:
+                projected_mtts = total_parts_produced / projected_failures
+                projected_reliability = np.exp(-order_qty / projected_mtts) * 100
+            else:
+                projected_mtts = current_mtts * 2
+                projected_reliability = min(99.9, current_reliability + 10)
+            
+            # Display projected outcomes
+            st.markdown("#### 📈 Projected Outcomes")
+            
+            out1, out2, out3, out4 = st.columns(4)
+            
+            reliability_delta = projected_reliability - current_reliability
+            reliability_color = "normal" if reliability_delta > 0 else "inverse"
+            
+            out1.metric(
+                "🎯 Projected Reliability",
+                f"{projected_reliability:.1f}%",
+                delta=f"+{reliability_delta:.1f}%" if reliability_delta > 0 else f"{reliability_delta:.1f}%"
+            )
+            
+            out2.metric(
+                "🔧 Projected MTTS",
+                f"{projected_mtts:,.0f} parts",
+                delta=f"+{projected_mtts - current_mtts:,.0f}"
+            )
+            
+            out3.metric(
+                "⚠️ Projected Failures",
+                f"{projected_failures:.0f}",
+                delta=f"-{total_failure_reduction:.1f}" if total_failure_reduction > 0 else "0"
+            )
+            
+            # Calculate what reliability target is achievable
+            if projected_reliability >= 90:
+                status = "🏆 World-Class (≥90%)"
+                status_color = "#4CAF50"
+            elif projected_reliability >= 80:
+                status = "✅ Acceptable (≥80%)"
+                status_color = "#2196F3"
+            elif projected_reliability >= 70:
+                status = "⚠️ Warning Zone (70-80%)"
+                status_color = "#FF9800"
+            else:
+                status = "🔴 Critical (<70%)"
+                status_color = "#F44336"
+            
+            out4.markdown(f"""
+            <div style="background: {status_color}20; padding: 15px; border-radius: 8px; border-left: 4px solid {status_color};">
+                <strong>Status</strong><br>
+                <span style="font-size: 1.1em;">{status}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Reliability Target Calculator
+            st.markdown("---")
+            st.markdown("#### 🧮 Reliability Target Calculator")
+            st.caption("*What failure rate reduction is needed to achieve a specific reliability target?*")
             
             target_reliability = st.slider(
                 "Target Reliability (%)",
@@ -3504,9 +3456,161 @@ def main():
                 - **Maintenance Threshold** → When to EXECUTE action (R < 70%)  
                 - **Failure Threshold** → Critical intervention required (R < 50%)
                 """)
+            
+            # ================================================================
+            # ACTION PLAN GENERATION
+            # ================================================================
+            st.markdown("---")
+            st.markdown("### 📄 Generate Action Plan Report")
+            st.caption("*Create a printable action plan based on your threshold and improvement targets*")
+            
+            # Prepare defect targets for report
+            defect_targets_for_report = []
+            for i, defect_info in enumerate(sorted_defects):
+                defect_col = defect_info['Defect_Code']
+                current_rate = defect_info['Historical Rate (%)']
+                target_rate = target_rates.get(defect_col, current_rate * 0.7)
+                
+                # Find process area
+                process_name = "Unknown"
+                for proc, info in PROCESS_DEFECT_MAP.items():
+                    if defect_col in info['defects']:
+                        process_name = proc
+                        break
+                
+                defect_targets_for_report.append({
+                    'defect_name': defect_info['Defect'],
+                    'defect_code': defect_col,
+                    'process': process_name,
+                    'current_rate': current_rate,
+                    'target_rate': target_rate,
+                    'estimated_reduction': estimated_failure_reductions.get(defect_col, 0)
+                })
+            
+            # Prepare LIME insights if available
+            lime_insights_for_report = []
+            if 'lime_result' in st.session_state and st.session_state.lime_result:
+                lime_result = st.session_state.lime_result
+                if lime_result.get('explanation'):
+                    for feature, weight in lime_result['explanation'][:10]:
+                        lime_insights_for_report.append({
+                            'feature': feature,
+                            'weight': weight,
+                            'direction': 'Increases Risk' if weight > 0 else 'Decreases Risk'
+                        })
+            
+            # Current and target state dictionaries
+            current_state_dict = {
+                'threshold': threshold_slider if 'threshold_slider' in dir() else part_threshold,
+                'reliability': current_reliability,
+                'mtts': current_mtts,
+                'failures': current_failures,
+                'scrap_rate': part_data['scrap_percent'].mean()
+            }
+            
+            target_state_dict = {
+                'threshold': threshold_slider if 'threshold_slider' in dir() else part_threshold,
+                'reliability': projected_reliability,
+                'mtts': projected_mtts,
+                'failures': projected_failures
+            }
+            
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                if st.button("📋 Generate Action Plan", key=f"gen_action_plan_{selected_part}", type="primary"):
+                    # Generate the report
+                    action_plan_report = generate_action_plan_report(
+                        part_id=selected_part,
+                        current_state=current_state_dict,
+                        target_state=target_state_dict,
+                        defect_targets=defect_targets_for_report,
+                        lime_insights=lime_insights_for_report
+                    )
+                    
+                    # Store in session state for download
+                    st.session_state[f'action_plan_{selected_part}'] = action_plan_report
+                    st.success("✅ Action Plan generated! Click download button below.")
+            
+            with col_btn2:
+                if st.button("📊 Generate Threshold Comparison", key=f"gen_comparison_{selected_part}"):
+                    # Generate scenarios at key thresholds
+                    scenarios = []
+                    test_thresholds = [
+                        (part_avg_sens * 0.5, "Aggressive (50% of avg)"),
+                        (part_avg_sens * 0.75, "Strict (75% of avg)"),
+                        (part_avg_sens, "Current Average"),
+                        (global_avg_sens, "Foundry Average"),
+                        (part_avg_sens * 1.25, "Lenient (+25%)")
+                    ]
+                    
+                    for thresh, name in test_thresholds:
+                        res = compute_single_threshold_metrics(part_data, thresh, order_qty)
+                        scenarios.append({
+                            'name': name,
+                            'threshold': thresh,
+                            'reliability': res['reliability'],
+                            'mtts': res['mtts_parts'],
+                            'failures': res['failure_count'],
+                            'scrap_risk': res['scrap_risk']
+                        })
+                    
+                    comparison_report = generate_scenario_comparison_report(
+                        part_id=selected_part,
+                        scenarios=scenarios
+                    )
+                    
+                    st.session_state[f'comparison_{selected_part}'] = comparison_report
+                    st.success("✅ Comparison Report generated! Click download button below.")
+            
+            # Download buttons
+            st.markdown("#### 📥 Download Reports")
+            
+            dl_col1, dl_col2 = st.columns(2)
+            
+            with dl_col1:
+                if f'action_plan_{selected_part}' in st.session_state:
+                    st.download_button(
+                        label="⬇️ Download Action Plan (.md)",
+                        data=st.session_state[f'action_plan_{selected_part}'],
+                        file_name=f"action_plan_part_{selected_part}_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown",
+                        key=f"dl_action_{selected_part}"
+                    )
+                else:
+                    st.caption("*Generate an action plan first*")
+            
+            with dl_col2:
+                if f'comparison_{selected_part}' in st.session_state:
+                    st.download_button(
+                        label="⬇️ Download Threshold Comparison (.md)",
+                        data=st.session_state[f'comparison_{selected_part}'],
+                        file_name=f"threshold_comparison_part_{selected_part}_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown",
+                        key=f"dl_comparison_{selected_part}"
+                    )
+                else:
+                    st.caption("*Generate a comparison first*")
+            
+            # Preview section
+            with st.expander("👁️ Preview Generated Reports"):
+                preview_tab1, preview_tab2 = st.tabs(["Action Plan", "Threshold Comparison"])
+                
+                with preview_tab1:
+                    if f'action_plan_{selected_part}' in st.session_state:
+                        st.markdown(st.session_state[f'action_plan_{selected_part}'])
+                    else:
+                        st.info("Click 'Generate Action Plan' to create a report.")
+                
+                with preview_tab2:
+                    if f'comparison_{selected_part}' in st.session_state:
+                        st.markdown(st.session_state[f'comparison_{selected_part}'])
+                    else:
+                        st.info("Click 'Generate Threshold Comparison' to create a report.")
         
         else:
-            st.warning("Insufficient defect data available for this part to generate reliability targets.")
+            st.warning("Insufficient defect data available for this part to generate improvement recommendations.")
+    
     # ================================================================
     # TAB 2: RQ1 - MODEL VALIDATION
     # ================================================================
@@ -4000,194 +4104,6 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 file_name="all_parts_results.csv",
                 mime="text/csv"
             )
-    # ================================================================
-    # TAB 6: CAMPBELL FRAMEWORK REFERENCE
-    # ================================================================
-    with tab6:
-        st.header("Campbell's 10 Rules of Castings: Process-Defect Framework")
-        
-        st.markdown("""
-        <div class="citation-box">
-            <strong>Source:</strong> Campbell, J. (2003). <em>Castings Practice: The 10 Rules of Castings</em>. 
-            Elsevier Butterworth-Heinemann. ISBN 07506 4791 4.<br><br>
-            <strong>Application:</strong> The process-defect mappings used in this dashboard's Root Cause Process 
-            Diagnosis are derived from Campbell's framework. The dataset's defect terminology was aligned with 
-            Campbell's casting defect taxonomy, and defects were mapped to the originating process stages he identifies.
-            Individual foundries would need to validate these mappings against their specific process configurations.
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        # ---- Campbell's 10 Rules Overview ----
-        st.markdown("### The 10 Rules of Castings")
-        st.caption("*Campbell's framework identifies 10 critical rules governing casting quality. "
-                   "Each rule maps to specific process stages and the defects that arise when the rule is violated.*")
-        
-        rules_data = [
-            {"Rule": "1", "Name": "Achieve a Good Quality Melt", 
-             "Process Stage": "Melting & Holding",
-             "Defects When Violated": "Dross, gas porosity, bifilm inclusions, oxide skins",
-             "Campbell's Guidance": "Melt must be substantially free from non-metallic inclusions and bifilms. "
-                                    "Gas in solution and alloy impurities (e.g., Fe in Al) act as bifilm-opening agents."},
-            {"Rule": "2", "Name": "Avoid Turbulent Entrainment", 
-             "Process Stage": "Pouring & Filling System",
-             "Defects When Violated": "Misruns, sand inclusions, random porosity, oxide folds",
-             "Campbell's Guidance": "Critical velocity ~0.5 m/s must not be exceeded. Turbulent filling creates "
-                                    "'the standard legacy: random inclusions, random porosity, and misruns.' "
-                                    "Most so-called sand problems are actually filling system problems."},
-            {"Rule": "3", "Name": "Avoid Laminar Entrainment of Surface Film", 
-             "Process Stage": "Filling System Design",
-             "Defects When Violated": "Surface oxide folds, lap defects, cold shuts",
-             "Campbell's Guidance": "The liquid front must expand continuously. Progress only uphill in an "
-                                    "uninterrupted advance. Only bottom gating is permissible; no falling or "
-                                    "sliding downhill of liquid metal."},
-            {"Rule": "4", "Name": "Avoid Bubble Damage", 
-             "Process Stage": "Gating Design & Pouring",
-             "Defects When Violated": "Gas bubbles, bubble trails, subsurface porosity",
-             "Campbell's Guidance": "No bubbles of air entrained by the filling system should pass through the "
-                                    "liquid metal. Requires proper offset step pouring basin, avoidance of wells "
-                                    "or volume-increasing features."},
-            {"Rule": "5", "Name": "Avoid Core Blows", 
-             "Process Stage": "Core Making",
-             "Defects When Violated": "Core gas porosity, blow holes, internal voids",
-             "Campbell's Guidance": "Cores must be of sufficiently low gas content and/or adequately vented. "
-                                    "No use of clay-based repair paste unless demonstrated fully dried."},
-            {"Rule": "6", "Name": "Avoid Shrinkage Damage", 
-             "Process Stage": "Gating/Feeding/Riser Design",
-             "Defects When Violated": "Shrinkage porosity, shrinkage cavities, hot tears",
-             "Campbell's Guidance": "No feeding uphill in larger sections due to unreliable pressure gradient "
-                                    "and convection complications. Demonstrate good feeding by following all Feeding Rules."},
-            {"Rule": "7", "Name": "Avoid Convection Damage", 
-             "Process Stage": "Thermal Management",
-             "Defects When Violated": "Channel segregation, convection-driven porosity redistribution",
-             "Campbell's Guidance": "Assess freezing time vs. convection damage time. Thin and thick sections "
-                                    "avoid problems automatically; intermediate sections require design intervention."},
-            {"Rule": "8", "Name": "Reduce Segregation Damage", 
-             "Process Stage": "Alloy & Process Control",
-             "Defects When Violated": "Chemical segregation, out-of-spec composition zones",
-             "Campbell's Guidance": "Predict segregation to be within specification limits. Avoid channel "
-                                    "segregation formation if possible."},
-            {"Rule": "9", "Name": "Reduce Residual Stress", 
-             "Process Stage": "Shakeout & Heat Treatment",
-             "Defects When Violated": "Distortion, cracking, residual stress failures",
-             "Campbell's Guidance": "No quenching into water following solution treatment of light alloys. "
-                                    "Polymer quenchant or forced air quench acceptable if stress shown negligible."},
-            {"Rule": "10", "Name": "Provide Location Points", 
-             "Process Stage": "Pattern/Tooling Design",
-             "Defects When Violated": "Dimensional non-conformance, assembly failures",
-             "Campbell's Guidance": "All castings to be provided with agreed location points for dimensional "
-                                    "checking and machining pickup."}
-        ]
-        
-        rules_df = pd.DataFrame(rules_data)
-        st.dataframe(rules_df, use_container_width=True, hide_index=True)
-        
-        st.markdown("---")
-        
-        # ---- Dashboard Mapping ----
-        st.markdown("### Dashboard Process-Defect Mapping")
-        st.caption("*How dataset defect columns were mapped to Campbell's process stages*")
-        
-        st.info("**Methodology:** The anonymized dataset uses defect rate terminology (e.g., `dross_rate`, "
-                "`gas_porosity_rate`, `sand_rate`) that aligns with Campbell's casting defect taxonomy. "
-                "Each defect column was mapped to the originating process stage identified by Campbell's 10 Rules. "
-                "This mapping is a **proof-of-concept** -- individual foundries must validate these mappings against "
-                "their specific equipment, process flows, and defect classification systems.")
-        
-        mapping_data = [
-            {"Dashboard Process": "Melting", "Dataset Defect Columns": "dross_rate, gas_porosity_rate",
-             "Campbell Rule(s)": "Rule 1: Good Quality Melt",
-             "Rationale": "Campbell identifies dross and gas porosity as direct consequences of melt quality -- "
-                         "bifilms, oxide skins, and dissolved gas originate in the melting and holding stages (Ch. 1)."},
-            {"Dashboard Process": "Pouring", "Dataset Defect Columns": "misrun_rate, missrun_rate, short_pour_rate, runout_rate",
-             "Campbell Rule(s)": "Rule 2: Avoid Turbulent Entrainment",
-             "Rationale": "Campbell states misruns result from 'unpredictable ebb and flow during filling' -- "
-                         "turbulent entrainment during pouring. Short pours and runouts are filling interruptions (Ch. 2)."},
-            {"Dashboard Process": "Gating Design", "Dataset Defect Columns": "shrink_rate, shrink_porosity_rate, tear_up_rate",
-             "Campbell Rule(s)": "Rule 6: Avoid Shrinkage Damage",
-             "Rationale": "Shrinkage porosity and hot tears arise from inadequate feeding system design -- "
-                         "runner/riser sizing and feeding path geometry (Ch. 6, Feeding Rules 1-7)."},
-            {"Dashboard Process": "Sand System", "Dataset Defect Columns": "sand_rate, dirty_pattern_rate",
-             "Campbell Rule(s)": "Rules 2-3 (secondary)",
-             "Rationale": "Campbell notes most 'sand problems such as mould erosion and sand inclusions' are "
-                         "actually consequences of poor filling systems, but sand preparation (binder ratio, "
-                         "moisture content) remains an independent process variable (Ch. 2)."},
-            {"Dashboard Process": "Core Making", "Dataset Defect Columns": "core_rate, crush_rate, shift_rate",
-             "Campbell Rule(s)": "Rule 5: Avoid Core Blows",
-             "Rationale": "Core integrity, venting, and gas content directly control core-related defects. "
-                         "Crush and shift are mechanical core failures during mould assembly or pouring (Ch. 5)."},
-            {"Dashboard Process": "Shakeout", "Dataset Defect Columns": "bent_rate",
-             "Campbell Rule(s)": "Rule 9: Reduce Residual Stress",
-             "Rationale": "Bent castings result from mechanical damage during extraction or residual stress "
-                         "from premature shakeout before adequate cooling (Ch. 9)."},
-            {"Dashboard Process": "Pattern/Tooling", "Dataset Defect Columns": "gouged_rate",
-             "Campbell Rule(s)": "Rule 10: Provide Location Points (extended)",
-             "Rationale": "Gouging is a surface defect consistent with pattern wear, damage, or dimensional "
-                         "degradation. Campbell emphasizes pattern/tooling accuracy for dimensional conformance (Ch. 10)."},
-            {"Dashboard Process": "Inspection", "Dataset Defect Columns": "outside_process_scrap_rate, zyglo_rate, failed_zyglo_rate",
-             "Campbell Rule(s)": "Detection, not origination",
-             "Rationale": "These are detection-stage classifications, not process-origin defects. Zyglo (fluorescent "
-                         "penetrant) reveals subsurface cracks that may originate from Rules 1, 2, 6, or 9. "
-                         "'Outside process scrap' is vendor/customer-attributed. Mapped to Inspection as the "
-                         "classifying stage -- this is a known limitation of the dataset's terminology."},
-            {"Dashboard Process": "Finishing", "Dataset Defect Columns": "over_grind_rate, cut_into_rate",
-             "Campbell Rule(s)": "Post-casting operations",
-             "Rationale": "Over-grinding and cut-into defects occur during finishing operations (grinding, machining) "
-                         "after the casting is solidified. These are process-induced defects not directly covered by "
-                         "Campbell's 10 Rules, which focus on the casting process itself."}
-        ]
-        
-        mapping_df = pd.DataFrame(mapping_data)
-        st.dataframe(mapping_df, use_container_width=True, hide_index=True)
-        
-        st.markdown("---")
-        
-        # ---- Limitations and Validation ----
-        st.markdown("### Mapping Limitations & Validation Requirements")
-        
-        col_lim1, col_lim2 = st.columns(2)
-        
-        with col_lim1:
-            st.markdown("""
-            **What This Mapping IS:**
-            - A proof-of-concept alignment between dataset terminology and Campbell's (2003) established 
-              casting defect taxonomy
-            - A demonstration that ML-predicted defect patterns can be traced to originating process stages 
-              using domain knowledge frameworks
-            - A template that any foundry can adapt by validating mappings against their specific processes
-            """)
-        
-        with col_lim2:
-            st.markdown("""
-            **What This Mapping IS NOT:**
-            - A validated mapping for any specific foundry's process configuration
-            - A claim that every defect has a single originating process (many defects have multiple 
-              potential causes -- e.g., porosity can originate from Rules 1, 2, 4, 5, or 6)
-            - A substitute for foundry-specific root cause analysis using their own process data and 
-              engineering expertise
-            """)
-        
-        st.markdown("---")
-        
-        st.markdown("### Foundry Implementation Guidance")
-        st.info("""
-        **For foundries adopting this framework:**
-        
-        1. **Map your defect codes** to Campbell's taxonomy -- your classification system may use different 
-           terminology than this dataset
-        2. **Validate process-defect relationships** using your own historical data -- run failure-conditional 
-           Pareto analysis to confirm which defects are actually elevated during your high-scrap events
-        3. **Iterate the mapping** -- Campbell's Rules provide the theoretical foundation, but your specific 
-           equipment, alloys, and process parameters determine the actual defect-process relationships
-        4. **Use LIME explanations** to validate -- if the model identifies sand_rate as a top contributor but 
-           your sand system is well-controlled, the mapping may need adjustment for your foundry
-        """)
-        
-        st.markdown("---")
-        st.caption("*Campbell, J. (2003). Castings Practice: The 10 Rules of Castings. Elsevier Butterworth-Heinemann. "
-                   "Process-defect mappings derived from Campbell's framework as a proof-of-concept. "
-                   "Individual foundries must validate mappings against their specific process configurations.*")
     
     st.markdown("---")
     st.caption("🏭 Foundry Dashboard V3 | Global Model with Multi-Defect + Temporal + MTTS Features | 6-2-1 Split")
