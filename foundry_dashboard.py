@@ -765,7 +765,9 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         
         # Use part-level as the PRIMARY prediction (model actually saw this data)
         result.update({
+            'pooling_method': f'Part-Level (Dual: {part_n} runs, below CLT)',
             'pooling_used': False,  # Primary prediction is part-level
+            'weight_range': 'N/A',
             'pooled_n': part_n,
             'pooled_parts_count': 1,
             'included_part_ids': [part_id],
