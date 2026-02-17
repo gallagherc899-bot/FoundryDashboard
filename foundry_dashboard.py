@@ -2872,7 +2872,7 @@ def main():
                     y=pred_data['Failure Rate (%)'],
                     name='Failure Rate (%)',
                     marker_color=bar_colors,
-                    text=[f"{m:.1f}×" for m in pred_data['Risk Multiplier']],
+                    text=[f"{rate:.2f}%<br>{m:.1f}×" for rate, m in zip(pred_data['Failure Rate (%)'], pred_data['Risk Multiplier'])],
                     textposition='outside'
                 ))
                 fig_pred.add_trace(go.Scatter(
@@ -2883,10 +2883,13 @@ def main():
                     yaxis='y2',
                     mode='lines+markers'
                 ))
+                # Set y-axis max to 1.35× the tallest bar so outside text isn't clipped
+                max_failure_rate = pred_data['Failure Rate (%)'].max()
+                y_max = max_failure_rate * 1.35 if max_failure_rate > 0 else 5
                 fig_pred.update_layout(
                     title="Top 10 Defects During Failure Events",
                     xaxis=dict(tickangle=-45),
-                    yaxis=dict(title='Failure Rate (%)', side='left'),
+                    yaxis=dict(title='Failure Rate (%)', side='left', range=[0, y_max]),
                     yaxis2=dict(title='Cumulative %', side='right', overlaying='y', range=[0, 105]),
                     height=400,
                     showlegend=True,
@@ -3410,7 +3413,7 @@ def main():
             - *Use for: General production, cost-sensitive orders*
             
             **Key Insight:** The gray dotted line shows the part's average scrap rate (current threshold).
-            The green dashed line shows the 80% reliability target.
+            The green dashed line shows the 80% reliability target (DoD MIL-STD industry benchmark).
             """)
         
         # Comparison table at key thresholds
