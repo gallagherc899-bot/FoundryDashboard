@@ -728,310 +728,142 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         })
         return result
     
-    # CASE 2: Part has some data (≥5 runs) but below CLT threshold (<30)
-    # Show DUAL results: part-level prediction AND pooled comparison
-    if part_n >= min_part_data:
-        # Compute part-level metrics first
-        part_failures = (part_data['scrap_percent'] > threshold_pct).sum()
-        part_failure_rate = part_failures / part_n if part_n > 0 else 0
-        part_avg_scrap = part_data['scrap_percent'].mean()
-        
-        if part_failures > 0:
-            part_mtts_runs = part_n / part_failures
-            part_mtts_parts = total_parts_produced / part_failures
-        else:
-            part_mtts_runs = part_n * 10
-            part_mtts_parts = total_parts_produced * 10
-        
-        part_reliability = np.exp(-1 / part_mtts_runs) if part_mtts_runs > 0 else 0
-        
-        # Store part-level metrics for dual display
-        part_level_metrics = {
-            'n_records': part_n,
-            'avg_scrap': part_avg_scrap,
-            'failures': part_failures,
-            'failure_rate': part_failure_rate,
-            'mtts_runs': part_mtts_runs,
-            'mtts_parts': part_mtts_parts,
-            'total_parts_produced': total_parts_produced,
-            'reliability': part_reliability,
-            'confidence': get_confidence_tier(part_n),
-        }
-        
-        # Now compute pooled metrics (fall through to pooling logic below)
-        # Set flag so display knows to show both
-        result['show_dual'] = True
-        result['part_level_metrics'] = part_level_metrics
-        
-        # Use part-level as the PRIMARY prediction (model actually saw this data)
-        result.update({
-            'pooling_method': f'Part-Level (Dual: {part_n} runs, below CLT)',
-            'pooling_used': False,  # Primary prediction is part-level
-            'weight_range': 'N/A',
-            'pooled_n': part_n,
-            'pooled_parts_count': 1,
-            'included_part_ids': [part_id],
-            'confidence': part_level_metrics['confidence'],
-            'mtts_runs': part_mtts_runs,
-            'mtts_parts': part_mtts_parts,
-            'total_parts_produced': total_parts_produced,
-            'reliability_next_run': part_reliability,
-            'failure_count': part_failures,
-            'failure_rate': part_failure_rate,
-        })
-        
-        # === Compute pooled comparison data ===
-        min_runs_per_part = POOLING_CONFIG.get('min_runs_per_pooled_part', 5)
-        use_pooled_threshold = POOLING_CONFIG.get('use_pooled_threshold', True)
-        
-        weight_matched_parts, weight_range = filter_by_weight(df, target_weight, weight_tolerance)
-        exact_matched_parts = filter_by_exact_defects(df, weight_matched_parts, target_defects)
-        exact_pooled_df = df[df['part_id'].isin(exact_matched_parts)]
-        any_matched_parts = filter_by_any_defect(df, weight_matched_parts)
-        any_pooled_df = df[df['part_id'].isin(any_matched_parts)]
-        weight_only_df = df[df['part_id'].isin(weight_matched_parts)]
-        
-        def apply_min_runs_filter_dual(pool_df, min_runs):
-            if len(pool_df) == 0:
-                return pool_df, [], []
-            part_run_counts = pool_df.groupby('part_id').size().reset_index(name='runs')
-            qualifying = part_run_counts[part_run_counts['runs'] >= min_runs]['part_id'].tolist()
-            excluded = part_run_counts[part_run_counts['runs'] < min_runs]['part_id'].tolist()
-            return pool_df[pool_df['part_id'].isin(qualifying)], qualifying, excluded
-        
-        exact_filtered_df, exact_qualifying, _ = apply_min_runs_filter_dual(exact_pooled_df, min_runs_per_part)
-        any_filtered_df, any_qualifying, _ = apply_min_runs_filter_dual(any_pooled_df, min_runs_per_part)
-        weight_filtered_df, weight_qualifying, _ = apply_min_runs_filter_dual(weight_only_df, min_runs_per_part)
-        
-        # Select best pool
-        pool_final_df = None
-        pool_final_parts = []
-        pool_method = 'No pool available'
-        
-        for candidate_df, candidate_parts, method_name in [
-            (exact_filtered_df, exact_qualifying, 'Weight ±10% + Exact Defect Match'),
-            (any_filtered_df, any_qualifying, 'Weight ±10% + Any Defect'),
-            (weight_filtered_df, weight_qualifying, 'Weight ±10% Only'),
-        ]:
-            if len(candidate_df) >= 5:
-                pool_final_df = candidate_df
-                pool_final_parts = candidate_parts
-                pool_method = method_name
-                break
-        
-        if pool_final_df is not None and len(pool_final_df) > 0:
-            pool_n = len(pool_final_df)
-            pool_avg_scrap = pool_final_df['scrap_percent'].mean()
-            pool_std_scrap = pool_final_df['scrap_percent'].std() if pool_n > 1 else 0
-            pool_total_parts = pool_final_df['order_quantity'].sum() if 'order_quantity' in pool_final_df.columns else pool_n
-            
-            if use_pooled_threshold and pool_n > 1:
-                pool_effective_threshold = pool_avg_scrap + pool_std_scrap
-            else:
-                pool_effective_threshold = threshold_pct
-            
-            pool_failures = (pool_final_df['scrap_percent'] > pool_effective_threshold).sum()
-            pool_failure_rate = pool_failures / pool_n if pool_n > 0 else 0
-            
-            if pool_failures > 0:
-                pool_mtts_runs = pool_n / pool_failures
-                pool_mtts_parts = pool_total_parts / pool_failures
-            else:
-                pool_mtts_runs = pool_n * 2
-                pool_mtts_parts = pool_total_parts * 2
-            
-            pool_reliability = np.exp(-1 / pool_mtts_runs) if pool_mtts_runs > 0 else 0
-            
-            result['pooled_comparison'] = {
-                'method': pool_method,
-                'n_records': pool_n,
-                'n_parts': len(pool_final_parts),
-                'included_part_ids': pool_final_parts,
-                'avg_scrap': pool_avg_scrap,
-                'std_scrap': pool_std_scrap,
-                'effective_threshold': pool_effective_threshold,
-                'failures': pool_failures,
-                'failure_rate': pool_failure_rate,
-                'mtts_runs': pool_mtts_runs,
-                'mtts_parts': pool_mtts_parts,
-                'total_parts_produced': pool_total_parts,
-                'reliability': pool_reliability,
-                'confidence': get_confidence_tier(pool_n),
-                'weight_range': weight_range,
-            }
-        else:
-            result['pooled_comparison'] = None
-        
-        return result
+    # CASE 2: Part has < 30 runs (below CLT threshold)
+    # ALWAYS show DUAL results: part-level prediction AND pooled comparison
+    # This applies whether part has 1 run or 29 runs
     
-    # CASE 3: Very low data (<5 runs) - pooling only
-    result['pooling_used'] = True
-    result['show_dual'] = False
+    # --- Compute part-level metrics (from whatever data exists) ---
+    part_avg_scrap = part_data['scrap_percent'].mean() if part_n > 0 else 0
+    part_failures = (part_data['scrap_percent'] > threshold_pct).sum() if part_n > 0 else 0
+    part_failure_rate = part_failures / part_n if part_n > 0 else 0
     
-    # Get config values
+    if part_n > 0 and part_failures > 0:
+        part_mtts_runs = part_n / part_failures
+        part_mtts_parts = total_parts_produced / part_failures
+    elif part_n > 0:
+        part_mtts_runs = part_n * 10
+        part_mtts_parts = total_parts_produced * 10 if total_parts_produced > 0 else part_n * 1000
+    else:
+        part_mtts_runs = 0
+        part_mtts_parts = 0
+    
+    part_reliability = np.exp(-1 / part_mtts_runs) if part_mtts_runs > 0 else 0
+    
+    part_level_metrics = {
+        'n_records': part_n,
+        'avg_scrap': part_avg_scrap,
+        'failures': part_failures,
+        'failure_rate': part_failure_rate,
+        'mtts_runs': part_mtts_runs,
+        'mtts_parts': part_mtts_parts,
+        'total_parts_produced': total_parts_produced,
+        'reliability': part_reliability,
+        'confidence': get_confidence_tier(part_n) if part_n >= 5 else 'VERY LOW',
+    }
+    
+    # Set dual flag and store part-level metrics
+    result['show_dual'] = True
+    result['part_level_metrics'] = part_level_metrics
+    
+    # Primary prediction uses part-level data (what the model actually trained on)
+    result.update({
+        'pooling_method': f'Dual Display ({part_n} runs, below 30-run CLT threshold)',
+        'pooling_used': False,
+        'weight_range': 'N/A',
+        'pooled_n': part_n,
+        'pooled_parts_count': 1,
+        'included_part_ids': [part_id],
+        'confidence': part_level_metrics['confidence'],
+        'mtts_runs': part_mtts_runs,
+        'mtts_parts': part_mtts_parts,
+        'total_parts_produced': total_parts_produced,
+        'reliability_next_run': part_reliability,
+        'failure_count': part_failures,
+        'failure_rate': part_failure_rate,
+    })
+    
+    # --- Compute pooled comparison data ---
     min_runs_per_part = POOLING_CONFIG.get('min_runs_per_pooled_part', 5)
     use_pooled_threshold = POOLING_CONFIG.get('use_pooled_threshold', True)
     
-    # Step 1: Weight filter
     weight_matched_parts, weight_range = filter_by_weight(df, target_weight, weight_tolerance)
-    
-    # Step 2: Exact defect filter
     exact_matched_parts = filter_by_exact_defects(df, weight_matched_parts, target_defects)
     exact_pooled_df = df[df['part_id'].isin(exact_matched_parts)]
-    
-    # Step 3: Any defect filter
     any_matched_parts = filter_by_any_defect(df, weight_matched_parts)
     any_pooled_df = df[df['part_id'].isin(any_matched_parts)]
-    
-    # Step 4: Weight only
     weight_only_df = df[df['part_id'].isin(weight_matched_parts)]
     
-    # Helper function to apply minimum runs filter
-    def apply_min_runs_filter(pool_df, min_runs):
+    def apply_min_runs_filter_pool(pool_df, min_runs):
         """Filter pool to only include parts with >= min_runs records."""
         if len(pool_df) == 0:
             return pool_df, [], []
-        
         part_run_counts = pool_df.groupby('part_id').size().reset_index(name='runs')
         qualifying = part_run_counts[part_run_counts['runs'] >= min_runs]['part_id'].tolist()
         excluded = part_run_counts[part_run_counts['runs'] < min_runs]['part_id'].tolist()
+        return pool_df[pool_df['part_id'].isin(qualifying)], qualifying, excluded
+    
+    exact_filtered_df, exact_qualifying, _ = apply_min_runs_filter_pool(exact_pooled_df, min_runs_per_part)
+    any_filtered_df, any_qualifying, _ = apply_min_runs_filter_pool(any_pooled_df, min_runs_per_part)
+    weight_filtered_df, weight_qualifying, _ = apply_min_runs_filter_pool(weight_only_df, min_runs_per_part)
+    
+    # Select best pool (prefer tighter match, accept smaller pools)
+    pool_final_df = None
+    pool_final_parts = []
+    pool_method = 'No pool available'
+    
+    for candidate_df, candidate_parts, method_name in [
+        (exact_filtered_df, exact_qualifying, 'Weight ±10% + Exact Defect Match'),
+        (any_filtered_df, any_qualifying, 'Weight ±10% + Any Defect'),
+        (weight_filtered_df, weight_qualifying, 'Weight ±10% Only'),
+    ]:
+        if len(candidate_df) >= 5:
+            pool_final_df = candidate_df
+            pool_final_parts = candidate_parts
+            pool_method = method_name
+            break
+    
+    if pool_final_df is not None and len(pool_final_df) > 0:
+        pool_n = len(pool_final_df)
+        pool_avg_scrap = pool_final_df['scrap_percent'].mean()
+        pool_std_scrap = pool_final_df['scrap_percent'].std() if pool_n > 1 else 0
+        pool_total_parts = pool_final_df['order_quantity'].sum() if 'order_quantity' in pool_final_df.columns else pool_n
         
-        filtered_df = pool_df[pool_df['part_id'].isin(qualifying)]
-        return filtered_df, qualifying, excluded
-    
-    # Apply minimum runs filter to each pooling method
-    exact_filtered_df, exact_qualifying, exact_excluded = apply_min_runs_filter(exact_pooled_df, min_runs_per_part)
-    any_filtered_df, any_qualifying, any_excluded = apply_min_runs_filter(any_pooled_df, min_runs_per_part)
-    weight_filtered_df, weight_qualifying, weight_excluded = apply_min_runs_filter(weight_only_df, min_runs_per_part)
-    
-    # Select best pooling method (now using filtered counts)
-    exact_filtered_n = len(exact_filtered_df)
-    any_filtered_n = len(any_filtered_df)
-    weight_filtered_n = len(weight_filtered_df)
-    
-    if exact_filtered_n >= thresholds['HIGH']:
-        final_df = exact_filtered_df
-        final_parts = exact_qualifying
-        excluded_parts = exact_excluded
-        pooling_method = 'Weight ±10% + Exact Defect Match'
-    elif any_filtered_n >= thresholds['HIGH']:
-        final_df = any_filtered_df
-        final_parts = any_qualifying
-        excluded_parts = any_excluded
-        pooling_method = 'Weight ±10% + Any Defect'
-    elif exact_filtered_n >= thresholds['MODERATE']:
-        final_df = exact_filtered_df
-        final_parts = exact_qualifying
-        excluded_parts = exact_excluded
-        pooling_method = 'Weight ±10% + Exact Defect Match'
-    elif any_filtered_n >= thresholds['MODERATE']:
-        final_df = any_filtered_df
-        final_parts = any_qualifying
-        excluded_parts = any_excluded
-        pooling_method = 'Weight ±10% + Any Defect'
-    elif exact_filtered_n >= thresholds['LOW']:
-        final_df = exact_filtered_df
-        final_parts = exact_qualifying
-        excluded_parts = exact_excluded
-        pooling_method = 'Weight ±10% + Exact Defect Match'
-    elif any_filtered_n >= thresholds['LOW']:
-        final_df = any_filtered_df
-        final_parts = any_qualifying
-        excluded_parts = any_excluded
-        pooling_method = 'Weight ±10% + Any Defect'
-    elif weight_filtered_n >= thresholds['LOW']:
-        final_df = weight_filtered_df
-        final_parts = weight_qualifying
-        excluded_parts = weight_excluded
-        pooling_method = 'Weight ±10% Only'
-    else:
-        # Insufficient data even with pooling
-        result.update({
-            'pooling_method': 'Insufficient Data',
+        if use_pooled_threshold and pool_n > 1:
+            pool_effective_threshold = pool_avg_scrap + pool_std_scrap
+        else:
+            pool_effective_threshold = threshold_pct
+        
+        pool_failures = (pool_final_df['scrap_percent'] > pool_effective_threshold).sum()
+        pool_failure_rate = pool_failures / pool_n if pool_n > 0 else 0
+        
+        if pool_failures > 0:
+            pool_mtts_runs = pool_n / pool_failures
+            pool_mtts_parts = pool_total_parts / pool_failures
+        else:
+            pool_mtts_runs = pool_n * 2
+            pool_mtts_parts = pool_total_parts * 2
+        
+        pool_reliability = np.exp(-1 / pool_mtts_runs) if pool_mtts_runs > 0 else 0
+        
+        result['pooled_comparison'] = {
+            'method': pool_method,
+            'n_records': pool_n,
+            'n_parts': len(pool_final_parts),
+            'included_part_ids': pool_final_parts,
+            'avg_scrap': pool_avg_scrap,
+            'std_scrap': pool_std_scrap,
+            'effective_threshold': pool_effective_threshold,
+            'failures': pool_failures,
+            'failure_rate': pool_failure_rate,
+            'mtts_runs': pool_mtts_runs,
+            'mtts_parts': pool_mtts_parts,
+            'total_parts_produced': pool_total_parts,
+            'reliability': pool_reliability,
+            'confidence': get_confidence_tier(pool_n),
             'weight_range': weight_range,
-            'pooled_n': 0,
-            'pooled_parts_count': 0,
-            'confidence': 'INSUFFICIENT',
-            'mtts_runs': None,
-            'mtts_parts': None,
-            'total_parts_produced': 0,
-            'reliability_next_run': None,
-            'failure_count': 0,
-            'failure_rate': 0,
-            'excluded_parts': [],
-            'excluded_parts_info': [],
-        })
-        return result
-    
-    # Compute metrics from filtered pooled data
-    pooled_n = len(final_df)
-    confidence = get_confidence_tier(pooled_n)
-    
-    # Calculate total parts produced from pooled data
-    pooled_total_parts = final_df['order_quantity'].sum() if 'order_quantity' in final_df.columns else pooled_n
-    
-    # STRATEGY C: Use pooled threshold (avg + std) instead of global threshold
-    if use_pooled_threshold and pooled_n > 1:
-        pooled_avg_scrap = final_df['scrap_percent'].mean()
-        pooled_std_scrap = final_df['scrap_percent'].std()
-        effective_threshold = pooled_avg_scrap + pooled_std_scrap
-        threshold_source = 'pooled'
+        }
     else:
-        pooled_avg_scrap = final_df['scrap_percent'].mean()
-        pooled_std_scrap = final_df['scrap_percent'].std() if pooled_n > 1 else 0
-        effective_threshold = threshold_pct
-        threshold_source = 'global'
-    
-    # Calculate failures using effective threshold
-    failures = (final_df['scrap_percent'] > effective_threshold).sum()
-    failure_rate = failures / pooled_n if pooled_n > 0 else 0
-    
-    # MTTS (runs) = Total Runs / Failures
-    if failures > 0:
-        mtts_runs = pooled_n / failures
-    else:
-        mtts_runs = pooled_n * 2  # Conservative multiplier when no failures (was 10)
-    
-    # MTTS (parts) = Total Parts Produced / Failures
-    if failures > 0:
-        mtts_parts = pooled_total_parts / failures
-    else:
-        mtts_parts = pooled_total_parts * 2  # Conservative multiplier when no failures (was 10)
-    
-    reliability = np.exp(-1 / mtts_runs) if mtts_runs > 0 else 0
-    
-    # Build excluded parts info for disclaimer
-    excluded_parts_info = []
-    for exc_part in excluded_parts:
-        exc_data = df[df['part_id'] == exc_part]
-        if len(exc_data) > 0:
-            excluded_parts_info.append({
-                'part_id': exc_part,
-                'runs': len(exc_data),
-                'avg_scrap': exc_data['scrap_percent'].mean()
-            })
-    
-    result.update({
-        'pooling_method': pooling_method,
-        'weight_range': weight_range,
-        'pooled_n': pooled_n,
-        'pooled_parts_count': len(final_parts),
-        'included_part_ids': final_parts,
-        'excluded_part_ids': excluded_parts,
-        'excluded_parts_info': excluded_parts_info,
-        'min_runs_filter': min_runs_per_part,
-        'confidence': confidence,
-        'mtts_runs': mtts_runs,
-        'mtts_parts': mtts_parts,
-        'total_parts_produced': pooled_total_parts,
-        'reliability_next_run': reliability,
-        'failure_count': failures,
-        'failure_rate': failure_rate,
-        'pooled_avg_scrap': pooled_avg_scrap,
-        'pooled_std_scrap': pooled_std_scrap,
-        'effective_threshold': effective_threshold,
-        'threshold_source': threshold_source,
-    })
+        result['pooled_comparison'] = None
     
     return result
 
@@ -2408,66 +2240,6 @@ def main():
             history may not yet reflect its true behavior.
             """)
         
-        elif pooled_result['pooling_used']:
-            # ================================================================
-            # POOLING ONLY: Part has <5 runs - not enough for part-level
-            # ================================================================
-            st.warning(f"⚠️ **Insufficient Data for Part {selected_part}** (only {pooled_result['part_level_n']} records)")
-            
-            # Get threshold info
-            effective_threshold = pooled_result.get('effective_threshold', part_threshold)
-            threshold_source = pooled_result.get('threshold_source', 'global')
-            pooled_avg = pooled_result.get('pooled_avg_scrap', 0)
-            pooled_std = pooled_result.get('pooled_std_scrap', 0)
-            min_runs_filter = pooled_result.get('min_runs_filter', 5)
-            
-            st.markdown(f"""
-            **Hierarchical Pooling Applied:** {pooled_result['pooling_method']}
-            
-            | Pooling Details | Value |
-            |-----------------|-------|
-            | Target Part Weight | {pooled_result['target_weight']:.2f} lbs |
-            | **Weight Used for Prediction** | **{pooled_result.get('weight_used_for_prediction', pooled_result['target_weight']):.2f} lbs** |
-            | Target Part Defects | {', '.join(pooled_result['target_defects']) if pooled_result['target_defects'] else 'None detected'} |
-            | Weight Range (±10%) | {pooled_result['weight_range']} lbs |
-            | Min Runs Filter | ≥{min_runs_filter} runs per part |
-            | Parts Pooled | {pooled_result['pooled_parts_count']} parts |
-            | Total Records | {pooled_result['pooled_n']} records |
-            | Confidence Level | {pooled_result['confidence']} ({pooled_result['pooled_n']} runs {'≥30 CLT' if pooled_result['pooled_n'] >= 30 else '< 30'}) |
-            """)
-            
-            # Show threshold calculation
-            if threshold_source == 'pooled':
-                st.info(f"""
-                📊 **Pooled Threshold Calculation:**
-                - Pooled Avg Scrap: {pooled_avg:.2f}%
-                - Pooled Std Dev: {pooled_std:.2f}%
-                - **Effective Threshold: {effective_threshold:.2f}%** (avg + 1 std)
-                
-                *Using pooled data statistics instead of single-part average for more reliable threshold*
-                """)
-            
-            # Show pooled parts with runs info
-            if pooled_result.get('included_part_ids'):
-                with st.expander(f"📋 View {pooled_result['pooled_parts_count']} Pooled Parts (≥{min_runs_filter} runs each)"):
-                    for pid in pooled_result['included_part_ids'][:20]:
-                        pid_weight = get_part_weight(df, pid)
-                        if pid_weight is None:
-                            pid_weight = 0
-                        pid_data = df[df['part_id'] == pid]
-                        pid_n = len(pid_data)
-                        pid_avg_scrap = pid_data['scrap_percent'].mean()
-                        st.write(f"• Part {pid}: {pid_weight:.2f} lbs, {pid_n} runs, avg scrap {pid_avg_scrap:.1f}%")
-                    if len(pooled_result['included_part_ids']) > 20:
-                        st.write(f"... and {len(pooled_result['included_part_ids']) - 20} more parts")
-            
-            # Show excluded parts (filtered out due to insufficient runs)
-            excluded_info = pooled_result.get('excluded_parts_info', [])
-            if excluded_info:
-                with st.expander(f"🚫 View {len(excluded_info)} Excluded Parts (<{min_runs_filter} runs - too noisy)"):
-                    for exc in excluded_info:
-                        st.write(f"• Part {exc['part_id']}: {exc['runs']} runs, avg scrap {exc['avg_scrap']:.1f}%")
-                    st.caption("*Parts with fewer runs are excluded to reduce statistical noise*")
         else:
             # ================================================================
             # FULL CONFIDENCE: Part has ≥30 runs (CLT satisfied)
@@ -3916,13 +3688,13 @@ This dashboard treats scrap as a **systemic issue**—the result of interconnect
         total_parts = len(results_df)
         h1_pass_count = results_df['H1 Pass'].sum()
         h2_pass_count = results_df['H2 Pass'].sum()
-        pooled_count = (results_df['Records'] < 5).sum()
+        pooled_count = (results_df['Records'] < CLT_THRESHOLD).sum()
         
         s1, s2, s3, s4, s5 = st.columns(5)
         s1.metric("Total Parts", f"{total_parts}")
         s2.metric("H1 Pass Rate", f"{h1_pass_count/total_parts*100:.1f}%", f"{h1_pass_count}/{total_parts}")
         s3.metric("H2 Pass Rate", f"{h2_pass_count/total_parts*100:.1f}%", f"{h2_pass_count}/{total_parts}")
-        s4.metric("Parts Needing Pooling", f"{pooled_count}", f"< 5 records")
+        s4.metric("Below CLT (< 30)", f"{pooled_count}", f"Dual results shown")
         s5.metric("Avg Reliability", f"{results_df['Reliability R(1)'].mean():.1f}%")
         
         # Interpretation of pass rates
