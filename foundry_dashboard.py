@@ -3632,9 +3632,10 @@ def main():
         # SCIKIT-LEARN: roc_auc_score(y_test, y_prob) = Area under ROC curve
         c3.metric(f"{'✅' if auc_pass else '❌'} AUC-ROC", f"{metrics['auc']:.3f}", f"{'Pass' if auc_pass else 'Below'} ≥0.80")
         # SCIKIT-LEARN: brier_score_loss(y_test, y_prob) = Mean squared error of probabilities
-        c4.metric("📉 Brier Score", f"{metrics['brier']:.3f}")
+        brier_pass = metrics["brier"] <= 0.25
+        c4.metric(f"{'✅' if brier_pass else '❌'} Brier Score", f"{metrics['brier']:.3f}", f"{'Pass' if brier_pass else 'Above'} ≤0.25")
         
-        h1_pass = recall_pass and precision_pass and auc_pass
+        h1_pass = recall_pass and precision_pass and auc_pass and brier_pass
         
         if h1_pass:
             st.success(f"""
@@ -3775,7 +3776,7 @@ def main():
         
         st.markdown("### ✅ Model Validation Summary")
         
-        h1_pass = (metrics["recall"] >= 0.80 and metrics["precision"] >= 0.70 and metrics["auc"] >= 0.80)
+        h1_pass = (metrics["recall"] >= 0.80 and metrics["precision"] >= 0.70 and metrics["auc"] >= 0.80 and metrics["brier"] <= 0.25)
         phm_equiv = (metrics["recall"] / 0.90) * 100
         h2_pass = phm_equiv >= 80
         
