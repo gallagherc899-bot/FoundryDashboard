@@ -435,7 +435,17 @@ def add_temporal_features(df):
 # MTTS COMPUTATION (FROM ENHANCED V3.2)
 # ================================================================
 def compute_mtts_metrics(df, threshold):
-    """Compute MTTS metrics per part - matching enhanced version."""
+    """
+    Compute MTTS metrics per part using simple ratio (Eq 3.1).
+    
+    MTTS(parts) = Total Parts Produced / Number of Failures    (Eq 3.1)
+    MTTS(runs)  = Total Runs / Number of Failures
+    h(t)        = 1 / MTTS(parts)                              (Eq 3.2)
+    R(t)        = e^(-h(t) * parts_ordered)                    (Eq 3.3)
+    
+    Consistent with MTTF = total operating time / number of failures
+    (Ebeling, 1997, An Introduction to Reliability and Maintainability Engineering).
+    """
     results = []
     df_sorted = df.sort_values(['part_id', 'week_ending']).copy()
     
@@ -445,38 +455,26 @@ def compute_mtts_metrics(df, threshold):
     for part_id, group in df_sorted.groupby('part_id'):
         group = group.reset_index(drop=True)
         
-        parts_since_last_failure = 0
-        failure_cycles_parts = []
-        failure_cycles_runs = []
-        runs_since_last_failure = 0
-        failure_count = 0
-        
-        for _, row in group.iterrows():
-            order_qty = row.get('order_quantity', 1)
-            parts_since_last_failure += order_qty
-            runs_since_last_failure += 1
-            
-            if row['scrap_percent'] > threshold:
-                failure_cycles_parts.append(parts_since_last_failure)
-                failure_cycles_runs.append(runs_since_last_failure)
-                failure_count += 1
-                parts_since_last_failure = 0
-                runs_since_last_failure = 0
+        # Count failures (runs where scrap % exceeds threshold)
+        failure_count = (group['scrap_percent'] > threshold).sum()
         
         total_runs = len(group)
         total_parts = group['order_quantity'].sum() if 'order_quantity' in group.columns else total_runs
         avg_order_quantity = total_parts / total_runs if total_runs > 0 else 0
         
-        if len(failure_cycles_parts) > 0:
-            mtts_parts = np.mean(failure_cycles_parts)
-            mtts_runs = np.mean(failure_cycles_runs)
+        # Eq 3.1: MTTS = Total Parts (or Runs) / Number of Failures
+        if failure_count > 0:
+            mtts_parts = total_parts / failure_count
+            mtts_runs = total_runs / failure_count
         else:
             mtts_parts = total_parts
             mtts_runs = total_runs
         
-        lambda_parts = failure_count / total_parts if total_parts > 0 else 0
+        # Eq 3.2: h(t) = 1 / MTTS(parts)
+        lambda_parts = 1 / mtts_parts if mtts_parts > 0 else 0
         lambda_runs = failure_count / total_runs if total_runs > 0 else 0
         
+        # Eq 3.3: R(t) = e^(-h(t) * avg_order_quantity)
         reliability_score = np.exp(-avg_order_quantity / mtts_parts) if mtts_parts > 0 else 0
         
         results.append({
@@ -727,19 +725,21 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         failures = (part_data['scrap_percent'] > threshold_pct).sum()
         failure_rate = failures / part_n if part_n > 0 else 0
         
-        # MTTS (runs) - average runs between failures
+        # Eq 3.1: MTTS = Total Parts (or Runs) / Number of Failures
         if failures > 0:
             mtts_runs = part_n / failures
         else:
             mtts_runs = part_n * 10  # No failures observed, estimate high MTTS
         
-        # MTTS (parts) - average parts produced between failures
+        # Eq 3.1: MTTS(parts) = Total Parts Produced / Failures
         if failures > 0:
             mtts_parts = total_parts_produced / failures
         else:
             mtts_parts = total_parts_produced * 10
         
-        reliability = np.exp(-1 / mtts_runs) if mtts_runs > 0 else 0
+        # Eq 3.3: R(t) = e^(-h(t) * avg_parts_per_run)
+        avg_order_qty = total_parts_produced / part_n if part_n > 0 else 0
+        reliability = np.exp(-avg_order_qty / mtts_parts) if mtts_parts > 0 else 0
         
         result.update({
             'pooling_method': 'Part-Level (No Pooling Required)',
@@ -770,7 +770,9 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
         else:
             pl_mtts_runs = part_n * 2
             pl_mtts_parts = total_parts_produced * 2
-        pl_reliability = np.exp(-1 / pl_mtts_runs) if pl_mtts_runs > 0 else 0
+        # Eq 3.3: R(t) = e^(-h(t) * avg_parts_per_run)
+        pl_avg_order_qty = total_parts_produced / part_n if part_n > 0 else 0
+        pl_reliability = np.exp(-pl_avg_order_qty / pl_mtts_parts) if pl_mtts_parts > 0 else 0
         pl_confidence = 'VERY LOW' if part_n < 5 else get_confidence_tier(part_n)
         pl_avg_scrap = part_data['scrap_percent'].mean()
     else:
@@ -907,19 +909,21 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
     failures = (final_df['scrap_percent'] > effective_threshold).sum()
     failure_rate = failures / pooled_n if pooled_n > 0 else 0
     
-    # MTTS (runs) = Total Runs / Failures
+    # Eq 3.1: MTTS(runs) = Total Runs / Failures
     if failures > 0:
         mtts_runs = pooled_n / failures
     else:
         mtts_runs = pooled_n * 2  # Conservative multiplier when no failures (was 10)
     
-    # MTTS (parts) = Total Parts Produced / Failures
+    # Eq 3.1: MTTS(parts) = Total Parts Produced / Failures
     if failures > 0:
         mtts_parts = pooled_total_parts / failures
     else:
         mtts_parts = pooled_total_parts * 2  # Conservative multiplier when no failures (was 10)
     
-    reliability = np.exp(-1 / mtts_runs) if mtts_runs > 0 else 0
+    # Eq 3.3: R(t) = e^(-h(t) * avg_parts_per_run)
+    pooled_avg_order_qty = pooled_total_parts / pooled_n if pooled_n > 0 else 0
+    reliability = np.exp(-pooled_avg_order_qty / mtts_parts) if mtts_parts > 0 else 0
     
     # Build excluded parts info for disclaimer
     excluded_parts_info = []
@@ -3856,8 +3860,10 @@ This dashboard treats scrap as a **systemic issue**—the result of interconnect
                 mtts_parts = pooled.get('mtts_parts', 0)
                 mtts_runs = pooled.get('mtts_runs', 0)
                 
-                if mtts_runs and mtts_runs > 0:
-                    reliability = np.exp(-1 / mtts_runs)  # R(1 run)
+                # Eq 3.3: R(t) = e^(-h(t) * avg_parts_per_run)
+                if mtts_parts and mtts_parts > 0:
+                    avg_order_qty = total_parts_prod / n_records if n_records > 0 else 0
+                    reliability = np.exp(-avg_order_qty / mtts_parts)
                     failure_rate = pooled['failure_rate']
                 else:
                     reliability = 0
