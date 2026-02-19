@@ -209,7 +209,7 @@ POOLING_CONFIG = {
     'min_part_level_data': 5,
     'weight_tolerance': 0.10,
     'min_runs_per_pooled_part': 5,  # Filter out parts with < 5 runs (reduces noise)
-    'use_pooled_threshold': True,   # Use pooled avg+std instead of global threshold
+    'use_pooled_threshold': False,  # Pooled comparison uses target part's own avg scrap threshold
     'confidence_thresholds': {
         'HIGH': 30,
         'MODERATE': 15,
@@ -807,7 +807,6 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
     
     # Get config values
     min_runs_per_part = POOLING_CONFIG.get('min_runs_per_pooled_part', 5)
-    use_pooled_threshold = POOLING_CONFIG.get('use_pooled_threshold', True)
     
     # Step 1: Weight filter
     weight_matched_parts, weight_range = filter_by_weight(df, target_weight, weight_tolerance)
@@ -893,17 +892,12 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
     # Calculate total parts produced from pooled data
     pooled_total_parts = final_df['order_quantity'].sum() if 'order_quantity' in final_df.columns else pooled_n
     
-    # STRATEGY C: Use pooled threshold (avg + std) instead of global threshold
-    if use_pooled_threshold and pooled_n > 1:
-        pooled_avg_scrap = final_df['scrap_percent'].mean()
-        pooled_std_scrap = final_df['scrap_percent'].std()
-        effective_threshold = pooled_avg_scrap + pooled_std_scrap
-        threshold_source = 'pooled'
-    else:
-        pooled_avg_scrap = final_df['scrap_percent'].mean()
-        pooled_std_scrap = final_df['scrap_percent'].std() if pooled_n > 1 else 0
-        effective_threshold = threshold_pct
-        threshold_source = 'global'
+    # Use the target part's own average scrap rate as threshold for pooled comparison
+    # Pooling is a contextual lookup, not an independent statistical method
+    pooled_avg_scrap = final_df['scrap_percent'].mean()
+    pooled_std_scrap = final_df['scrap_percent'].std() if pooled_n > 1 else 0
+    effective_threshold = threshold_pct
+    threshold_source = 'part-specific'
     
     # Calculate failures using effective threshold
     failures = (final_df['scrap_percent'] > effective_threshold).sum()
@@ -2384,7 +2378,7 @@ def main():
                     | Weight Range | {pool_comp['weight_range']} lbs |
                     | Total Records | {pool_comp['n_records']} |
                     | Confidence | {pool_comp['confidence']} |
-                    | Pooled Threshold | {pool_comp['effective_threshold']:.2f}% (avg + 1σ) |
+                    | Pooled Threshold | {pool_comp['effective_threshold']:.2f}% (part avg) |
                     | Failures | {pool_comp['failure_count']} |
                     | Failure Rate | {pool_comp['failure_rate']*100:.1f}% |
                     | MTTS (runs) | {pool_comp['mtts_runs']:.1f} |
