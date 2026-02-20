@@ -494,8 +494,179 @@ def compute_mtts_metrics(df, threshold):
     return pd.DataFrame(results)
 
 
+def add_mtts_sequential_features(df, threshold):
+    """
+    Add per-record sequential MTTS features (NO future-data leakage).
+    
+    These features are computed strictly from past/current data within each
+    part's timeline using a forward-only loop. No aggregate part-level metrics
+    are included here — those are computed separately from training data only
+    via compute_mtts_on_train() to prevent temporal leakage.
+    
+    LEAKAGE PREVENTION (Colaresi & Mahmood, 2017):
+    Sequential features (runs_since_last_failure, degradation_velocity, etc.)
+    are inherently causal — each record's value depends only on prior records.
+    Aggregate metrics (mtts_runs, hazard_rate, reliability_score) are computed
+    from training data only and attached via attach_mtts_aggregate_features().
+    
+    Consistent with MTTF = total operating time / number of failures
+    (Ebeling, 1997, An Introduction to Reliability and Maintainability Engineering).
+    """
+    df = df.copy()
+    df = df.sort_values(['part_id', 'week_ending']).reset_index(drop=True)
+    
+    df['runs_since_last_failure'] = 0
+    df['cumulative_scrap_in_cycle'] = 0.0
+    df['degradation_velocity'] = 0.0
+    df['degradation_acceleration'] = 0.0
+    
+    for part_id, group in df.groupby('part_id'):
+        idx_list = group.index.tolist()
+        
+        runs_since_failure = 0
+        cumulative_scrap = 0.0
+        prev_scrap = 0.0
+        prev_velocity = 0.0
+        
+        for idx in idx_list:
+            runs_since_failure += 1
+            current_scrap = df.loc[idx, 'scrap_percent']
+            cumulative_scrap += current_scrap
+            
+            df.loc[idx, 'runs_since_last_failure'] = runs_since_failure
+            df.loc[idx, 'cumulative_scrap_in_cycle'] = cumulative_scrap
+            
+            velocity = current_scrap - prev_scrap
+            df.loc[idx, 'degradation_velocity'] = velocity
+            df.loc[idx, 'degradation_acceleration'] = velocity - prev_velocity
+            
+            prev_scrap = current_scrap
+            prev_velocity = velocity
+            
+            if current_scrap > threshold:
+                runs_since_failure = 0
+                cumulative_scrap = 0.0
+    
+    return df
+
+
+def compute_mtts_on_train(df_train, threshold):
+    """
+    Compute aggregate MTTS metrics from TRAINING DATA ONLY.
+    
+    LEAKAGE PREVENTION: This function is called AFTER the temporal split,
+    using only the training partition. The resulting metrics are then merged
+    into all partitions (train, calib, test) via attach_mtts_aggregate_features(),
+    ensuring that test-set records never contain MTTS values computed from
+    future data.
+    
+    MTTS(parts) = Total Parts Produced / Number of Failures    (Eq 3.1)
+    MTTS(runs)  = Total Runs / Number of Failures
+    h(t)        = 1 / MTTS(parts)                              (Eq 3.2)
+    R(t)        = e^(-h(t) * parts_ordered)                    (Eq 3.3)
+    
+    Consistent with MTTF = total operating time / number of failures
+    (Ebeling, 1997, An Introduction to Reliability and Maintainability Engineering).
+    """
+    results = []
+    
+    for part_id, group in df_train.groupby('part_id'):
+        total_runs = len(group)
+        total_parts = group['order_quantity'].sum() if 'order_quantity' in group.columns else total_runs
+        avg_order_quantity = total_parts / total_runs if total_runs > 0 else 0
+        failure_count = (group['scrap_percent'] > threshold).sum()
+        
+        # Eq 3.1: MTTS = Total Parts (or Runs) / Number of Failures
+        if failure_count > 0:
+            mtts_parts = total_parts / failure_count
+            mtts_runs = total_runs / failure_count
+        else:
+            mtts_parts = total_parts
+            mtts_runs = total_runs
+        
+        # Eq 3.2: h(t) = 1 / MTTS(parts)
+        lambda_parts = 1 / mtts_parts if mtts_parts > 0 else 0
+        lambda_runs = failure_count / total_runs if total_runs > 0 else 0
+        
+        # Eq 3.3: R(t) = e^(-h(t) * avg_order_quantity)
+        reliability_score = np.exp(-avg_order_quantity / mtts_parts) if mtts_parts > 0 else 0
+        
+        results.append({
+            'part_id': part_id,
+            'mtts_parts': mtts_parts,
+            'mtts_runs': mtts_runs,
+            'failure_count': failure_count,
+            'lambda_parts': lambda_parts,
+            'lambda_runs': lambda_runs,
+            'hazard_rate': lambda_runs,
+            'reliability_score': reliability_score
+        })
+    
+    return pd.DataFrame(results) if results else pd.DataFrame(
+        columns=['part_id', 'mtts_parts', 'mtts_runs', 'failure_count',
+                 'lambda_parts', 'lambda_runs', 'hazard_rate', 'reliability_score']
+    )
+
+
+def attach_mtts_aggregate_features(df, mtts_train_df):
+    """
+    Attach training-derived MTTS aggregates to any data split.
+    
+    LEAKAGE PREVENTION: mtts_train_df was computed from training data only.
+    Parts not seen during training receive median imputed values, ensuring
+    no future information leaks into calibration or test partitions.
+    
+    Also computes derived features (cycle_hazard_indicator, rul_proxy) using
+    the training-derived MTTS values combined with the per-record sequential
+    features already present in df.
+    """
+    merge_cols = ['part_id', 'mtts_parts', 'mtts_runs', 'lambda_parts', 'lambda_runs',
+                  'hazard_rate', 'reliability_score', 'failure_count']
+    available_cols = [c for c in merge_cols if c in mtts_train_df.columns]
+    
+    # Drop any existing MTTS columns to avoid merge conflicts
+    for col in available_cols:
+        if col != 'part_id' and col in df.columns:
+            df = df.drop(columns=[col])
+    
+    df = df.merge(mtts_train_df[available_cols], on='part_id', how='left')
+    
+    # Fill missing values for parts not in training data
+    median_mtts_parts = mtts_train_df['mtts_parts'].median() if len(mtts_train_df) > 0 and mtts_train_df['mtts_parts'].notna().any() else 1000
+    median_mtts_runs = mtts_train_df['mtts_runs'].median() if len(mtts_train_df) > 0 and mtts_train_df['mtts_runs'].notna().any() else 10
+    
+    df['mtts_parts'] = df['mtts_parts'].fillna(median_mtts_parts)
+    df['mtts_runs'] = df['mtts_runs'].fillna(median_mtts_runs)
+    df['hazard_rate'] = df['hazard_rate'].fillna(0.1)
+    df['reliability_score'] = df['reliability_score'].fillna(0.5)
+    df['failure_count'] = df['failure_count'].fillna(0)
+    
+    # Compute derived features using training-derived MTTS + sequential features
+    if 'runs_since_last_failure' in df.columns:
+        df['cycle_hazard_indicator'] = (
+            df['runs_since_last_failure'] / df['mtts_runs'].replace(0, 1)
+        ).clip(upper=2.0)
+        df['rul_proxy'] = (df['mtts_runs'] - df['runs_since_last_failure']).clip(lower=0)
+    else:
+        df['cycle_hazard_indicator'] = 0.0
+        df['rul_proxy'] = 0.0
+    
+    return df
+
+
+# BACKWARD COMPATIBILITY: Keep original function for runtime analysis
+# (e.g., compute_pooled_prediction, Tab displays) where leakage is not
+# a concern because these are descriptive statistics, not model features.
 def add_mtts_features(df, threshold):
-    """Add MTTS-based reliability features matching enhanced version."""
+    """
+    Add MTTS-based reliability features (FULL HISTORY version).
+    
+    WARNING: This function uses the FULL dataset to compute aggregate MTTS
+    metrics. It is retained ONLY for runtime descriptive analysis (e.g.,
+    pooled predictions, Tab 1 displays). For MODEL TRAINING, use the 
+    leakage-safe pipeline: add_mtts_sequential_features() → split → 
+    compute_mtts_on_train() → attach_mtts_aggregate_features().
+    """
     df = df.copy()
     df = df.sort_values(['part_id', 'week_ending']).reset_index(drop=True)
     
@@ -969,20 +1140,35 @@ def time_split_621(df):
 
 
 # ================================================================
-# FEATURE ENGINEERING - MTBF ON TRAIN
+# FEATURE ENGINEERING - MEAN SCRAP RATE (TRAINING-DERIVED)
 # ================================================================
-def compute_mtbf_on_train(df_train, threshold):
-    """Compute MTTF proxy from training data only."""
+# NOTE: compute_mean_scrap_on_train() computes a simple average scrap
+# rate per part — it is NOT the MTTS reliability metric. MTTS metrics
+# are computed in compute_mtts_on_train(). See docstrings for details.
+# ================================================================
+def compute_mean_scrap_on_train(df_train, threshold):
+    """
+    Compute mean scrap rate per part from TRAINING data only.
+    
+    NOTE: This is a simple average scrap rate per part, NOT the MTTS
+    reliability metric defined in Eq 3.1. The MTTS metrics (mtts_parts, 
+    mtts_runs, hazard_rate, reliability_score) are computed separately 
+    in compute_mtts_on_train(). This feature captures each part's 
+    baseline scrap tendency as a model input.
+    
+    Renamed from 'mttf_scrap' to 'mean_scrap_rate_train' to avoid 
+    confusion with the actual MTTS/MTTF reliability calculations.
+    """
     grp = df_train.groupby("part_id")["scrap_percent"].mean().reset_index()
-    grp.rename(columns={"scrap_percent": "mttf_scrap"}, inplace=True)
-    grp["mttf_scrap"] = np.where(grp["mttf_scrap"] <= threshold, 1.0, grp["mttf_scrap"])
+    grp.rename(columns={"scrap_percent": "mean_scrap_rate_train"}, inplace=True)
+    grp["mean_scrap_rate_train"] = np.where(grp["mean_scrap_rate_train"] <= threshold, 1.0, grp["mean_scrap_rate_train"])
     return grp
 
 
-def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, default_freq):
+def attach_train_features(df_sub, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq):
     """Attach training-derived features to prevent leakage."""
-    df_sub = df_sub.merge(mtbf_train, on="part_id", how="left")
-    df_sub["mttf_scrap"] = df_sub["mttf_scrap"].fillna(default_mtbf)
+    df_sub = df_sub.merge(scrap_rate_train, on="part_id", how="left")
+    df_sub["mean_scrap_rate_train"] = df_sub["mean_scrap_rate_train"].fillna(default_scrap_rate)
     df_sub = df_sub.merge(part_freq_train.rename("part_freq"), left_on="part_id", right_index=True, how="left")
     df_sub["part_freq"] = df_sub["part_freq"].fillna(default_freq)
     return df_sub
@@ -993,7 +1179,7 @@ def attach_train_features(df_sub, mtbf_train, part_freq_train, default_mtbf, def
 # ================================================================
 def make_xy(df, threshold, defect_cols, use_multi_defect=True, use_temporal=True, use_mtts=True):
     """Prepare features matching enhanced version exactly."""
-    feats = ["order_quantity", "piece_weight_lbs", "mttf_scrap", "part_freq"]
+    feats = ["order_quantity", "piece_weight_lbs", "mean_scrap_rate_train", "part_freq"]
     
     # Multi-defect features
     if use_multi_defect and MULTI_DEFECT_FEATURES_ENABLED:
@@ -1071,25 +1257,31 @@ def train_stage1_foundry_wide(df, defect_cols):
     """
     global_threshold = df["scrap_percent"].mean()
     
-    # Add features
+    # Add features (sequential MTTS features are safe before split - backward-looking only)
     df_stage1 = df.copy()
     df_stage1 = add_multi_defect_features(df_stage1, defect_cols)
     df_stage1 = add_temporal_features(df_stage1)
-    df_stage1 = add_mtts_features(df_stage1, global_threshold)
+    df_stage1 = add_mtts_sequential_features(df_stage1, global_threshold)
     
     # 6-2-1 split
     df_train, df_calib, df_test = time_split_621(df_stage1)
     
-    # MTBF from training only
-    mtbf_train = compute_mtbf_on_train(df_train, global_threshold)
+    # MTTS aggregates from training only (LEAKAGE PREVENTION)
+    mtts_train = compute_mtts_on_train(df_train, global_threshold)
+    df_train = attach_mtts_aggregate_features(df_train, mtts_train)
+    df_calib = attach_mtts_aggregate_features(df_calib, mtts_train)
+    df_test = attach_mtts_aggregate_features(df_test, mtts_train)
+    
+    # Mean scrap rate from training only
+    scrap_rate_train = compute_mean_scrap_on_train(df_train, global_threshold)
     part_freq_train = df_train["part_id"].value_counts(normalize=True)
-    default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
+    default_scrap_rate = float(scrap_rate_train["mean_scrap_rate_train"].median()) if len(scrap_rate_train) else 1.0
     default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
     
     # Attach features
-    df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
+    df_train = attach_train_features(df_train, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
+    df_calib = attach_train_features(df_calib, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
+    df_test = attach_train_features(df_test, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
     
     # Prepare X, y
     X_train, y_train, feats = make_xy(df_train, global_threshold, defect_cols)
@@ -1138,9 +1330,9 @@ def train_stage1_foundry_wide(df, defect_cols):
         "metrics": metrics,
         "n_train": len(df_train),
         "n_test": len(df_test),
-        "mtbf_train": mtbf_train,
+        "scrap_rate_train": scrap_rate_train,
         "part_freq_train": part_freq_train,
-        "default_mtbf": default_mtbf,
+        "default_scrap_rate": default_scrap_rate,
         "default_freq": default_freq,
     }
 
@@ -1173,10 +1365,10 @@ def train_stage2_defect_cluster(df, defect_cols, stage1_model):
     
     cluster_threshold = df_cluster["scrap_percent"].mean()
     
-    # Add features
+    # Add features (sequential MTTS features are safe before split)
     df_cluster = add_multi_defect_features(df_cluster, defect_cols)
     df_cluster = add_temporal_features(df_cluster)
-    df_cluster = add_mtts_features(df_cluster, cluster_threshold)
+    df_cluster = add_mtts_sequential_features(df_cluster, cluster_threshold)
     
     # Add Stage 1 predictions as feature
     df_cluster = add_stage1_features(df_cluster, stage1_model, defect_cols)
@@ -1184,16 +1376,22 @@ def train_stage2_defect_cluster(df, defect_cols, stage1_model):
     # 6-2-1 split
     df_train, df_calib, df_test = time_split_621(df_cluster)
     
-    # MTBF
-    mtbf_train = compute_mtbf_on_train(df_train, cluster_threshold)
+    # MTTS aggregates from training only (LEAKAGE PREVENTION)
+    mtts_train = compute_mtts_on_train(df_train, cluster_threshold)
+    df_train = attach_mtts_aggregate_features(df_train, mtts_train)
+    df_calib = attach_mtts_aggregate_features(df_calib, mtts_train)
+    df_test = attach_mtts_aggregate_features(df_test, mtts_train)
+    
+    # Mean scrap rate from training only
+    scrap_rate_train = compute_mean_scrap_on_train(df_train, cluster_threshold)
     part_freq_train = df_train["part_id"].value_counts(normalize=True)
-    default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
+    default_scrap_rate = float(scrap_rate_train["mean_scrap_rate_train"].median()) if len(scrap_rate_train) else 1.0
     default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
     
     # Attach features
-    df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
+    df_train = attach_train_features(df_train, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
+    df_calib = attach_train_features(df_calib, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
+    df_test = attach_train_features(df_test, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
     
     # Prepare X, y
     X_train, y_train, feats = make_xy(df_train, cluster_threshold, defect_cols)
@@ -1328,31 +1526,52 @@ def train_three_stage_model(df, defect_cols):
     # ================================================================
     # STAGE 3: FINAL MODEL WITH INHERITED FEATURES
     # ================================================================
-    # Add Stage 1 and Stage 2 features to full dataset
+    # Add base features to full dataset (sequential MTTS only - no leakage)
     df_enhanced = df.copy()
     df_enhanced = add_multi_defect_features(df_enhanced, defect_cols)
     df_enhanced = add_temporal_features(df_enhanced)
     
     # Use GLOBAL threshold for MTTS (Stage 1 alignment)
     global_threshold = df["scrap_percent"].mean()
-    df_enhanced = add_mtts_features(df_enhanced, global_threshold)
+    df_enhanced = add_mtts_sequential_features(df_enhanced, global_threshold)
     
-    # Add inherited features from Stage 1 and Stage 2
+    # ================================================================
+    # INHERITED FEATURES: Stage 1 and Stage 2 predictions
+    # ================================================================
+    # STACKING NOTE (Fix 2 - Temporal Alignment):
+    # Stage 1/2 models were each trained on their own first-60% temporal
+    # partition. Applying them to the full dataset means:
+    #   - Records in Stage 3's training set (first 60%): Stage 1/2
+    #     predictions are IN-SAMPLE (same temporal window as their training).
+    #     This introduces mild optimism in inherited features.
+    #   - Records in Stage 3's calib/test sets (last 40%): Stage 1/2
+    #     predictions are genuinely OUT-OF-SAMPLE.
+    # This is a known limitation of two-level stacking without cross-fold
+    # prediction generation (Wolpert, 1992; Breiman, 1996). The RF's
+    # internal regularization (bootstrap sampling, feature subsetting)
+    # mitigates but does not eliminate this optimism.
+    # ================================================================
     df_enhanced = add_stage1_features(df_enhanced, stage1_result, defect_cols)
     df_enhanced = add_stage2_features(df_enhanced, stage2_result, defect_cols)
     
     # 6-2-1 split
     df_train, df_calib, df_test = time_split_621(df_enhanced)
     
-    # MTBF
-    mtbf_train = compute_mtbf_on_train(df_train, global_threshold)
+    # MTTS aggregates from training only (LEAKAGE PREVENTION)
+    mtts_train = compute_mtts_on_train(df_train, global_threshold)
+    df_train = attach_mtts_aggregate_features(df_train, mtts_train)
+    df_calib = attach_mtts_aggregate_features(df_calib, mtts_train)
+    df_test = attach_mtts_aggregate_features(df_test, mtts_train)
+    
+    # Mean scrap rate from training only
+    scrap_rate_train = compute_mean_scrap_on_train(df_train, global_threshold)
     part_freq_train = df_train["part_id"].value_counts(normalize=True)
-    default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
+    default_scrap_rate = float(scrap_rate_train["mean_scrap_rate_train"].median()) if len(scrap_rate_train) else 1.0
     default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
     
-    df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
+    df_train = attach_train_features(df_train, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
+    df_calib = attach_train_features(df_calib, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
+    df_test = attach_train_features(df_test, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
     
     # Prepare X, y with GLOBAL threshold for final evaluation
     X_train, y_train, feats = make_xy(df_train, global_threshold, defect_cols)
@@ -1424,9 +1643,9 @@ def train_three_stage_model(df, defect_cols):
         "X_test": X_test,
         "y_train": y_train,
         "y_test": y_test,
-        "mtbf_train": mtbf_train,
+        "scrap_rate_train": scrap_rate_train,
         "part_freq_train": part_freq_train,
-        "default_mtbf": default_mtbf,
+        "default_scrap_rate": default_scrap_rate,
         "default_freq": default_freq,
         "metrics": metrics,
         "n_train": len(df_train),
@@ -1468,24 +1687,30 @@ def train_global_model(df, threshold, defect_cols):
     - calibration_curve(): Generates points for calibration plot
     """
     
-    # Add ALL enhanced features BEFORE split
+    # Add enhanced features BEFORE split (sequential features are backward-looking)
     df = add_multi_defect_features(df, defect_cols)
     df = add_temporal_features(df)
-    df = add_mtts_features(df, threshold)
+    df = add_mtts_sequential_features(df, threshold)
     
     # 6-2-1 temporal split
     df_train, df_calib, df_test = time_split_621(df)
     
-    # MTBF from training only
-    mtbf_train = compute_mtbf_on_train(df_train, threshold)
+    # MTTS aggregates from training only (LEAKAGE PREVENTION)
+    mtts_train = compute_mtts_on_train(df_train, threshold)
+    df_train = attach_mtts_aggregate_features(df_train, mtts_train)
+    df_calib = attach_mtts_aggregate_features(df_calib, mtts_train)
+    df_test = attach_mtts_aggregate_features(df_test, mtts_train)
+    
+    # Mean scrap rate from training only
+    scrap_rate_train = compute_mean_scrap_on_train(df_train, threshold)
     part_freq_train = df_train["part_id"].value_counts(normalize=True)
-    default_mtbf = float(mtbf_train["mttf_scrap"].median()) if len(mtbf_train) else 1.0
+    default_scrap_rate = float(scrap_rate_train["mean_scrap_rate_train"].median()) if len(scrap_rate_train) else 1.0
     default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
     
     # Attach features
-    df_train = attach_train_features(df_train, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_calib = attach_train_features(df_calib, mtbf_train, part_freq_train, default_mtbf, default_freq)
-    df_test = attach_train_features(df_test, mtbf_train, part_freq_train, default_mtbf, default_freq)
+    df_train = attach_train_features(df_train, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
+    df_calib = attach_train_features(df_calib, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
+    df_test = attach_train_features(df_test, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
     
     # Prepare X, y with ALL features
     X_train, y_train, feats = make_xy(df_train, threshold, defect_cols)
@@ -1590,8 +1815,8 @@ def train_global_model(df, threshold, defect_cols):
         "rf": rf, "cal_model": cal_model, "calibration_method": calibration_method,
         "features": feats, "df_train": df_train, "df_calib": df_calib, "df_test": df_test,
         "X_train": X_train, "X_test": X_test, "y_train": y_train, "y_test": y_test,
-        "mtbf_train": mtbf_train, "part_freq_train": part_freq_train,
-        "default_mtbf": default_mtbf, "default_freq": default_freq,
+        "scrap_rate_train": scrap_rate_train, "part_freq_train": part_freq_train,
+        "default_scrap_rate": default_scrap_rate, "default_freq": default_freq,
         "metrics": metrics, "n_train": len(df_train), "n_calib": len(df_calib), "n_test": len(df_test)
     }
 
