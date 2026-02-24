@@ -342,6 +342,7 @@ def load_data(filepath):
     df["scrap_percent"] = pd.to_numeric(df["scrap_percent"], errors="coerce").fillna(0)
     
     if "week_ending" in df.columns:
+        df["week_ending"] = df["week_ending"].astype(str).str.strip()
         df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
         df = df.dropna(subset=["week_ending"])
         df = df.sort_values("week_ending").reset_index(drop=True)
@@ -4039,6 +4040,7 @@ def main():
     # ================================================================
     with tab2:
         st.header("RQ1: Model Validation & Predictive Performance")
+        st.caption("Forward Temporal Validation (60–20–20 split; no data leakage)")
         
         st.markdown("""
         <div class="citation-box">
@@ -4292,7 +4294,7 @@ The hierarchical architecture transfers foundry-wide and defect-cluster knowledg
 | **Bin CV** | {hazard_results['bin_cv']:.2f} | {'Approximately flat ✅' if hazard_results['bin_cv'] < 0.30 else 'Moderate variation' if hazard_results['bin_cv'] < 0.50 else 'Substantial variation ⚠️'} |
 | **χ² equal-counts** | p = {hazard_results['chi2_p']:.3f} | {'Cannot reject uniform hazard ✅' if hazard_results['chi2_p'] > 0.05 else 'Bins significantly unequal ⚠️'} |
 | **Kendall τ trend** | τ = {hazard_results['kendall_tau']:.3f}, p = {hazard_results['kendall_p']:.3f} | {'No monotonic trend ✅' if hazard_results['kendall_p'] > 0.05 else 'Significant trend ⚠️'} |
-| **KS vs Exp(1)** | D = {hazard_results['ks_stat']:.3f}, p = {hazard_results['ks_p']:.3f} | {'Expected rejection under underdispersion' if hazard_results['ks_p'] < 0.05 else 'Cannot reject Exp(1) ✅'} |
+| **KS vs Exp(1)** | D = {hazard_results['ks_stat']:.3f}, p = {hazard_results['ks_p']:.3f} | {'Exact Exp(1) rejected; underdispersion (CV<1) means CFR approximation remains plausible' if hazard_results['ks_p'] < 0.05 else 'Cannot reject Exp(1) ✅'} |
             """)
             
             # Nelson-Aalen Cumulative Hazard
