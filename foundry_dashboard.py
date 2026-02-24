@@ -1168,54 +1168,77 @@ def compute_seen_unseen_metrics(global_model):
     """
     Partition test set by part familiarity and compute recall for each group.
     
-    Returns dict with seen/unseen parts counts, runs, recall, precision.
+    Uses test_part_ids and train_part_set stored at training time to guarantee
+    exact alignment with y_test/y_pred (merges can reset DataFrame indices).
+    
+    Returns dict with seen/unseen parts counts, runs, recall, precision,
+    plus sanity-check totals.
     """
-    df_train = global_model['df_train']
-    df_test = global_model['df_test']
-    threshold = global_model['global_threshold']
-    
-    train_parts = set(df_train['part_id'].unique())
-    test_parts = set(df_test['part_id'].unique())
-    
-    seen_parts = test_parts & train_parts
-    unseen_parts = test_parts - train_parts
+    # Use the aligned arrays stored at training time
+    test_part_ids = global_model.get('test_part_ids')
+    train_part_set = global_model.get('train_part_set')
     
     y_test = global_model['metrics'].get('y_test')
     y_pred = global_model['metrics'].get('y_pred')
     
-    if y_test is None or y_pred is None:
+    if test_part_ids is None or train_part_set is None or y_test is None or y_pred is None:
         return None
     
-    # Get part_ids aligned with test set
-    test_part_ids = df_test['part_id'].values[:len(y_test)]
+    y_test_arr = np.array(y_test)
+    y_pred_arr = np.array(y_pred)
     
-    seen_mask = np.isin(test_part_ids, list(seen_parts))
-    unseen_mask = np.isin(test_part_ids, list(unseen_parts))
+    # Sanity: lengths must match
+    if len(test_part_ids) != len(y_test_arr) or len(y_test_arr) != len(y_pred_arr):
+        return None
     
-    results = {}
+    # Partition
+    seen_mask = np.array([pid in train_part_set for pid in test_part_ids])
+    unseen_mask = ~seen_mask
+    
+    # Overall totals for sanity check
+    overall_tp = int(((y_test_arr == 1) & (y_pred_arr == 1)).sum())
+    overall_fn = int(((y_test_arr == 1) & (y_pred_arr == 0)).sum())
+    overall_failures = overall_tp + overall_fn
+    
+    results = {'_overall_tp': overall_tp, '_overall_fn': overall_fn, '_overall_failures': overall_failures}
+    
+    running_tp = 0
+    running_fn = 0
+    
     for label, mask in [('seen', seen_mask), ('unseen', unseen_mask)]:
-        if mask.sum() == 0:
+        n_runs = int(mask.sum())
+        if n_runs == 0:
             continue
-        yt = np.array(y_test)[mask]
-        yp = np.array(y_pred)[mask]
         
-        tp = ((yt == 1) & (yp == 1)).sum()
-        fn = ((yt == 1) & (yp == 0)).sum()
-        fp = ((yt == 0) & (yp == 1)).sum()
+        yt = y_test_arr[mask]
+        yp = y_pred_arr[mask]
         
-        rec = tp / (tp + fn) if (tp + fn) > 0 else 0
+        tp = int(((yt == 1) & (yp == 1)).sum())
+        fn = int(((yt == 1) & (yp == 0)).sum())
+        fp = int(((yt == 0) & (yp == 1)).sum())
+        failures = tp + fn  # actual positives in this group
+        
+        rec = tp / failures if failures > 0 else 0
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0
-        n_parts_in_group = len(seen_parts) if label == 'seen' else len(unseen_parts)
+        
+        n_unique_parts = len(set(test_part_ids[mask]))
+        
+        running_tp += tp
+        running_fn += fn
         
         results[label] = {
-            'n_parts': n_parts_in_group,
-            'n_runs': int(mask.sum()),
+            'n_parts': n_unique_parts,
+            'n_runs': n_runs,
+            'failures': failures,  # actual failures (TP+FN) in this group
             'recall': rec,
             'precision': prec,
-            'tp': int(tp),
-            'fn': int(fn),
-            'fp': int(fp),
+            'tp': tp,
+            'fn': fn,
+            'fp': fp,
         }
+    
+    # Sanity check: group totals must equal overall totals
+    results['_sanity_ok'] = (running_tp == overall_tp and running_fn == overall_fn)
     
     return results
 
@@ -1757,6 +1780,11 @@ def train_three_stage_model(df, defect_cols):
     X_calib, y_calib, _ = make_xy(df_calib, global_threshold, defect_cols)
     X_test, y_test, _ = make_xy(df_test, global_threshold, defect_cols)
     
+    # CRITICAL: Capture part_ids at same moment as y_test for exact alignment
+    # (merges in attach_train_features may have reset df_test index)
+    test_part_ids = df_test['part_id'].values.copy()
+    train_part_set = set(df_train['part_id'].unique())
+    
     # Train final Stage 3 model
     rf = RandomForestClassifier(
         n_estimators=N_ESTIMATORS,
@@ -1831,6 +1859,9 @@ def train_three_stage_model(df, defect_cols):
         "n_calib": len(df_calib),
         "n_test": len(df_test),
         "global_threshold": global_threshold,
+        # Exact alignment arrays for seen/unseen analysis
+        "test_part_ids": test_part_ids,
+        "train_part_set": train_part_set,
         # Stage results for transparency
         "stage1": stage1_result,
         "stage2": stage2_result,
@@ -4114,35 +4145,55 @@ Lower bound {ci_lower*100:.1f}% {'**exceeds**' if ci_pass else 'does not exceed'
         seen_unseen = compute_seen_unseen_metrics(global_model)
         
         if seen_unseen:
+            # Sanity check row first
+            overall_tp = seen_unseen['_overall_tp']
+            overall_fn = seen_unseen['_overall_fn']
+            overall_failures = seen_unseen['_overall_failures']
+            sanity_ok = seen_unseen['_sanity_ok']
+            
             su_cols = st.columns(2)
-            for i, (label, display_name) in enumerate([('seen', 'Seen in Training'), ('unseen', 'Never Seen')]):
+            for i, (label, display_name) in enumerate([('seen', '✅ Seen in Training'), ('unseen', '🆕 Never Seen')]):
                 if label in seen_unseen:
                     data = seen_unseen[label]
                     with su_cols[i]:
                         st.markdown(f"**{display_name}**")
-                        m1, m2, m3 = st.columns(3)
+                        m1, m2, m3, m4 = st.columns(4)
                         m1.metric("Parts", f"{data['n_parts']}")
                         m2.metric("Runs", f"{data['n_runs']}")
-                        m3.metric("Recall", f"{data['recall']*100:.1f}%")
-                        st.caption(f"Precision: {data['precision']*100:.1f}% | TP: {data['tp']} | FN: {data['fn']}")
+                        m3.metric("Failures", f"{data['failures']}", help="TP + FN in this group")
+                        m4.metric("Recall", f"{data['recall']*100:.1f}%")
+                        st.caption(f"TP: {data['tp']} | FN: {data['fn']} | Precision: {data['precision']*100:.1f}%")
+            
+            # Sanity check: totals must reconcile
+            st.markdown("---")
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("Total Test Failures", f"{overall_failures}", help="TP + FN across entire test set")
+            sc2.metric("Total Misses (FN)", f"{overall_fn}")
+            sc3.metric("Overall Recall", f"{overall_tp}/{overall_failures} = {overall_tp/overall_failures*100:.1f}%" if overall_failures > 0 else "N/A")
+            
+            if sanity_ok:
+                sc4.metric("✅ Sanity Check", "PASS", help="Group TP+FN sums match overall totals")
+            else:
+                sc4.metric("⚠️ Sanity Check", "MISMATCH", help="Group totals don't sum to overall — alignment issue")
             
             if 'seen' in seen_unseen and 'unseen' in seen_unseen:
-                seen_rec = seen_unseen['seen']['recall']
-                unseen_rec = seen_unseen['unseen']['recall']
+                seen_data = seen_unseen['seen']
+                unseen_data = seen_unseen['unseen']
+                seen_rec = seen_data['recall']
+                unseen_rec = unseen_data['recall']
                 
-                if unseen_rec >= seen_rec * 0.95:
+                if unseen_rec >= seen_rec * 0.95 and sanity_ok:
                     st.success(f"""
-**✅ Generalization Confirmed:** Never-seen parts achieve {unseen_rec*100:.1f}% recall vs. {seen_rec*100:.1f}% for seen parts.
+**✅ Generalization Confirmed:** Never-seen parts achieve {unseen_rec*100:.1f}% recall ({unseen_data['tp']}/{unseen_data['failures']} failures detected) vs. {seen_rec*100:.1f}% ({seen_data['tp']}/{seen_data['failures']}) for seen parts. Total: {overall_tp}/{overall_failures} failures detected, {overall_fn} miss(es).
 
-The hierarchical architecture transfers foundry-wide and defect-cluster knowledge to novel parts, enabling predictions without part-specific historical baselines. This demonstrates the model learns **systemic process signatures**, not part identities (Deming, 1986).
+The hierarchical architecture transfers foundry-wide and defect-cluster knowledge to novel parts. This demonstrates the model learns **systemic process signatures**, not part identities (Deming, 1986).
                     """)
                 else:
-                    st.info(f"Seen recall: {seen_rec*100:.1f}% | Unseen recall: {unseen_rec*100:.1f}%")
+                    st.info(f"Seen: {seen_rec*100:.1f}% ({seen_data['tp']}/{seen_data['failures']}) | Unseen: {unseen_rec*100:.1f}% ({unseen_data['tp']}/{unseen_data['failures']})")
                 
                 # Caveat for small sample
-                unseen_runs = seen_unseen['unseen']['n_runs']
-                if unseen_runs < 100:
-                    st.caption(f"*Note: Never-seen group has {unseen_runs} runs. Smaller samples carry higher variance in performance estimates.*")
+                if unseen_data['n_runs'] < 100:
+                    st.caption(f"*Note: Never-seen group has {unseen_data['n_runs']} runs — interpret perfect scores cautiously.*")
         else:
             st.info("Insufficient data to compute seen/unseen partition.")
     
@@ -4392,7 +4443,7 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
                 
                 su_text = ""
                 if seen_unseen_summary and 'unseen' in seen_unseen_summary:
-                    su_text = f"\n- **Never-seen parts recall:** {seen_unseen_summary['unseen']['recall']*100:.1f}% ({seen_unseen_summary['unseen']['n_parts']} parts, {seen_unseen_summary['unseen']['n_runs']} runs)"
+                    su_text = f"\n- **Never-seen parts recall:** {seen_unseen_summary['unseen']['recall']*100:.1f}% ({seen_unseen_summary['unseen']['tp']}/{seen_unseen_summary['unseen']['failures']} failures, {seen_unseen_summary['unseen']['n_parts']} parts)"
                 
                 st.success(f"""### ✅ H1: SUPPORTED — Model Predictions Are Validated
                 
