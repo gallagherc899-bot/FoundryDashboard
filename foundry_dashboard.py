@@ -4164,7 +4164,14 @@ Lower bound {ci_lower*100:.1f}% {'**exceeds**' if ci_pass else 'does not exceed'
                         m2.metric("Runs", f"{data['n_runs']}")
                         m3.metric("Failures", f"{data['failures']}", help="TP + FN in this group")
                         m4.metric("Recall", f"{data['recall']*100:.1f}%")
-                        st.caption(f"TP: {data['tp']} | FN: {data['fn']} | Precision: {data['precision']*100:.1f}%")
+                        # Clopper-Pearson exact CI for this group's recall
+                        if data['failures'] > 0:
+                            cp_lo, cp_hi = clopper_pearson_ci(data['tp'], data['failures'], alpha=0.05)
+                            cp_pass_80 = cp_lo >= 0.80
+                            st.caption(f"TP: {data['tp']} | FN: {data['fn']} | Precision: {data['precision']*100:.1f}%")
+                            st.caption(f"95% Clopper–Pearson CI for Recall: [{cp_lo*100:.1f}%, {cp_hi*100:.1f}%] — lower bound {'≥' if cp_pass_80 else '<'} 80%")
+                        else:
+                            st.caption(f"TP: {data['tp']} | FN: {data['fn']} | Precision: {data['precision']*100:.1f}%")
             
             # Sanity check: totals must reconcile
             st.markdown("---")
@@ -4184,18 +4191,25 @@ Lower bound {ci_lower*100:.1f}% {'**exceeds**' if ci_pass else 'does not exceed'
                 seen_rec = seen_data['recall']
                 unseen_rec = unseen_data['recall']
                 
+                # Compute CP intervals for both groups
+                unseen_cp_lo, unseen_cp_hi = clopper_pearson_ci(unseen_data['tp'], unseen_data['failures'], alpha=0.05) if unseen_data['failures'] > 0 else (0.0, 1.0)
+                seen_cp_lo, seen_cp_hi = clopper_pearson_ci(seen_data['tp'], seen_data['failures'], alpha=0.05) if seen_data['failures'] > 0 else (0.0, 1.0)
+                
                 if unseen_rec >= seen_rec * 0.95 and sanity_ok:
                     st.success(f"""
 **✅ Generalization Confirmed:** Never-seen parts achieve {unseen_rec*100:.1f}% recall ({unseen_data['tp']}/{unseen_data['failures']} failures detected) vs. {seen_rec*100:.1f}% ({seen_data['tp']}/{seen_data['failures']}) for seen parts. Total: {overall_tp}/{overall_failures} failures detected, {overall_fn} miss(es).
 
+**95% Clopper–Pearson CIs:** Seen [{seen_cp_lo*100:.1f}%, {seen_cp_hi*100:.1f}%] | Unseen [{unseen_cp_lo*100:.1f}%, {unseen_cp_hi*100:.1f}%]
+
 The hierarchical architecture transfers foundry-wide and defect-cluster knowledge to novel parts. This demonstrates the model learns **systemic process signatures**, not part identities (Deming, 1986).
                     """)
                 else:
-                    st.info(f"Seen: {seen_rec*100:.1f}% ({seen_data['tp']}/{seen_data['failures']}) | Unseen: {unseen_rec*100:.1f}% ({unseen_data['tp']}/{unseen_data['failures']})")
+                    st.info(f"Seen: {seen_rec*100:.1f}% ({seen_data['tp']}/{seen_data['failures']}) CI [{seen_cp_lo*100:.1f}%, {seen_cp_hi*100:.1f}%] | Unseen: {unseen_rec*100:.1f}% ({unseen_data['tp']}/{unseen_data['failures']}) CI [{unseen_cp_lo*100:.1f}%, {unseen_cp_hi*100:.1f}%]")
                 
-                # Caveat for small sample
+                # Caveat for small sample — now quantified by CI width
                 if unseen_data['n_runs'] < 100:
-                    st.caption(f"*Note: Never-seen group has {unseen_data['n_runs']} runs — interpret perfect scores cautiously.*")
+                    ci_width = (unseen_cp_hi - unseen_cp_lo) * 100
+                    st.caption(f"*Note: Never-seen group has {unseen_data['n_runs']} runs ({unseen_data['failures']} failures). CI width of {ci_width:.1f} pp reflects limited novel-part evidence — a direction for future validation.*")
         else:
             st.info("Insufficient data to compute seen/unseen partition.")
     
@@ -4445,7 +4459,9 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
                 
                 su_text = ""
                 if seen_unseen_summary and 'unseen' in seen_unseen_summary:
-                    su_text = f"\n- **Never-seen parts recall:** {seen_unseen_summary['unseen']['recall']*100:.1f}% ({seen_unseen_summary['unseen']['tp']}/{seen_unseen_summary['unseen']['failures']} failures, {seen_unseen_summary['unseen']['n_parts']} parts)"
+                    u_data = seen_unseen_summary['unseen']
+                    u_cp_lo, u_cp_hi = clopper_pearson_ci(u_data['tp'], u_data['failures'], alpha=0.05) if u_data['failures'] > 0 else (0.0, 1.0)
+                    su_text = f"\n- **Never-seen parts recall:** {u_data['recall']*100:.1f}% ({u_data['tp']}/{u_data['failures']} failures, {u_data['n_parts']} parts) — 95% CP CI [{u_cp_lo*100:.1f}%, {u_cp_hi*100:.1f}%]"
                 
                 st.success(f"""### ✅ H1: SUPPORTED — Model Predictions Are Validated
                 
