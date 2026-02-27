@@ -4101,7 +4101,7 @@ def main():
 Point estimate: {metrics['recall']*100:.1f}% ({tp}/{n_failures} failures detected)  
 Lower bound {ci_lower*100:.1f}% {'**exceeds**' if ci_pass else 'does not exceed'} the 80% PHM benchmark.
 
-*This quantifies predictive sensitivity uncertainty without invoking sampling-based population inference (Deming, 1953).*
+*This provides exact binomial uncertainty bounds on predictive sensitivity within an analytic (forward-predictive) study framework (Deming, 1953).*
             """)
         
         h1_pass = recall_pass and precision_pass and auc_pass and brier_pass
