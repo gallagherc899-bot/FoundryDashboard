@@ -4411,7 +4411,7 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
             <strong>Validation Methodology:</strong> 60-20-20 temporal split (60% train, 20% calibration, 20% test)
             <br><strong>Model:</strong> Random Forest with probability calibration (Platt scaling)
             <br><strong>Library:</strong> Scikit-learn (Pedregosa et al., 2011) — Industry standard ML library
-            <br><strong>Statistical Framework:</strong> Complete production census (Deming, 1953) — population parameters, not sample estimates
+            <br><strong>Statistical Framework:</strong> Complete production census (Deming, 1953) — descriptive population metrics for reliability analysis; sampling-based uncertainty bounds used for predictive validation
         </div>
         """, unsafe_allow_html=True)
         
@@ -4501,7 +4501,7 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
         # DATA SUFFICIENCY SUMMARY
         # ================================================================
         st.markdown("### 📊 Data Sufficiency & Population Coverage")
-        st.caption("*Complete production census: population parameters, not sample estimates (Deming, 1953)*")
+        st.caption("*Complete production census: descriptive population metrics for reliability analysis; sampling-based uncertainty bounds used for predictive validation (Deming, 1953)*")
         
         total_records = len(df)
         total_parts = df['part_id'].nunique()
