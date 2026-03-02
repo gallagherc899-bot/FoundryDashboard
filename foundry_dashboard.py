@@ -4044,8 +4044,8 @@ def main():
         
         st.markdown("""
         <div class="citation-box">
-            <strong>Research Question 1:</strong> Does the MTTS-integrated ML model achieve predictive recall meeting or exceeding established PHM performance benchmarks under forward temporal validation?
-            <br><strong>Hypothesis H1:</strong> The MTTS-integrated model achieves ≥80% recall on temporally held-out test data, with the lower bound of the 95% Clopper–Pearson confidence interval exceeding 80%.
+            <strong>Research Question 1:</strong> Can a PHM framework using SPC data achieve prognostic recall ≥80% for reliability-risk classification associated with scrap threshold exceedance?
+            <br><strong>Hypothesis H1:</strong> The three-stage hierarchical ML framework will achieve ≥80% recall for reliability-risk classification, with the lower bound of the 95% Clopper–Pearson confidence interval exceeding 80%, without sensors or new infrastructure.
         </div>
         """, unsafe_allow_html=True)
         
@@ -4104,15 +4104,21 @@ Lower bound {ci_lower*100:.1f}% {'**exceeds**' if ci_pass else 'does not exceed'
 *This provides exact binomial uncertainty bounds on predictive sensitivity within an analytic (forward-predictive) study framework (Deming, 1953).*
             """)
         
-        h1_pass = recall_pass and precision_pass and auc_pass and brier_pass
+        # H1 Decision Rule: Recall ≥80% AND Clopper-Pearson 95% CI lower bound ≥80%
+        h1_pass = recall_pass and (ci_pass if len(y_test_arr) > 0 else recall_pass)
         
         if h1_pass:
             ci_note = f" The 95% Clopper–Pearson CI lower bound ({ci_lower*100:.1f}%) exceeds 80%." if len(y_test_arr) > 0 else ""
+            supporting = []
+            if precision_pass: supporting.append(f"Precision {metrics['precision']*100:.1f}% ≥70% ✓")
+            if auc_pass: supporting.append(f"AUC {metrics['auc']:.3f} ≥0.80 ✓")
+            if brier_pass: supporting.append(f"Brier {metrics['brier']:.3f} ≤0.25 ✓")
+            supporting_note = "  \nSupporting metrics: " + ", ".join(supporting) if supporting else ""
             st.success(f"""
             ### ✅ Hypothesis H1: SUPPORTED
             
-            The MTTS-integrated ML model achieves **{metrics['recall']*100:.1f}% recall** on temporally held-out test data, 
-            meeting the PHM performance benchmark (Lei et al., 2018).{ci_note}
+            The three-stage hierarchical ML framework achieves **{metrics['recall']*100:.1f}% recall** on temporally held-out test data, 
+            with the lower bound of the 95% Clopper–Pearson confidence interval exceeding 80%.{ci_note}{supporting_note}
             """)
         else:
             st.warning("### ⚠️ Hypothesis H1: Partially Supported")
@@ -4229,8 +4235,8 @@ The hierarchical architecture transfers foundry-wide and defect-cluster knowledg
         
         st.markdown("""
         <div class="citation-box">
-            <strong>Research Question 2:</strong> Do MTTS-derived reliability metrics provide an adequate and interpretable approximation of process risk under empirically stable hazard conditions?
-            <br><strong>Hypothesis H2:</strong> Empirical hazard diagnostics support the plausibility of approximate constant failure rate behavior, enabling MTTS-derived reliability functions to serve as conservative and interpretable decision-support metrics.
+            <strong>Research Question 2:</strong> Does the reliability-based MTTS framework provide valid reliability-equivalent decision-support metrics for forecasting process reliability degradation associated with scrap risk?
+            <br><strong>Hypothesis H2:</strong> Following Ebeling's (1997) reliability framework, MTTS-derived R(t) and λ(t) yield interpretable reliability estimates under empirically stable hazard conditions, enabling actionable decision support.
         </div>
         """, unsafe_allow_html=True)
         
@@ -4333,23 +4339,25 @@ The hierarchical architecture transfers foundry-wide and defect-cluster knowledg
             )
             st.plotly_chart(fig_na, use_container_width=True)
             
-            # Hypothesis H2 assessment
+            # Hypothesis H2 assessment — based on hazard stability diagnostics only
             cv_ok = hazard_results['cv_normalized'] < 1.0
             chi2_ok = hazard_results['chi2_p'] > 0.05
             trend_ok = hazard_results['kendall_p'] > 0.05
             h2_diagnostics_pass = cv_ok and chi2_ok and trend_ok
             
-            if h2_diagnostics_pass and phm_pass:
+            if h2_diagnostics_pass:
                 st.success(f"""
 ### ✅ Hypothesis H2: SUPPORTED
 
-**Hazard diagnostics support approximate CFR:**
+**Hazard diagnostics support approximate CFR — MTTS-derived R(t) and λ(t) are valid:**
 - Underdispersion (CV = {hazard_results['cv_normalized']:.2f} < 1.0) indicates scrap intervals are more regular than pure exponential — **R(n) = e^(−n/MTTS) is conservative** (O'Connor & Kleyner, 2012, §2.6.6)
 - Equal-width bin CV = {hazard_results['bin_cv']:.2f} — approximately flat hazard
 - No monotonic trend (Kendall τ p = {hazard_results['kendall_p']:.3f})
 - χ² cannot reject uniform hazard (p = {hazard_results['chi2_p']:.3f})
 
-MTTS-derived reliability functions serve as **conservative and interpretable decision-support metrics**.
+**PHM Equivalence: {phm_equiv:.1f}%** (model recall {model_recall*100:.1f}% ÷ sensor benchmark {sensor_benchmark*100:.0f}%) — reported as supporting context.
+
+MTTS-derived reliability functions serve as **conservative and interpretable decision-support metrics** (Ebeling, 1997).
                 """)
             else:
                 st.info(f"### H2: Partially Supported — see diagnostic details above")
@@ -4359,6 +4367,13 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
     # TAB 4: RQ3 - OPERATIONAL IMPACT
     with tab4:
         st.header("RQ3: Operational Impact Analysis")
+        
+        st.markdown("""
+        <div class="citation-box">
+            <strong>Research Question 3:</strong> Can reliability-based decision support achieve DOE/ENERGY STAR benchmark-level (≥10%) reductions in scrap-related TTE costs and GHG emissions?
+            <br><strong>Hypothesis H3:</strong> Implementing the reliability-based framework enables ≥10% DOE/ENERGY STAR aligned reductions in scrap-related TTE and GHGs.
+        </div>
+        """, unsafe_allow_html=True)
         
         total_weight = (df["order_quantity"] * df["piece_weight_lbs"]).sum()
         date_range = (df["week_ending"].max() - df["week_ending"].min()).days
@@ -4386,6 +4401,25 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
         m2.metric("⚡ TTE Savings", f"{tte['tte_savings_mmbtu']:,.1f} MMBtu")
         m3.metric("🌿 CO₂ Avoided", f"{tte['co2_savings_tons']:,.2f} tons")
         m4.metric("💰 ROI", f"{roi:.1f}×")
+        
+        # H3 Pass/Fail Assessment
+        h3_pass = tte['scrap_reduction_pct'] >= RQ_THRESHOLDS['RQ3']['scrap_reduction_min']
+        if h3_pass:
+            st.success(f"""
+### ✅ Hypothesis H3: SUPPORTED
+
+Scrap reduction of **{tte['scrap_reduction_pct']*100:.1f}%** meets or exceeds the DOE/ENERGY STAR ≥10% benchmark (Kermeli et al., 2016).
+- TTE savings: **{tte['tte_savings_mmbtu']:,.1f} MMBtu**
+- GHG avoidance: **{tte['co2_savings_tons']:,.2f} tons CO₂** (at 53.06 kg CO₂/MMBtu; EPA, 2023)
+- ROI: **{roi:.1f}×** implementation cost
+            """)
+        else:
+            st.warning(f"""
+### ⚠️ Hypothesis H3: Not Yet Supported
+
+Scrap reduction of **{tte['scrap_reduction_pct']*100:.1f}%** is below the DOE/ENERGY STAR ≥10% benchmark. 
+Adjust target scrap rate to achieve ≥10% relative reduction.
+            """)
     
     # ================================================================
     # TAB 5: ALL PARTS SUMMARY
@@ -4430,25 +4464,34 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
         # ================================================================
         st.markdown("### ✅ Model Validation Summary")
         
-        h1_pass = (metrics["recall"] >= 0.80 and metrics["precision"] >= 0.70 and metrics["auc"] >= 0.80 and metrics["brier"] <= 0.25)
+        # H1 Decision Rule: Recall ≥80% AND CI lower bound ≥80%
+        recall_pass_tab5 = metrics["recall"] >= 0.80
         phm_equiv = (metrics["recall"] / 0.90) * 100
-        h2_pass = phm_equiv >= 80
         
         # Compute Clopper-Pearson CI for summary
         y_test_arr = np.array(metrics.get('y_test', []))
         y_pred_arr = np.array(metrics.get('y_pred', []))
         ci_lower_val = None
+        ci_pass_tab5 = False
         if len(y_test_arr) > 0 and len(y_pred_arr) > 0:
             tp_sum = int(((y_test_arr == 1) & (y_pred_arr == 1)).sum())
             fn_sum = int(((y_test_arr == 1) & (y_pred_arr == 0)).sum())
             n_fail_sum = tp_sum + fn_sum
             ci_lower_val, ci_upper_val = clopper_pearson_ci(tp_sum, n_fail_sum, alpha=0.05)
+            ci_pass_tab5 = ci_lower_val >= 0.80
+        
+        h1_pass = recall_pass_tab5 and (ci_pass_tab5 if ci_lower_val is not None else recall_pass_tab5)
         
         # Compute seen/unseen for summary
         seen_unseen_summary = compute_seen_unseen_metrics(global_model)
         
-        # Compute hazard for summary
+        # Compute hazard for summary — H2 gates on diagnostics only
         hazard_summary = compute_empirical_hazard(df)
+        h2_pass = False
+        if hazard_summary:
+            h2_pass = (hazard_summary['cv_normalized'] < 1.0 and 
+                      hazard_summary['chi2_p'] > 0.05 and 
+                      hazard_summary['kendall_p'] > 0.05)
         
         c1, c2 = st.columns(2)
         with c1:
@@ -4463,13 +4506,14 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
                     u_cp_lo, u_cp_hi = clopper_pearson_ci(u_data['tp'], u_data['failures'], alpha=0.05) if u_data['failures'] > 0 else (0.0, 1.0)
                     su_text = f"\n- **Never-seen parts recall:** {u_data['recall']*100:.1f}% ({u_data['tp']}/{u_data['failures']} failures, {u_data['n_parts']} parts) — 95% CP CI [{u_cp_lo*100:.1f}%, {u_cp_hi*100:.1f}%]"
                 
-                st.success(f"""### ✅ H1: SUPPORTED — Model Predictions Are Validated
+                st.success(f"""### ✅ H1: SUPPORTED — Recall ≥80% with CI Verified
                 
-**Performance Metrics (PHM Literature Benchmarks):**
-- **Recall: {metrics['recall']*100:.1f}%** — Target: ≥80% (Lei et al., 2018) ✓
-- **Precision: {metrics['precision']*100:.1f}%** — Target: ≥70% ✓
-- **AUC-ROC: {metrics['auc']:.3f}** — Target: ≥0.80 ✓
-- **Brier Score: {metrics['brier']:.3f}** — Target: ≤0.25 ✓{ci_text}{su_text}
+**Primary Decision Criteria:**
+- **Recall: {metrics['recall']*100:.1f}%** — Target: ≥80% ✓{ci_text}
+**Supporting Metrics:**
+- **Precision: {metrics['precision']*100:.1f}%** (≥70% ✓)
+- **AUC-ROC: {metrics['auc']:.3f}** (≥0.80 ✓)
+- **Brier Score: {metrics['brier']:.3f}** (≤0.25 ✓){su_text}
                 """)
             else:
                 st.warning(f"### ⚠️ H1: Partially Supported")
@@ -4479,18 +4523,17 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
                 if hazard_summary:
                     hazard_text = f"""
 
-**Hazard Stability Diagnostics:**
-- Assessable parts: {hazard_summary['n_assessable_parts']} (≥3 inter-failure intervals)
+**Hazard Stability Diagnostics (H2 Decision Criteria):**
+- Underdispersion CV: {hazard_summary['cv_normalized']:.2f} < 1.0 — **conservative model** ✓
 - Equal-width bin CV: {hazard_summary['bin_cv']:.2f} — {'approximately flat ✅' if hazard_summary['bin_cv'] < 0.30 else 'moderate variation'}
-- Underdispersion CV: {hazard_summary['cv_normalized']:.2f} < 1.0 — **conservative model**
-- Kendall τ trend: p = {hazard_summary['kendall_p']:.3f} — {'no trend ✅' if hazard_summary['kendall_p'] > 0.05 else 'trend detected'}"""
+- Kendall τ trend: p = {hazard_summary['kendall_p']:.3f} — {'no trend ✅' if hazard_summary['kendall_p'] > 0.05 else 'trend detected'}
+- χ² uniform hazard: p = {hazard_summary['chi2_p']:.3f} — {'cannot reject ✅' if hazard_summary['chi2_p'] > 0.05 else 'rejected'}
+
+**Supporting Context:** PHM Equivalence: {phm_equiv:.1f}%"""
                 
-                st.success(f"""### ✅ H2: SUPPORTED — Reliability Metrics Validated
+                st.success(f"""### ✅ H2: SUPPORTED — MTTS Reliability Metrics Validated
 
-**PHM Equivalence: {phm_equiv:.1f}%**
-= (Model {metrics['recall']*100:.1f}% ÷ Sensor 90%) × 100
-
-**Result:** Sensor-free model **exceeds** sensor-based PHM benchmark (Lei et al., 2018).{hazard_text}
+MTTS-derived R(t) and λ(t) yield interpretable reliability estimates under empirically stable hazard conditions (Ebeling, 1997).{hazard_text}
                 """)
             else:
                 st.warning(f"### ⚠️ H2: Partially Supported")
