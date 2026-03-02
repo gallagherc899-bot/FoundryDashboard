@@ -10,7 +10,7 @@
 #          → Adds: global_scrap_probability feature
 #
 # Stage 2: DEFECT-CLUSTER - Train on TOP 5 PARETO defects
-#          → Focuses on high-impact defects (~80% of scrap)
+#          → Focuses on high-impact defects (~66% of scrap)
 #          → Adds: defect_cluster_probability feature
 #
 # Stage 3: PART-SPECIFIC - Train on part's data with per-part threshold
@@ -249,12 +249,12 @@ THREE_STAGE_CONFIG = {
     }
 }
 
-# Top 5 Pareto Defects (from your Pareto chart - ~80% of scrap)
+# Top 5 Pareto Defects (from dataset Pareto analysis - ~66% of scrap)
 TOP_PARETO_DEFECTS = [
-    'sand_rate',      # #1 - ~25% of scrap
-    'shift_rate',     # #2 - ~10% of scrap
-    'missrun_rate',   # #3 - ~10% of scrap  
-    'gouged_rate',    # #4 - ~8% of scrap
+    'sand_rate',      # #1 - ~27% of scrap
+    'shift_rate',     # #2 - ~11% of scrap
+    'missrun_rate',   # #3 - ~11% of scrap  
+    'gouged_rate',    # #4 - ~9% of scrap
     'dross_rate',     # #5 - ~8% of scrap
 ]
 
@@ -1545,7 +1545,7 @@ def train_stage2_defect_cluster(df, defect_cols, stage1_model):
     STAGE 2: DEFECT-CLUSTER MODEL
     
     Trains on records with TOP 5 PARETO defects using cluster threshold.
-    Purpose: Learn patterns specific to high-impact defects (~80% of scrap).
+    Purpose: Learn patterns specific to high-impact defects (~66% of scrap).
     Output: Adds 'defect_cluster_probability' feature to matching records.
     
     Reference: "Multi-stage TL approach provides better predictions"
@@ -2742,7 +2742,7 @@ def main():
             <strong>Three-Stage Hierarchical Prediction:</strong><br>
             This prediction combines knowledge from:<br>
             • <strong>Stage 1</strong>: Foundry-wide patterns (all {df['part_id'].nunique()} parts)<br>
-            • <strong>Stage 2</strong>: Top 5 Pareto defect patterns (~80% of scrap)<br>
+            • <strong>Stage 2</strong>: Top 5 Pareto defect patterns (~66% of scrap)<br>
             • <strong>Stage 3</strong>: Part-specific calibration<br><br>
             <strong>Part-Specific Threshold:</strong> {part_threshold:.2f}% (Part {selected_part}'s average scrap rate)
         </div>
