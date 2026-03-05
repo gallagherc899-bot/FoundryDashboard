@@ -275,20 +275,32 @@ st.markdown("""
 <style>
     [data-testid="stSidebar"] {display: none;}
     .main-header {
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-        padding: 20px 30px; border-radius: 12px; margin-bottom: 25px; color: white;
+        background: linear-gradient(135deg, #C8A96E 0%, #D4B483 100%);
+        padding: 20px 30px; border-radius: 12px; margin-bottom: 25px;
+        color: #1a1a1a; border: 1px solid #a0845a;
     }
+    .main-header h1 { color: #1a1a1a !important; font-weight: 700; }
+    .main-header p  { color: #2d2d2d !important; font-weight: 500; }
     .citation-box {
-        background-color: #f0f7ff; border-left: 4px solid #1976D2;
+        background-color: #ddeeff; border-left: 4px solid #0D47A1;
         padding: 15px; margin: 15px 0; border-radius: 0 8px 8px 0;
+        color: #0a2340;
     }
     .hypothesis-pass {
-        background-color: #e8f5e9; border-left: 4px solid #4CAF50;
+        background-color: #1B5E20; border-left: 6px solid #FFFFFF;
         padding: 15px; margin: 15px 0; border-radius: 0 8px 8px 0;
+        color: #FFFFFF !important;
     }
+    .hypothesis-pass * { color: #FFFFFF !important; }
     .hypothesis-fail {
-        background-color: #fff3e0; border-left: 4px solid #FF9800;
+        background-color: #E65100; border-left: 6px solid #FFFFFF;
         padding: 15px; margin: 15px 0; border-radius: 0 8px 8px 0;
+        color: #FFFFFF !important;
+    }
+    .hypothesis-fail * { color: #FFFFFF !important; }
+    /* Fix Streamlit success/info boxes for contrast */
+    div[data-testid="stAlert"] > div {
+        color: #0a0a0a !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -2756,7 +2768,7 @@ def main():
             pct_of_total = mw_row['total_scrap_weight'] / total_scrap_weight_all * 100
             
             st.markdown(f"""
-            <div style="background: #FFEBEE; border-left: 4px solid #D32F2F; padding: 15px; border-radius: 4px; margin: 10px 0;">
+            <div style="background: #B71C1C; border-left: 6px solid #FFCDD2; padding: 15px; border-radius: 4px; margin: 10px 0; color: #FFFFFF;">
                 <strong>🚨 VITAL FEW — Most Wanted #{mw_rank} of 20</strong><br><br>
                 Part {selected_part} is ranked <strong>#{mw_rank}</strong> in total scrap weight contribution 
                 ({mw_row['total_scrap_weight']:,.0f} lbs, <strong>{pct_of_total:.1f}%</strong> of foundry total). 
@@ -2848,7 +2860,7 @@ def main():
                               "Part-level prediction is the only available estimate.")
             
             st.markdown("""
-            <div style="background: #E3F2FD; border-left: 4px solid #1976D2; padding: 12px; border-radius: 4px; margin: 10px 0; font-size: 0.9em;">
+            <div style="background: #0D47A1; border-left: 6px solid #BBDEFB; padding: 12px; border-radius: 4px; margin: 10px 0; font-size: 0.9em; color: #FFFFFF;">
                 <strong>How to interpret dual results:</strong> The <strong>Part-Level Prediction</strong> (left) reflects what the model learned from this specific part's history. The <strong>Pooled Comparison</strong> (right) shows what similar parts (matched by weight ±10% and defect profile) experienced historically, with confidence typically higher due to more data. When the two results agree, confidence is higher. When they diverge, experienced foundry judgment is essential — the part may have unique characteristics not captured by the pool, or the part's limited history may not yet reflect its true behavior.
             </div>
             """, unsafe_allow_html=True)
@@ -2874,7 +2886,7 @@ def main():
             total_parts_for_part = part_data['order_quantity'].sum()
             n_runs = len(part_data)
             st.markdown(f"""
-            <div style="background: #E8F5E9; border-left: 4px solid #4CAF50; padding: 15px; border-radius: 4px; margin: 10px 0;">
+            <div style="background: #1B5E20; border-left: 6px solid #C8E6C9; padding: 15px; border-radius: 4px; margin: 10px 0; color: #FFFFFF;">
                 <strong>✅ Low-Scrap Part — Not a Priority for Intervention</strong><br><br>
                 Part {selected_part} averages <strong>{part_threshold:.2f}% scrap</strong> across 
                 {n_runs} run{'s' if n_runs != 1 else ''} ({total_parts_for_part:,.0f} parts produced). 
@@ -2897,7 +2909,7 @@ def main():
                 ratio = pooled_avg_check / part_threshold if part_threshold > 0 else float('inf')
                 if ratio > 1.5:  # Pooled average is 50%+ higher than part's own average
                     st.markdown(f"""
-                    <div style="background: #FFF3E0; border-left: 4px solid #FF9800; padding: 15px; border-radius: 4px; margin: 10px 0;">
+                    <div style="background: #E65100; border-left: 6px solid #FFE0B2; padding: 15px; border-radius: 4px; margin: 10px 0; color: #FFFFFF;">
                         <strong>⚠️ Pooled Comparison Diverges — Use Judgment</strong><br><br>
                         Part {selected_part}'s own average scrap rate is <strong>{part_threshold:.2f}%</strong>, 
                         but the pooled comparison population averages 
@@ -4129,19 +4141,57 @@ Lower bound {ci_lower*100:.1f}% {'**exceeds**' if ci_pass else 'does not exceed'
             if "roc_fpr" in metrics:
                 st.markdown("#### ROC Curve")
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=metrics["roc_fpr"], y=metrics["roc_tpr"], mode='lines', name=f'Model (AUC={metrics["auc"]:.3f})'))
-                fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', name='Random', line=dict(dash='dash')))
-                fig.update_layout(xaxis_title="False Positive Rate", yaxis_title="True Positive Rate", height=350)
+                fig.add_trace(go.Scatter(
+                    x=metrics["roc_fpr"], y=metrics["roc_tpr"], mode='lines',
+                    name=f'Model (AUC={metrics["auc"]:.3f})',
+                    line=dict(color='#003087', width=3)
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[0,1], y=[0,1], mode='lines', name='Random',
+                    line=dict(dash='dash', color='#888888', width=1.5)
+                ))
+                fig.update_layout(
+                    xaxis_title="False Positive Rate", yaxis_title="True Positive Rate",
+                    height=380, plot_bgcolor='white', paper_bgcolor='white',
+                    font=dict(color='#1a1a1a', size=12),
+                    xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                    yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                    legend=dict(bgcolor='rgba(255,255,255,0.9)', bordercolor='#333333', borderwidth=1)
+                )
                 st.plotly_chart(fig, use_container_width=True)
-        
+                try:
+                    roc_bytes = fig.to_image(format="png", width=900, height=420, scale=2)
+                    st.download_button("⬇️ Export ROC Chart (PNG)", roc_bytes, "Figure_4-2a_ROC_Curve.png", "image/png")
+                except Exception:
+                    st.caption("_Install kaleido to enable PNG export: pip install kaleido_")
+
         with col2:
             if "cal_true" in metrics:
                 st.markdown("#### Calibration Curve")
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=metrics["cal_pred"], y=metrics["cal_true"], mode='lines+markers', name='Model'))
-                fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', name='Perfect', line=dict(dash='dash')))
-                fig.update_layout(xaxis_title="Predicted Probability", yaxis_title="Actual Frequency", height=350)
+                fig.add_trace(go.Scatter(
+                    x=metrics["cal_pred"], y=metrics["cal_true"], mode='lines+markers',
+                    name='Model', line=dict(color='#003087', width=3),
+                    marker=dict(size=8, color='#003087')
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[0,1], y=[0,1], mode='lines', name='Perfect',
+                    line=dict(dash='dash', color='#888888', width=1.5)
+                ))
+                fig.update_layout(
+                    xaxis_title="Predicted Probability", yaxis_title="Actual Frequency",
+                    height=380, plot_bgcolor='white', paper_bgcolor='white',
+                    font=dict(color='#1a1a1a', size=12),
+                    xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                    yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                    legend=dict(bgcolor='rgba(255,255,255,0.9)', bordercolor='#333333', borderwidth=1)
+                )
                 st.plotly_chart(fig, use_container_width=True)
+                try:
+                    cal_bytes = fig.to_image(format="png", width=900, height=420, scale=2)
+                    st.download_button("⬇️ Export Calibration Chart (PNG)", cal_bytes, "Figure_4-2b_Calibration_Curve.png", "image/png")
+                except Exception:
+                    st.caption("_Install kaleido to enable PNG export: pip install kaleido_")
         
         # ================================================================
         # SEEN vs NEVER-SEEN ENTITY GENERALIZATION
@@ -4290,23 +4340,36 @@ The hierarchical architecture transfers foundry-wide and defect-cluster knowledg
             
             fig_hazard.add_trace(go.Bar(
                 x=bin_labels, y=bin_h,
-                marker_color=['#1ABC9C' if abs(h - 1.0) < 0.3 else '#E74C3C' for h in bin_h],
+                marker_color=['#006400' if abs(h - 1.0) < 0.3 else '#8B0000' for h in bin_h],
+                marker_line=dict(color='#1a1a1a', width=1),
                 text=[f"{h:.2f}" for h in bin_h],
                 textposition='outside',
+                textfont=dict(color='#1a1a1a', size=12),
                 name='Observed ĥ(bin)'
             ))
-            fig_hazard.add_hline(y=1.0, line_dash="dash", line_color="red",
-                                annotation_text="Theoretical λ = 1.0 (Exp(1))")
-            fig_hazard.add_hline(y=np.mean(bin_h), line_dash="dot", line_color="#2C3E50",
-                                annotation_text=f"Observed mean = {np.mean(bin_h):.2f}")
+            fig_hazard.add_hline(y=1.0, line_dash="dash", line_color="#CC0000", line_width=2,
+                                annotation_text="Theoretical λ = 1.0 (Exp(1))",
+                                annotation_font=dict(color="#CC0000", size=11))
+            fig_hazard.add_hline(y=np.mean(bin_h), line_dash="dot", line_color="#1a1a1a", line_width=2,
+                                annotation_text=f"Observed mean = {np.mean(bin_h):.2f}",
+                                annotation_font=dict(color="#1a1a1a", size=11))
             fig_hazard.update_layout(
                 xaxis_title="Normalized Interval Bin (t / MTTS)",
                 yaxis_title="Empirical Hazard Rate ĥ(bin)",
-                height=400,
-                yaxis_range=[0, max(max(bin_h), 1.0) * 1.5],
+                height=420,
+                plot_bgcolor='white', paper_bgcolor='white',
+                font=dict(color='#1a1a1a', size=12),
+                xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True,
+                           range=[0, max(max(bin_h), 1.0) * 1.6]),
                 showlegend=False
             )
             st.plotly_chart(fig_hazard, use_container_width=True)
+            try:
+                haz_bytes = fig_hazard.to_image(format="png", width=1100, height=460, scale=2)
+                st.download_button("⬇️ Export Hazard Stability Chart (PNG)", haz_bytes, "Figure_4-4_Hazard_Stability.png", "image/png")
+            except Exception:
+                st.caption("_Install kaleido to enable PNG export_")
             
             st.markdown(f"""
 | Metric | Value | Interpretation |
@@ -4327,17 +4390,27 @@ The hierarchical architecture transfers foundry-wide and defect-cluster knowledg
             
             fig_na = go.Figure()
             fig_na.add_trace(go.Scatter(x=sorted_vals, y=na_hazard, mode='lines',
-                                        name='Nelson-Aalen (observed)', line=dict(color='#2C3E50', width=2)))
+                                        name='Nelson-Aalen (observed)', line=dict(color='#003087', width=3)))
             t_max = np.percentile(sorted_vals, 97)
             fig_na.add_trace(go.Scatter(x=[0, t_max], y=[0, t_max], mode='lines',
-                                        name='Theoretical H(t) = t [Exp(1)]', line=dict(color='red', dash='dash', width=2)))
+                                        name='Theoretical H(t) = t [Exp(1)]', line=dict(color='#CC0000', dash='dash', width=2)))
             fig_na.update_layout(
                 xaxis_title="Normalized Interval (t / MTTS)",
                 yaxis_title="Cumulative Hazard H(t)",
-                height=400,
-                xaxis_range=[0, t_max]
+                height=420,
+                xaxis_range=[0, t_max],
+                plot_bgcolor='white', paper_bgcolor='white',
+                font=dict(color='#1a1a1a', size=12),
+                xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                legend=dict(bgcolor='rgba(255,255,255,0.9)', bordercolor='#333333', borderwidth=1)
             )
             st.plotly_chart(fig_na, use_container_width=True)
+            try:
+                na_bytes = fig_na.to_image(format="png", width=1100, height=460, scale=2)
+                st.download_button("⬇️ Export Nelson-Aalen Chart (PNG)", na_bytes, "Figure_4-5_Nelson_Aalen.png", "image/png")
+            except Exception:
+                st.caption("_Install kaleido to enable PNG export_")
             
             # Hypothesis H2 assessment — based on hazard stability diagnostics only
             cv_ok = hazard_results['cv_normalized'] < 1.0
@@ -4681,18 +4754,28 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             fig_rel.add_trace(go.Histogram(
                 x=results_df['Reliability R(1)'],
                 nbinsx=20,
-                marker_color='#4CAF50',
+                marker_color='#2E7D32',
+                marker_line=dict(color='#1a1a1a', width=0.8),
                 name='Reliability'
             ))
-            fig_rel.add_vline(x=80, line_dash="dash", line_color="red",
-                             annotation_text="80% Threshold")
+            fig_rel.add_vline(x=80, line_dash="dash", line_color="#CC0000", line_width=2,
+                             annotation_text="80% Threshold", annotation_font=dict(color="#CC0000"))
             fig_rel.update_layout(
                 title="Reliability R(1 run) Distribution",
                 xaxis_title="Reliability (%)",
                 yaxis_title="Number of Parts",
-                height=350
+                height=380,
+                plot_bgcolor='white', paper_bgcolor='white',
+                font=dict(color='#1a1a1a', size=12),
+                xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True)
             )
             st.plotly_chart(fig_rel, use_container_width=True)
+            try:
+                rel_bytes = fig_rel.to_image(format="png", width=900, height=420, scale=2)
+                st.download_button("⬇️ Export Reliability Distribution (PNG)", rel_bytes, "Figure_4-8a_Reliability_Distribution.png", "image/png")
+            except Exception:
+                pass
             
             # Stats table
             st.markdown(f"""
@@ -4712,16 +4795,26 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             fig_fr.add_trace(go.Histogram(
                 x=results_df['Failure Rate'],
                 nbinsx=20,
-                marker_color='#FF9800',
+                marker_color='#B45309',
+                marker_line=dict(color='#1a1a1a', width=0.8),
                 name='Failure Rate'
             ))
             fig_fr.update_layout(
                 title="Failure Rate Distribution",
                 xaxis_title="Failure Rate (%)",
                 yaxis_title="Number of Parts",
-                height=350
+                height=380,
+                plot_bgcolor='white', paper_bgcolor='white',
+                font=dict(color='#1a1a1a', size=12),
+                xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True)
             )
             st.plotly_chart(fig_fr, use_container_width=True)
+            try:
+                fr_bytes = fig_fr.to_image(format="png", width=900, height=420, scale=2)
+                st.download_button("⬇️ Export Failure Rate Distribution (PNG)", fr_bytes, "Figure_4-8b_Failure_Rate_Distribution.png", "image/png")
+            except Exception:
+                pass
             
             # Stats table
             st.markdown(f"""
@@ -4744,18 +4837,28 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             fig_phm.add_trace(go.Histogram(
                 x=results_df['PHM Equiv %'],
                 nbinsx=20,
-                marker_color='#2196F3',
+                marker_color='#1565C0',
+                marker_line=dict(color='#1a1a1a', width=0.8),
                 name='PHM Equivalence'
             ))
-            fig_phm.add_vline(x=80, line_dash="dash", line_color="red",
-                             annotation_text="80% Threshold")
+            fig_phm.add_vline(x=80, line_dash="dash", line_color="#CC0000", line_width=2,
+                             annotation_text="80% Threshold", annotation_font=dict(color="#CC0000"))
             fig_phm.update_layout(
                 title="PHM Equivalence Distribution (Model Recall / 90%)",
                 xaxis_title="PHM Equivalence (%)",
                 yaxis_title="Number of Parts",
-                height=350
+                height=380,
+                plot_bgcolor='white', paper_bgcolor='white',
+                font=dict(color='#1a1a1a', size=12),
+                xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True)
             )
             st.plotly_chart(fig_phm, use_container_width=True)
+            try:
+                phm_bytes = fig_phm.to_image(format="png", width=900, height=420, scale=2)
+                st.download_button("⬇️ Export PHM Distribution (PNG)", phm_bytes, "Figure_4-8c_PHM_Equivalence_Distribution.png", "image/png")
+            except Exception:
+                pass
         
         with phm_col2:
             # MTTS Distribution
@@ -4764,16 +4867,26 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             fig_mtts.add_trace(go.Histogram(
                 x=mtts_valid,
                 nbinsx=20,
-                marker_color='#9C27B0',
+                marker_color='#6A0DAD',
+                marker_line=dict(color='#1a1a1a', width=0.8),
                 name='MTTS'
             ))
             fig_mtts.update_layout(
                 title="MTTS (runs) Distribution",
                 xaxis_title="MTTS (runs until failure)",
                 yaxis_title="Number of Parts",
-                height=350
+                height=380,
+                plot_bgcolor='white', paper_bgcolor='white',
+                font=dict(color='#1a1a1a', size=12),
+                xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True)
             )
             st.plotly_chart(fig_mtts, use_container_width=True)
+            try:
+                mtts_bytes = fig_mtts.to_image(format="png", width=900, height=420, scale=2)
+                st.download_button("⬇️ Export MTTS Distribution (PNG)", mtts_bytes, "Figure_4-8d_MTTS_Distribution.png", "image/png")
+            except Exception:
+                pass
         
         # Data Quality / Pooling Analysis
         st.markdown("### 📊 Data Quality & Pooling Analysis")
@@ -4786,20 +4899,30 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             fig_records.add_trace(go.Histogram(
                 x=results_df['Records'],
                 nbinsx=30,
-                marker_color='#607D8B',
+                marker_color='#37474F',
+                marker_line=dict(color='#1a1a1a', width=0.8),
                 name='Records'
             ))
-            fig_records.add_vline(x=5, line_dash="dash", line_color="red",
-                                 annotation_text="Min for Part-Level (5)")
-            fig_records.add_vline(x=30, line_dash="dash", line_color="green",
-                                 annotation_text="HIGH Confidence (30)")
+            fig_records.add_vline(x=5, line_dash="dash", line_color="#CC0000", line_width=2,
+                                 annotation_text="Min for Part-Level (5)", annotation_font=dict(color="#CC0000"))
+            fig_records.add_vline(x=30, line_dash="dash", line_color="#006400", line_width=2,
+                                 annotation_text="S3D Confidence (30)", annotation_font=dict(color="#006400"))
             fig_records.update_layout(
                 title="Records per Part Distribution",
                 xaxis_title="Number of Records",
                 yaxis_title="Number of Parts",
-                height=350
+                height=380,
+                plot_bgcolor='white', paper_bgcolor='white',
+                font=dict(color='#1a1a1a', size=12),
+                xaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True),
+                yaxis=dict(gridcolor='#cccccc', linecolor='#333333', mirror=True)
             )
             st.plotly_chart(fig_records, use_container_width=True)
+            try:
+                rec_bytes = fig_records.to_image(format="png", width=900, height=420, scale=2)
+                st.download_button("⬇️ Export Records Distribution (PNG)", rec_bytes, "Figure_4-9a_Records_Per_Part.png", "image/png")
+            except Exception:
+                pass
         
         with pool_col2:
             # Pooling method breakdown
@@ -4807,13 +4930,27 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             fig_pooling = go.Figure(go.Pie(
                 labels=pooling_counts.index,
                 values=pooling_counts.values,
-                hole=0.4
+                hole=0.4,
+                marker=dict(
+                    colors=['#003087','#1565C0','#2E7D32','#B45309','#6A0DAD',
+                            '#37474F','#8B0000','#004D40'],
+                    line=dict(color='#ffffff', width=2)
+                ),
+                textfont=dict(size=11, color='#1a1a1a')
             ))
             fig_pooling.update_layout(
                 title="Pooling Methods Used",
-                height=350
+                height=380,
+                paper_bgcolor='white',
+                font=dict(color='#1a1a1a', size=12),
+                legend=dict(bgcolor='rgba(255,255,255,0.9)', bordercolor='#333333', borderwidth=1)
             )
             st.plotly_chart(fig_pooling, use_container_width=True)
+            try:
+                pool_bytes = fig_pooling.to_image(format="png", width=900, height=420, scale=2)
+                st.download_button("⬇️ Export Pooling Methods Chart (PNG)", pool_bytes, "Figure_4-9b_Pooling_Methods.png", "image/png")
+            except Exception:
+                pass
         
         # Detailed Results Table
         st.markdown("### 📋 Detailed Results Table")
@@ -4839,6 +4976,38 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 file_name="all_parts_results.csv",
                 mime="text/csv"
             )
+        
+        # ================================================================
+        # CHAPTER 4 EXPORT GUIDE
+        # ================================================================
+        st.markdown("---")
+        st.markdown("### 📄 Chapter 4 Figure Export Guide")
+        st.markdown("""
+        Each chart in this dashboard includes an individual **⬇️ Export (PNG)** button directly below it.
+        Use the table below to locate and export each figure required for Chapter 4.
+        All exports are high-resolution (2× scale, white background) suitable for dissertation submission.
+        """)
+        st.markdown("""
+        | Chapter 4 Figure | Dashboard Tab | Export Button Label |
+        |---|---|---|
+        | Figure 4-1: H1 Validation Panel | RQ1: Model Validation | Screenshot the full panel |
+        | Figure 4-2a: ROC Curve | RQ1: Model Validation | ⬇️ Export ROC Chart (PNG) |
+        | Figure 4-2b: Calibration Curve | RQ1: Model Validation | ⬇️ Export Calibration Chart (PNG) |
+        | Figure 4-3: Entity Generalization | RQ1: Model Validation | Screenshot the panel |
+        | Figure 4-4: Hazard Stability | RQ2: Reliability & PHM | ⬇️ Export Hazard Stability Chart (PNG) |
+        | Figure 4-5: Nelson-Aalen Hazard | RQ2: Reliability & PHM | ⬇️ Export Nelson-Aalen Chart (PNG) |
+        | Figure 4-6: H3 Operational Impact | RQ3: Operational Impact | Screenshot the panel |
+        | Figure 4-7: All-Parts Summary | All Parts Summary | Screenshot the panel |
+        | Figure 4-8a: Reliability Distribution | All Parts Summary | ⬇️ Export Reliability Distribution (PNG) |
+        | Figure 4-8b: Failure Rate Distribution | All Parts Summary | ⬇️ Export Failure Rate Distribution (PNG) |
+        | Figure 4-8c: PHM Equivalence Distribution | All Parts Summary | ⬇️ Export PHM Distribution (PNG) |
+        | Figure 4-8d: MTTS Distribution | All Parts Summary | ⬇️ Export MTTS Distribution (PNG) |
+        | Figure 4-9a: Records per Part | All Parts Summary | ⬇️ Export Records Distribution (PNG) |
+        | Figure 4-9b: Pooling Methods | All Parts Summary | ⬇️ Export Pooling Methods Chart (PNG) |
+        """)
+        st.info("ℹ️ PNG export requires the **kaleido** package: `pip install kaleido`. "
+                "If export buttons show an error, install kaleido and restart the dashboard.")
+
     # ================================================================
     # TAB 6: CAMPBELL FRAMEWORK REFERENCE
     # ================================================================
