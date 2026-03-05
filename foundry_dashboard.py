@@ -4252,13 +4252,21 @@ Lower bound {ci_lower*100:.1f}% {'**exceeds**' if ci_pass else 'does not exceed'
                 seen_cp_lo, seen_cp_hi = clopper_pearson_ci(seen_data['tp'], seen_data['failures'], alpha=0.05) if seen_data['failures'] > 0 else (0.0, 1.0)
                 
                 if unseen_rec >= seen_rec * 0.95 and sanity_ok:
-                    st.success(f"""
-**✅ Generalization Confirmed:** Never-seen parts achieve {unseen_rec*100:.1f}% recall ({unseen_data['tp']}/{unseen_data['failures']} failures detected) vs. {seen_rec*100:.1f}% ({seen_data['tp']}/{seen_data['failures']}) for seen parts. Total: {overall_tp}/{overall_failures} failures detected, {overall_fn} miss(es).
+                    _gc1, _gc2 = st.columns(2)
+                    with _gc1:
+                        st.success(f"""
+**✅ Generalization Confirmed**
 
-**95% Clopper–Pearson CIs:** Seen [{seen_cp_lo*100:.1f}%, {seen_cp_hi*100:.1f}%] | Unseen [{unseen_cp_lo*100:.1f}%, {unseen_cp_hi*100:.1f}%]
+Never-seen: **{unseen_rec*100:.1f}%** recall ({unseen_data['tp']}/{unseen_data['failures']})
+Seen: **{seen_rec*100:.1f}%** ({seen_data['tp']}/{seen_data['failures']})
+Total: {overall_tp}/{overall_failures} detected, {overall_fn} miss(es).
 
-The hierarchical architecture transfers foundry-wide and defect-cluster knowledge to novel parts. This demonstrates the model learns **systemic process signatures**, not part identities (Deming, 1986).
-                    """)
+**95% CP CIs:**
+Seen [{seen_cp_lo*100:.1f}%, {seen_cp_hi*100:.1f}%]
+Unseen [{unseen_cp_lo*100:.1f}%, {unseen_cp_hi*100:.1f}%]
+
+Model learns **systemic process signatures**, not part identities (Deming, 1986).
+                        """)
                 else:
                     st.info(f"Seen: {seen_rec*100:.1f}% ({seen_data['tp']}/{seen_data['failures']}) CI [{seen_cp_lo*100:.1f}%, {seen_cp_hi*100:.1f}%] | Unseen: {unseen_rec*100:.1f}% ({unseen_data['tp']}/{unseen_data['failures']}) CI [{unseen_cp_lo*100:.1f}%, {unseen_cp_hi*100:.1f}%]")
                 
