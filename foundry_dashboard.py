@@ -3648,6 +3648,257 @@ def main():
         
         
         # ================================================================
+        # LIME MODE 2: FAILURE RUN PATTERN EXPLANATION
+        # Linked to unified_threshold — same population as conditional Pareto
+        # ================================================================
+        st.markdown("---")
+        st.markdown("### 🔬 LIME: Failure Run Pattern Explanation")
+        st.caption(
+            f"*How does the model read the runs that exceeded the current threshold of "
+            f"**{unified_threshold:.2f}%**? "
+            f"This view uses the same failure runs as the Conditional Pareto above.*"
+        )
+
+        st.markdown("""
+        <div class="citation-box">
+            <strong>LIME Pattern Mode</strong><br>
+            Rather than explaining a single run, this view applies LIME to every run that exceeded
+            the current scrap threshold and averages the feature weights across those failure events.
+            The result shows which features the model <em>consistently</em> associates with scrap
+            exceedance for this part — complementing the Conditional Pareto's frequency count with
+            the model's weighted process attribution.<br><br>
+            <strong>How to read:</strong> Red bars = features that consistently increase scrap risk
+            across failure runs. Green bars = features that are protective. Larger bars = stronger
+            and more consistent signal across the failure population.
+        </div>
+        """, unsafe_allow_html=True)
+
+        if LIME_AVAILABLE and global_model is not None:
+            # Use the same failure_df already computed from unified_threshold
+            failure_runs_df = analysis_df[
+                analysis_df['scrap_percent'] > unified_threshold
+            ].copy()
+
+            n_failure_runs = len(failure_runs_df)
+
+            if n_failure_runs == 0:
+                st.info(
+                    f"ℹ️ No runs exceed the current threshold of {unified_threshold:.2f}%. "
+                    f"Adjust the slider above to see failure run patterns."
+                )
+            elif n_failure_runs > 20:
+                st.info(
+                    f"ℹ️ {n_failure_runs} failure runs found. Explaining a random sample of 20 "
+                    f"to keep computation fast. Results are representative of all failure runs."
+                )
+                failure_runs_df = failure_runs_df.sample(
+                    n=20, random_state=42
+                ).reset_index(drop=True)
+                n_explained = 20
+            else:
+                n_explained = n_failure_runs
+
+            if n_failure_runs > 0:
+                try:
+                    model_features   = global_model['features']
+                    X_train          = global_model['X_train']
+                    cal_model        = global_model['cal_model']
+
+                    # Ensure all model features exist in failure_runs_df
+                    for f in model_features:
+                        if f not in failure_runs_df.columns:
+                            failure_runs_df[f] = 0.0
+
+                    # Run LIME on each failure run and collect weights
+                    all_weights   = {}   # feature_condition -> list of weights
+                    all_probs     = []
+                    failed_runs   = 0
+
+                    with st.spinner(
+                        f"Generating LIME explanations for {n_explained} failure run(s)..."
+                    ):
+                        for idx in range(len(failure_runs_df)):
+                            row_df   = failure_runs_df.iloc[[idx]]
+                            instance = row_df[model_features].fillna(0)
+
+                            result = explain_prediction_lime(
+                                model=cal_model,
+                                X_train=X_train,
+                                feature_names=model_features,
+                                instance=instance,
+                                num_features=10
+                            )
+
+                            if result['error'] is None:
+                                all_probs.append(result['prediction_proba'])
+                                for feat_cond, weight in result['explanation']:
+                                    # Strip the condition part — keep only the feature name
+                                    # LIME returns strings like "feature_name <= 0.02"
+                                    feat_name = feat_cond.split(' ')[0].strip()
+                                    if feat_name not in all_weights:
+                                        all_weights[feat_name] = []
+                                    all_weights[feat_name].append(weight)
+                            else:
+                                failed_runs += 1
+
+                    if len(all_weights) == 0:
+                        st.warning("Could not generate LIME explanations for any failure runs.")
+                    else:
+                        # Average weights across all explained runs
+                        avg_weights = {
+                            feat: float(np.mean(weights))
+                            for feat, weights in all_weights.items()
+                        }
+                        # Sort by absolute average weight
+                        avg_weights_sorted = dict(
+                            sorted(avg_weights.items(),
+                                   key=lambda x: abs(x[1]),
+                                   reverse=True)
+                        )
+                        # Take top 10
+                        top_features = dict(list(avg_weights_sorted.items())[:10])
+
+                        avg_prob = float(np.mean(all_probs)) if all_probs else 0.0
+                        n_success = len(all_probs)
+
+                        # ── Display ──────────────────────────────────────────
+                        pat_col1, pat_col2 = st.columns([1, 2])
+
+                        with pat_col1:
+                            st.markdown("#### 📊 Pattern Summary")
+                            st.metric(
+                                "Failure Runs Analysed",
+                                f"{n_success} of {n_failure_runs}",
+                                help="Runs above the current threshold that LIME successfully explained"
+                            )
+                            st.metric(
+                                "Avg ML Scrap Probability",
+                                f"{avg_prob*100:.1f}%",
+                                help="Mean model probability across all explained failure runs"
+                            )
+                            st.metric(
+                                "Threshold Used",
+                                f"{unified_threshold:.2f}%",
+                                help="Same threshold controlling the Conditional Pareto above"
+                            )
+
+                            st.markdown("""
+                            **How to use this alongside the Pareto:**
+                            - **Pareto** shows *which defects* appear most in failure runs (frequency)
+                            - **LIME Pattern** shows *how the model weights* those defects (model attribution)
+                            - Agreement between both = high-confidence process signal
+                            - Disagreement = model is reading an interaction or structural feature the Pareto cannot show
+                            """)
+
+                            if failed_runs > 0:
+                                st.caption(
+                                    f"⚠️ {failed_runs} run(s) could not be explained "
+                                    f"(feature mismatch or insufficient data)."
+                                )
+
+                        with pat_col2:
+                            st.markdown(
+                                f"#### 📊 Average Feature Contributions Across "
+                                f"{n_success} Failure Run(s)"
+                            )
+
+                            feat_names = list(top_features.keys())
+                            feat_vals  = list(top_features.values())
+
+                            # Sort ascending for horizontal bar readability
+                            sorted_pairs = sorted(
+                                zip(feat_names, feat_vals), key=lambda x: x[1]
+                            )
+                            feat_names_s = [p[0] for p in sorted_pairs]
+                            feat_vals_s  = [p[1] for p in sorted_pairs]
+
+                            bar_colors = [
+                                '#EF5350' if v > 0 else '#66BB6A'
+                                for v in feat_vals_s
+                            ]
+
+                            fig_pattern = go.Figure(go.Bar(
+                                x=feat_vals_s,
+                                y=feat_names_s,
+                                orientation='h',
+                                marker_color=bar_colors,
+                                text=[f"{v:+.3f}" for v in feat_vals_s],
+                                textposition='outside'
+                            ))
+
+                            fig_pattern.update_layout(
+                                title=(
+                                    f"LIME Pattern Weights — Averaged Across "
+                                    f"{n_success} Failure Run(s) "
+                                    f"(threshold: {unified_threshold:.2f}%)"
+                                ),
+                                xaxis_title="Avg Weight (+ increases scrap risk, - decreases)",
+                                yaxis_title="Feature",
+                                height=420,
+                                showlegend=False,
+                                xaxis=dict(
+                                    zeroline=True,
+                                    zerolinewidth=2,
+                                    zerolinecolor='black'
+                                )
+                            )
+
+                            st.plotly_chart(fig_pattern, use_container_width=True)
+
+                        # Detailed table in expander
+                        with st.expander("📋 View Detailed Pattern Weights Table"):
+                            st.markdown("""
+                            **How to read this table:**
+                            Each row is the *average* LIME weight for that feature across all
+                            explained failure runs. A consistent positive weight means the model
+                            persistently associates elevated values of that feature with scrap
+                            exceedance — supporting the Pareto's defect attribution with
+                            model-derived process weighting.
+                            """)
+                            pattern_table = []
+                            for feat, weight in avg_weights_sorted.items():
+                                direction = "↑ Increases Risk" if weight > 0 else "↓ Decreases Risk"
+                                consistency = (
+                                    "High"   if abs(weight) > 0.1  else
+                                    "Medium" if abs(weight) > 0.05 else
+                                    "Low"
+                                )
+                                n_obs = len(all_weights[feat])
+                                pattern_table.append({
+                                    'Feature': feat,
+                                    'Avg Weight': f"{weight:+.4f}",
+                                    'Direction': direction,
+                                    'Signal Strength': consistency,
+                                    'Runs Contributing': n_obs
+                                })
+                            st.dataframe(
+                                pd.DataFrame(pattern_table),
+                                use_container_width=True,
+                                hide_index=True
+                            )
+
+                            st.info(
+                                f"**Pattern LIME Summary:** {n_success} failure run(s) explained at "
+                                f"threshold {unified_threshold:.2f}%. Average model probability "
+                                f"across failure runs: {avg_prob*100:.1f}%. "
+                                f"Weights averaged using arithmetic mean across all explained instances. "
+                                f"This view updates automatically when the threshold slider or "
+                                f"10%/20%/Reset buttons are used above."
+                            )
+
+                except Exception as e:
+                    import traceback as tb
+                    st.warning(
+                        f"Could not generate LIME pattern explanation: "
+                        f"{type(e).__name__}: {str(e)}"
+                    )
+                    with st.expander("🔍 View Technical Details"):
+                        st.code(tb.format_exc())
+        else:
+            if not LIME_AVAILABLE:
+                st.warning("⚠️ LIME not installed. Run `pip install lime` to enable pattern explanations.")
+
+        # ================================================================
         # SCRAP THRESHOLD SENSITIVITY ANALYSIS
         # ================================================================
         st.markdown("---")
