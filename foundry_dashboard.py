@@ -203,6 +203,44 @@ PROCESS_DEFECT_MAP = {
                   "campbell_rule": "Post-casting operations"}
 }
 
+# ================================================================
+# DEFECT → CAMPBELL PROCESS REVERSE LOOKUP
+# ================================================================
+# Built once at startup from PROCESS_DEFECT_MAP.
+# Maps every raw defect column name → its Campbell process group.
+# Used by lime_weights_to_campbell() to translate LIME feature
+# weights into operationally actionable process-level attribution.
+# ================================================================
+DEFECT_TO_PROCESS = {
+    defect: process
+    for process, info in PROCESS_DEFECT_MAP.items()
+    for defect in info["defects"]
+}
+
+# Features that the model uses which are NOT raw defects.
+# These are excluded from Campbell process attribution because
+# they are either model intermediates or reliability metrics,
+# not directly actionable process signals.
+_NON_DEFECT_FEATURES = {
+    # Hierarchical model outputs
+    "global_scrap_probability", "defect_cluster_probability",
+    # Multi-defect aggregates (decomposed separately)
+    "n_defect_types", "has_multiple_defects",
+    "total_defect_rate", "max_defect_rate", "defect_concentration",
+    # Temporal / rolling
+    "total_defect_rate_trend", "total_defect_rate_roll3",
+    "scrap_percent_trend", "scrap_percent_roll3",
+    "month", "quarter",
+    # MTTS / reliability
+    "mtts_runs", "hazard_rate", "reliability_score",
+    "runs_since_last_failure", "cumulative_scrap_in_cycle",
+    "degradation_velocity", "degradation_acceleration",
+    "cycle_hazard_indicator", "rul_proxy",
+    # Part metadata
+    "order_quantity", "piece_weight_lbs",
+    "mean_scrap_rate_train", "part_freq",
+}
+
 # Hierarchical Pooling Configuration
 POOLING_CONFIG = {
     'enabled': True,
@@ -2254,6 +2292,137 @@ def explain_prediction_lime(model, X_train, feature_names, instance, num_feature
         }
 
 
+def lime_weights_to_campbell(lime_weights_dict, instance_rows, defect_cols):
+    """
+    Translate LIME feature weights into Campbell process-level attribution.
+
+    The model's feature space includes engineered aggregates
+    (total_defect_rate, max_defect_rate, defect_cluster_probability, etc.)
+    that a foundry manager cannot act on directly.  This function
+    decomposes those aggregates back to the underlying raw defect columns
+    and then maps each defect to its Campbell process group.
+
+    Decomposition strategy
+    ----------------------
+    * Raw defect column (e.g. dross_rate):
+        Weight assigned directly to the defect → its Campbell process.
+    * total_defect_rate:
+        Weight redistributed proportionally to each defect's share of
+        the total defect burden in the instance (or population average).
+    * max_defect_rate:
+        Weight attributed entirely to the defect that was the maximum
+        in the instance.  If the maximum defect is tied or zero, weight
+        is split equally among all non-zero defects.
+    * Interaction terms (e.g. core_x_sand):
+        Weight split equally between the two constituent defects.
+    * defect_concentration, n_defect_types, has_multiple_defects:
+        Proportional redistribution using the same population defect share.
+    * Model-intermediate and reliability features
+        (global_scrap_probability, defect_cluster_probability, mtts_runs,
+        hazard_rate, scrap_percent_roll3, etc.):
+        Excluded.  These are model-audit signals, not process signals.
+
+    Parameters
+    ----------
+    lime_weights_dict : dict
+        {feature_name: lime_weight} — output of LIME (raw feature names,
+        not the LIME condition strings).
+    instance_rows : pd.DataFrame or pd.Series
+        One or more data rows from df_enhanced.  When multiple rows are
+        passed (e.g. the failure population), the mean defect values are
+        used for decomposition.
+    defect_cols : list
+        Raw defect column names present in the dataset.
+
+    Returns
+    -------
+    process_weights : dict  {campbell_process: aggregated_weight}
+    defect_weights  : dict  {defect_col: aggregated_weight}
+    """
+    # --- Resolve instance defect values --------------------------------
+    if isinstance(instance_rows, pd.Series):
+        inst = instance_rows
+    elif hasattr(instance_rows, 'iloc'):
+        # DataFrame — use column means so decomposition reflects the
+        # population being explained (single row or failure set)
+        inst = instance_rows.mean(numeric_only=True)
+    else:
+        inst = pd.Series(instance_rows)
+
+    # Build defect value map from the instance / population average
+    defect_values = {}
+    for dc in defect_cols:
+        if dc in DEFECT_TO_PROCESS:          # only raw mapped defects
+            val = float(inst.get(dc, 0.0))
+            defect_values[dc] = max(val, 0.0)
+
+    total_defect_burden = sum(defect_values.values())
+
+    def _proportional_shares():
+        """Return {defect: proportion_of_total} for non-zero defects."""
+        if total_defect_burden <= 0:
+            # No defect activity: split equally among all mapped defects
+            n = max(len(defect_values), 1)
+            return {d: 1.0 / n for d in defect_values}
+        return {d: v / total_defect_burden for d, v in defect_values.items()
+                if v > 0}
+
+    def _max_defect():
+        """Return the defect column with the highest value."""
+        if not defect_values or total_defect_burden <= 0:
+            return None
+        return max(defect_values, key=defect_values.get)
+
+    # --- Accumulate weights at the defect level ------------------------
+    defect_weights = {}
+
+    for feat, weight in lime_weights_dict.items():
+        # Strip LIME condition string to bare feature name
+        bare = feat.split(' ')[0].strip()
+
+        # 1. Direct raw defect column
+        if bare in DEFECT_TO_PROCESS:
+            defect_weights[bare] = defect_weights.get(bare, 0.0) + weight
+
+        # 2. total_defect_rate → proportional redistribution
+        elif bare == 'total_defect_rate':
+            for d, share in _proportional_shares().items():
+                defect_weights[d] = defect_weights.get(d, 0.0) + weight * share
+
+        # 3. max_defect_rate → dominant defect
+        elif bare == 'max_defect_rate':
+            md = _max_defect()
+            if md:
+                defect_weights[md] = defect_weights.get(md, 0.0) + weight
+
+        # 4. defect_concentration / n_defect_types / has_multiple_defects
+        #    → proportional (these encode the same underlying defect mix)
+        elif bare in ('defect_concentration', 'n_defect_types', 'has_multiple_defects'):
+            for d, share in _proportional_shares().items():
+                defect_weights[d] = defect_weights.get(d, 0.0) + weight * share
+
+        # 5. Interaction terms  e.g. core_x_sand, shrink_x_porosity
+        elif '_x_' in bare:
+            parts = bare.split('_x_')
+            candidates = [p + '_rate' for p in parts]
+            mapped = [c for c in candidates if c in DEFECT_TO_PROCESS]
+            if mapped:
+                per_d = weight / len(mapped)
+                for d in mapped:
+                    defect_weights[d] = defect_weights.get(d, 0.0) + per_d
+
+        # 6. Everything else (model outputs, MTTS, temporal): skip
+
+    # --- Roll up to Campbell process level ----------------------------
+    process_weights = {}
+    for defect, w in defect_weights.items():
+        process = DEFECT_TO_PROCESS.get(defect)
+        if process:
+            process_weights[process] = process_weights.get(process, 0.0) + w
+
+    return process_weights, defect_weights
+
+
 def format_lime_feature(feature_str):
     """
     Format LIME feature string for display.
@@ -3694,6 +3863,41 @@ def main():
                     "population or threshold context rather than a foundry-wide pattern."
                 )
 
+            # ── Helper: Campbell process attribution chart ────────────────
+            def _campbell_bar(process_weights_dict, title, caption_text=""):
+                """Render a bar chart of Campbell process-level LIME attribution."""
+                if not process_weights_dict:
+                    st.info("No defect signal detected in LIME weights — "
+                            "non-defect features (MTTS, model outputs) dominated this explanation.")
+                    return
+                pairs = sorted(process_weights_dict.items(), key=lambda x: x[1])
+                proc_names = [p[0] for p in pairs]
+                proc_vals  = [p[1] for p in pairs]
+                colors = ['#C62828' if v > 0 else '#2E7D32' for v in proc_vals]
+                # Add Campbell rule annotation to y-axis labels
+                proc_labels = []
+                for pn in proc_names:
+                    rule = PROCESS_DEFECT_MAP.get(pn, {}).get('campbell_rule', '')
+                    proc_labels.append(f"{pn}<br><sub>{rule}</sub>")
+                fig = go.Figure(go.Bar(
+                    x=proc_vals, y=proc_labels, orientation='h',
+                    marker_color=colors,
+                    text=[f"{v:+.3f}" for v in proc_vals],
+                    textposition='outside'
+                ))
+                fig.update_layout(
+                    title=title,
+                    xaxis_title="Cumulative LIME Weight (defect-attributed)",
+                    yaxis_title="Campbell Process",
+                    height=max(300, len(proc_names) * 55 + 80),
+                    showlegend=False,
+                    xaxis=dict(zeroline=True, zerolinewidth=2, zerolinecolor='black'),
+                    margin=dict(l=10, r=80, t=40, b=10)
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                if caption_text:
+                    st.caption(caption_text)
+
             # ── TABS ─────────────────────────────────────────────────────
             lime_tab_cur, lime_tab_fail = st.tabs([
                 "🔬 Current Run — 3-Stage Breakdown",
@@ -3732,6 +3936,46 @@ def main():
                     for res in _cur_results if res and res.get('error') is None
                 ]
                 _avg_bar(_cur_wdicts, "Average Feature Attribution — Current Run (Stages 1+2+3)")
+
+                # ── Campbell Process Attribution — Current Run ────────────
+                st.markdown("---")
+                st.markdown("#### 🏭 Campbell Process Attribution — Current Run")
+                st.caption(
+                    "*LIME weights decomposed to raw defect columns and mapped to Campbell's "
+                    "10 Rules process groups.  Red bars → process activity increasing scrap risk. "
+                    "This is the operationally actionable output for the foundry manager.*"
+                )
+                # Accumulate cross-stage process weights for current run
+                _cur_combined_proc = {}
+                for res in _cur_results:
+                    if res and res.get('error') is None:
+                        _raw_w = {fc.split(' ')[0].strip(): w
+                                  for fc, w in res['explanation']}
+                        _proc_w, _ = lime_weights_to_campbell(
+                            _raw_w, _part_recent_enh, defect_cols
+                        )
+                        for proc, w in _proc_w.items():
+                            _cur_combined_proc[proc] = _cur_combined_proc.get(proc, 0.0) + w
+                # Average across stages
+                n_stages_cur = sum(
+                    1 for r in _cur_results if r and r.get('error') is None
+                )
+                if n_stages_cur > 0:
+                    _cur_avg_proc = {p: w / n_stages_cur
+                                     for p, w in _cur_combined_proc.items()
+                                     if abs(w / n_stages_cur) > 1e-6}
+                    _campbell_bar(
+                        _cur_avg_proc,
+                        "Process Attribution — Current Run (Cross-Stage Average)",
+                        caption_text=(
+                            "Defects driving each process bar: "
+                            + " | ".join(
+                                f"**{p}** → {', '.join(PROCESS_DEFECT_MAP[p]['defects'])}"
+                                for p in sorted(_cur_avg_proc, key=lambda x: abs(_cur_avg_proc[x]), reverse=True)
+                                if p in PROCESS_DEFECT_MAP
+                            )
+                        )
+                    )
 
                 with st.expander("📋 Numerical Detail — All 3 Stages"):
                     for sc, res in zip(_stage_cfgs, _cur_results):
@@ -3824,6 +4068,44 @@ def main():
                         "Average Failure Attribution — All 3 Stages",
                         threshold_label=f"{unified_threshold:.2f}%"
                     )
+
+                    # ── Campbell Process Attribution — Failure Pattern ────
+                    st.markdown("---")
+                    st.markdown("#### 🏭 Campbell Process Attribution — Failure Pattern")
+                    st.caption(
+                        "*LIME failure-pattern weights decomposed to raw defect columns and "
+                        "mapped to Campbell's 10 Rules process groups.  This is the primary "
+                        "maintenance decision output — it shows which process groups the model "
+                        "consistently implicates during scrap exceedance events.*"
+                    )
+                    _fail_combined_proc = {}
+                    for pr in _pat_results:
+                        if pr is None:
+                            continue
+                        _proc_w, _ = lime_weights_to_campbell(
+                            pr['avg_weights'], _failure_enh, defect_cols
+                        )
+                        for proc, w in _proc_w.items():
+                            _fail_combined_proc[proc] = _fail_combined_proc.get(proc, 0.0) + w
+                    n_stages_fail = sum(1 for pr in _pat_results if pr is not None)
+                    if n_stages_fail > 0:
+                        _fail_avg_proc = {p: w / n_stages_fail
+                                          for p, w in _fail_combined_proc.items()
+                                          if abs(w / n_stages_fail) > 1e-6}
+                        _campbell_bar(
+                            _fail_avg_proc,
+                            f"Process Attribution — Failure Pattern  (threshold: {unified_threshold:.2f}%)",
+                            caption_text=(
+                                "Defects driving each process bar: "
+                                + " | ".join(
+                                    f"**{p}** → {', '.join(PROCESS_DEFECT_MAP[p]['defects'])}"
+                                    for p in sorted(_fail_avg_proc, key=lambda x: abs(_fail_avg_proc[x]), reverse=True)
+                                    if p in PROCESS_DEFECT_MAP
+                                )
+                            )
+                        )
+                    else:
+                        st.info("No failure LIME data to attribute to Campbell processes.")
 
                     with st.expander("📋 Numerical Detail — All 3 Stage Patterns"):
                         for sc, pr in zip(_stage_cfgs, _pat_results):
