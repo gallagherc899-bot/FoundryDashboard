@@ -204,18 +204,126 @@ PROCESS_DEFECT_MAP = {
 }
 
 # ================================================================
-# DEFECT → CAMPBELL PROCESS REVERSE LOOKUP
+# DEFECT → CAMPBELL PROCESS MULTI-CAUSE MAPPING
 # ================================================================
-# Built once at startup from PROCESS_DEFECT_MAP.
-# Maps every raw defect column name → its Campbell process group.
-# Used by lime_weights_to_campbell() to translate LIME feature
-# weights into operationally actionable process-level attribution.
+# Each defect maps to one or more (process, is_primary) tuples.
+# is_primary=True  → this process is the dominant/first-suspect origin
+#                    per Campbell's 10 Rules.
+# is_primary=False → this process can also produce this defect but is
+#                    a secondary or less common origin.
+#
+# When a run shows ONLY a single multi-cause defect, all candidate
+# processes are listed with equal weight — the manager decides.
+# When a run shows MULTIPLE defects from one process's signature,
+# co-occurrence scoring elevates that process automatically.
+#
+# Reference: Campbell, J. (2003). Castings Practice: The 10 Rules.
 # ================================================================
-DEFECT_TO_PROCESS = {
-    defect: process
-    for process, info in PROCESS_DEFECT_MAP.items()
-    for defect in info["defects"]
+DEFECT_TO_PROCESSES = {
+    # ── Single-cause defects ──────────────────────────────────────────
+    'dross_rate':              [('Melting',         True)],
+    'misrun_rate':             [('Pouring',         True)],
+    'missrun_rate':            [('Pouring',         True)],
+    'short_pour_rate':         [('Pouring',         True)],
+    'runout_rate':             [('Pouring',         True)],
+    'dirty_pattern_rate':      [('Sand System',     True)],
+    'bent_rate':               [('Shakeout',        True)],
+    'gouged_rate':             [('Pattern/Tooling', True)],
+    'over_grind_rate':         [('Finishing',       True)],
+    'cut_into_rate':           [('Finishing',       True)],
+    'zyglo_rate':              [('Inspection',      True)],
+    'failed_zyglo_rate':       [('Inspection',      True)],
+    # outside_process_scrap_rate is a detection label; origin is genuinely
+    # ambiguous — could be any upstream process
+    'outside_process_scrap_rate': [('Inspection',   True)],
+
+    # ── Multi-cause defects ───────────────────────────────────────────
+    # Gas porosity: primary = dissolved gas / bifilms at melting (Rule 1);
+    #   secondary = binder/moisture outgassing from cores (Rule 5);
+    #   secondary = turbulent air entrainment during fill (Rule 2)
+    'gas_porosity_rate': [
+        ('Melting',      True),
+        ('Core Making',  False),
+        ('Pouring',      False),
+    ],
+
+    # Shrinkage: primary = inadequate feeding / riser sizing (Rule 6);
+    #   secondary = dissolved gas shrinkage interaction from melt (Rule 1)
+    'shrink_rate': [
+        ('Gating Design', True),
+        ('Melting',       False),
+    ],
+
+    # Shrink porosity: same causal chain as shrink_rate
+    'shrink_porosity_rate': [
+        ('Gating Design', True),
+        ('Melting',       False),
+    ],
+
+    # Tear-up (hot tear): primary = solidification restraint / feeding (Rule 6);
+    #   secondary = core rigidity constrains cooling casting (Rule 5)
+    'tear_up_rate': [
+        ('Gating Design', True),
+        ('Core Making',   False),
+    ],
+
+    # Sand inclusion: primary = sand preparation / binder quality;
+    #   secondary = turbulent fill velocity erodes mould surface (Rule 2)
+    'sand_rate': [
+        ('Sand System',  True),
+        ('Pouring',      False),
+    ],
+
+    # Core defect: primary = core integrity / venting (Rule 5);
+    #   secondary = sand quality affects core strength
+    'core_rate': [
+        ('Core Making',  True),
+        ('Sand System',  False),
+    ],
+
+    # Crush: primary = core mechanical failure during assembly (Rule 5);
+    #   secondary = pattern / core-print dimensional mismatch
+    'crush_rate': [
+        ('Core Making',    True),
+        ('Pattern/Tooling', False),
+    ],
+
+    # Shift: primary = core misalignment (Rule 5);
+    #   secondary = pattern wear / cope-drag dimensional issues (Rule 10)
+    'shift_rate': [
+        ('Core Making',    True),
+        ('Pattern/Tooling', False),
+    ],
 }
+
+# Primary-cause reverse lookup — used for backward-compat and simple displays
+DEFECT_TO_PROCESS = {
+    defect: next(proc for proc, is_primary in procs if is_primary)
+    for defect, procs in DEFECT_TO_PROCESSES.items()
+}
+
+
+def process_co_occurrence_score(process_name, observed_defects_set):
+    """
+    Score how well a Campbell process explains the observed defect pattern.
+
+    Score = |observed_defects ∩ process_defects| / |process_defects|
+
+    Example:
+      Process X causes {A, B, C}.  Run shows defects A + B.
+        → score = 2/3 = 0.67  (two of three signatures present)
+      Process Y causes {A, D}.  Same run.
+        → score = 1/2 = 0.50  (only one of two signatures present)
+      → Process X is more likely given the co-occurrence evidence.
+
+    A score of 0 means none of this process's defects appear in the run.
+    A score of 1 means ALL of this process's defect signatures are present.
+    """
+    process_defects = set(PROCESS_DEFECT_MAP.get(process_name, {}).get('defects', []))
+    if not process_defects:
+        return 0.0
+    matches = observed_defects_set & process_defects
+    return len(matches) / len(process_defects)
 
 # Features that the model uses which are NOT raw defects.
 # These are excluded from Campbell process attribution because
@@ -2294,45 +2402,19 @@ def explain_prediction_lime(model, X_train, feature_names, instance, num_feature
 
 def lime_weights_to_campbell(lime_weights_dict, instance_rows, defect_cols):
     """
-    Translate LIME feature weights into Campbell process-level attribution.
+    Translate LIME feature weights into Campbell process-level attribution,
+    respecting multi-cause defects via co-occurrence scoring.
 
-    The model's feature space includes engineered aggregates
-    (total_defect_rate, max_defect_rate, defect_cluster_probability, etc.)
-    that a foundry manager cannot act on directly.  This function
-    decomposes those aggregates back to the underlying raw defect columns
-    and then maps each defect to its Campbell process group.
-
-    Decomposition strategy
-    ----------------------
-    * Raw defect column (e.g. dross_rate):
-        Weight assigned directly to the defect → its Campbell process.
-    * total_defect_rate:
-        Weight redistributed proportionally to each defect's share of
-        the total defect burden in the instance (or population average).
-    * max_defect_rate:
-        Weight attributed entirely to the defect that was the maximum
-        in the instance.  If the maximum defect is tied or zero, weight
-        is split equally among all non-zero defects.
-    * Interaction terms (e.g. core_x_sand):
-        Weight split equally between the two constituent defects.
-    * defect_concentration, n_defect_types, has_multiple_defects:
-        Proportional redistribution using the same population defect share.
-    * Model-intermediate and reliability features
-        (global_scrap_probability, defect_cluster_probability, mtts_runs,
-        hazard_rate, scrap_percent_roll3, etc.):
-        Excluded.  These are model-audit signals, not process signals.
-
-    Parameters
-    ----------
-    lime_weights_dict : dict
-        {feature_name: lime_weight} — output of LIME (raw feature names,
-        not the LIME condition strings).
-    instance_rows : pd.DataFrame or pd.Series
-        One or more data rows from df_enhanced.  When multiple rows are
-        passed (e.g. the failure population), the mean defect values are
-        used for decomposition.
-    defect_cols : list
-        Raw defect column names present in the dataset.
+    Single-cause defect  → weight goes entirely to its one process.
+    Multi-cause defect   → weight is split across candidate processes
+                           proportionally to each process's co-occurrence
+                           score given the OTHER defects present in the run.
+                           If co-occurrence is uninformative (only one defect
+                           observed), weight is split equally — the manager
+                           sees all candidate processes and decides.
+    Aggregate features   → decomposed back to constituent defects first,
+                           then treated as above.
+    Model/MTTS features  → excluded (audit signals, not process signals).
 
     Returns
     -------
@@ -2343,82 +2425,88 @@ def lime_weights_to_campbell(lime_weights_dict, instance_rows, defect_cols):
     if isinstance(instance_rows, pd.Series):
         inst = instance_rows
     elif hasattr(instance_rows, 'iloc'):
-        # DataFrame — use column means so decomposition reflects the
-        # population being explained (single row or failure set)
         inst = instance_rows.mean(numeric_only=True)
     else:
         inst = pd.Series(instance_rows)
 
-    # Build defect value map from the instance / population average
+    # Build defect value map and set of non-zero defects for co-occurrence
     defect_values = {}
     for dc in defect_cols:
-        if dc in DEFECT_TO_PROCESS:          # only raw mapped defects
+        if dc in DEFECT_TO_PROCESSES:
             val = float(inst.get(dc, 0.0))
             defect_values[dc] = max(val, 0.0)
 
     total_defect_burden = sum(defect_values.values())
+    observed_defects_set = {d for d, v in defect_values.items() if v > 0}
 
     def _proportional_shares():
-        """Return {defect: proportion_of_total} for non-zero defects."""
         if total_defect_burden <= 0:
-            # No defect activity: split equally among all mapped defects
             n = max(len(defect_values), 1)
             return {d: 1.0 / n for d in defect_values}
         return {d: v / total_defect_burden for d, v in defect_values.items()
                 if v > 0}
 
     def _max_defect():
-        """Return the defect column with the highest value."""
         if not defect_values or total_defect_burden <= 0:
             return None
         return max(defect_values, key=defect_values.get)
 
-    # --- Accumulate weights at the defect level ------------------------
+    # --- Accumulate weights at the defect level -----------------------
     defect_weights = {}
 
     for feat, weight in lime_weights_dict.items():
-        # Strip LIME condition string to bare feature name
         bare = feat.split(' ')[0].strip()
 
-        # 1. Direct raw defect column
-        if bare in DEFECT_TO_PROCESS:
+        if bare in DEFECT_TO_PROCESSES:
             defect_weights[bare] = defect_weights.get(bare, 0.0) + weight
-
-        # 2. total_defect_rate → proportional redistribution
         elif bare == 'total_defect_rate':
             for d, share in _proportional_shares().items():
                 defect_weights[d] = defect_weights.get(d, 0.0) + weight * share
-
-        # 3. max_defect_rate → dominant defect
         elif bare == 'max_defect_rate':
             md = _max_defect()
             if md:
                 defect_weights[md] = defect_weights.get(md, 0.0) + weight
-
-        # 4. defect_concentration / n_defect_types / has_multiple_defects
-        #    → proportional (these encode the same underlying defect mix)
         elif bare in ('defect_concentration', 'n_defect_types', 'has_multiple_defects'):
             for d, share in _proportional_shares().items():
                 defect_weights[d] = defect_weights.get(d, 0.0) + weight * share
-
-        # 5. Interaction terms  e.g. core_x_sand, shrink_x_porosity
         elif '_x_' in bare:
             parts = bare.split('_x_')
             candidates = [p + '_rate' for p in parts]
-            mapped = [c for c in candidates if c in DEFECT_TO_PROCESS]
+            mapped = [c for c in candidates if c in DEFECT_TO_PROCESSES]
             if mapped:
                 per_d = weight / len(mapped)
                 for d in mapped:
                     defect_weights[d] = defect_weights.get(d, 0.0) + per_d
+        # model/MTTS/temporal features → skip
 
-        # 6. Everything else (model outputs, MTTS, temporal): skip
-
-    # --- Roll up to Campbell process level ----------------------------
+    # --- Roll up to Campbell process level with co-occurrence scoring --
     process_weights = {}
     for defect, w in defect_weights.items():
-        process = DEFECT_TO_PROCESS.get(defect)
-        if process:
-            process_weights[process] = process_weights.get(process, 0.0) + w
+        candidate_procs = DEFECT_TO_PROCESSES.get(defect, [])
+        if not candidate_procs:
+            continue
+
+        if len(candidate_procs) == 1:
+            # Single-cause: direct attribution
+            proc_name = candidate_procs[0][0]
+            process_weights[proc_name] = process_weights.get(proc_name, 0.0) + w
+        else:
+            # Multi-cause: score by co-occurrence of OTHER defects from each process
+            scores = {
+                proc_name: process_co_occurrence_score(proc_name, observed_defects_set)
+                for proc_name, _ in candidate_procs
+            }
+            total_score = sum(scores.values())
+            if total_score <= 0:
+                # No co-occurrence evidence — split equally
+                per_proc = w / len(candidate_procs)
+                for proc_name, _ in candidate_procs:
+                    process_weights[proc_name] = process_weights.get(proc_name, 0.0) + per_proc
+            else:
+                for proc_name, score in scores.items():
+                    process_weights[proc_name] = (
+                        process_weights.get(proc_name, 0.0) + w * (score / total_score)
+                    )
 
     return process_weights, defect_weights
 
@@ -3337,10 +3425,14 @@ def main():
         
         # Initialize session state for slider if not set or out of bounds for current part
         slider_max = max(max_scrap, default_threshold + 1.0)
-        if 'unified_threshold_slider' not in st.session_state:
-            st.session_state.unified_threshold_slider = min(default_threshold, max_scrap)
+        # Reset to part average whenever the selected part changes
+        if st.session_state.get('_threshold_part') != selected_part:
+            st.session_state['_threshold_part'] = selected_part
+            st.session_state['unified_threshold_slider'] = min(default_threshold, max_scrap)
+        elif 'unified_threshold_slider' not in st.session_state:
+            st.session_state['unified_threshold_slider'] = min(default_threshold, max_scrap)
         elif st.session_state.unified_threshold_slider > slider_max:
-            st.session_state.unified_threshold_slider = min(default_threshold, max_scrap)
+            st.session_state['unified_threshold_slider'] = min(default_threshold, max_scrap)
         
         st.markdown("#### ⚙️ Scrap Exceedance Threshold")
         st.caption("*Adjust to redefine what counts as a 'failure.' This threshold drives the Failure-Conditional "
@@ -3762,21 +3854,32 @@ def main():
             # ── Helper: annotate a bare feature name with defect + process ─
             def _annotate_feat(bare):
                 """
-                Return a display label that includes the raw defect name
-                and its Campbell process group wherever available.
+                Return a display label including defect name and ALL
+                possible Campbell process origins.
 
-                Raw defect  → 'Dross  →  Melting (Rule 1)'
-                Interaction → 'Core × Sand  →  Core Making × Sand System'
-                Aggregate   → 'Total Defect Rate  [aggregate — see Campbell panel]'
-                Model signal→ 'Defect Cluster Probability  [model signal]'
-                MTTS feat   → 'Hazard Rate  [MTTS/reliability]'
-                Other       → title-cased bare name
+                Single-cause:  'Dross  →  Melting (Rule 1)'
+                Multi-cause:   'Gas Porosity  →  Melting* | Core Making | Pouring'
+                               (* = primary origin per Campbell)
+                Interaction:   'Interaction: Core (Core Making*) × Sand (Sand System*)'
+                Aggregate:     'Total Defect Rate  [aggregate — see Campbell panel]'
+                Model signal:  'Defect Cluster Probability  [model signal]'
+                MTTS feature:  'Hazard Rate  [MTTS/reliability]'
                 """
-                if bare in DEFECT_TO_PROCESS:
-                    proc = DEFECT_TO_PROCESS[bare]
-                    rule = PROCESS_DEFECT_MAP[proc]['campbell_rule']
+                if bare in DEFECT_TO_PROCESSES:
+                    procs = DEFECT_TO_PROCESSES[bare]
                     disp = bare.replace('_rate', '').replace('_', ' ').title()
-                    return f"{disp}  →  {proc} ({rule})"
+                    if len(procs) == 1:
+                        proc, _ = procs[0]
+                        rule = PROCESS_DEFECT_MAP[proc]['campbell_rule']
+                        return f"{disp}  →  {proc} ({rule})"
+                    else:
+                        # Multi-cause: primary* first, then secondaries
+                        parts_label = []
+                        for proc, is_primary in procs:
+                            rule = PROCESS_DEFECT_MAP[proc]['campbell_rule']
+                            star = '*' if is_primary else ''
+                            parts_label.append(f"{proc}{star}")
+                        return f"{disp}  →  {' | '.join(parts_label)}  [multi-cause — see reconciliation]"
 
                 if bare == 'total_defect_rate':
                     return "Total Defect Rate  [aggregate — see Campbell panel]"
@@ -3803,7 +3906,6 @@ def main():
                     'total_defect_rate_trend','total_defect_rate_roll3',
                     'scrap_percent_trend','scrap_percent_roll3',
                     'month','quarter',
-                    'scrap_percent_roll3','total_defect_rate_roll3',
                 }
                 if bare in _temp_set:
                     return f"{bare.replace('_',' ').title()}  [temporal]"
@@ -3813,10 +3915,14 @@ def main():
                     labels = []
                     for p in parts:
                         dc = p + '_rate'
-                        if dc in DEFECT_TO_PROCESS:
+                        if dc in DEFECT_TO_PROCESSES:
+                            procs = DEFECT_TO_PROCESSES[dc]
+                            proc_str = ' | '.join(
+                                f"{proc}{'*' if ip else ''}"
+                                for proc, ip in procs
+                            )
                             labels.append(
-                                f"{p.replace('_',' ').title()} "
-                                f"({DEFECT_TO_PROCESS[dc]})"
+                                f"{p.replace('_',' ').title()} ({proc_str})"
                             )
                         else:
                             labels.append(p.replace('_', ' ').title())
@@ -4188,18 +4294,17 @@ def main():
                     st.markdown("---")
                     st.markdown("#### ⚖️ Pareto vs. LIME Reconciliation")
                     st.caption(
-                        "*When the Failure-Conditional Pareto and the LIME Campbell attribution "
-                        "point to different processes, this panel explains why and which signal "
-                        "to act on.*"
+                        "*For multi-cause defects, all possible originating processes are listed. "
+                        "Co-occurrence scoring — how many of each process's defect signatures "
+                        "appear together in this run — guides which process is more likely. "
+                        "The manager uses engineering judgment to decide.*"
                     )
 
-                    # Derive top Pareto process from analysis_df + failure_df
-                    _recon_pareto_top = None
-                    _recon_pareto_defect = None
+                    # ── Build Pareto process candidates ───────────────────
+                    _recon_pareto_rows = []
                     try:
-                        _par_data = []
                         for _dc in defect_cols:
-                            if _dc not in DEFECT_TO_PROCESS:
+                            if _dc not in DEFECT_TO_PROCESSES:
                                 continue
                             if _dc not in analysis_df.columns:
                                 continue
@@ -4211,131 +4316,211 @@ def main():
                                 if n_failures > 0 else _hist
                             )
                             _mult = _fail_r / _hist if _hist > 0 else 1.0
-                            _par_data.append({
+                            _signal = _fail_r * _mult
+                            _defect_disp = _dc.replace('_rate','').replace('_',' ').title()
+                            _proc_entries = DEFECT_TO_PROCESSES[_dc]
+                            _proc_labels = ' | '.join(
+                                f"{p}{'*' if ip else ''}"
+                                for p, ip in _proc_entries
+                            )
+                            _recon_pareto_rows.append({
                                 'defect_col': _dc,
-                                'process': DEFECT_TO_PROCESS[_dc],
+                                'defect_disp': _defect_disp,
+                                'processes': _proc_entries,
+                                'proc_labels': _proc_labels,
                                 'fail_rate': _fail_r,
                                 'multiplier': _mult,
+                                'signal': _signal,
                             })
-                        if _par_data:
-                            _par_df = pd.DataFrame(_par_data)
-                            # Top Pareto process by elevation × failure rate
-                            _par_df['signal'] = _par_df['fail_rate'] * _par_df['multiplier']
-                            _par_df_top = _par_df.sort_values('signal', ascending=False).iloc[0]
-                            _recon_pareto_top = _par_df_top['process']
-                            _recon_pareto_defect = _par_df_top['defect_col'].replace('_rate','').replace('_',' ').title()
                     except Exception:
                         pass
 
-                    # Top LIME Campbell process
-                    _recon_lime_top = None
-                    _recon_lime_defects = []
+                    # ── Build LIME process candidates with co-occurrence ──
+                    _recon_lime_rows = []
                     try:
                         if n_stages_fail > 0 and _fail_avg_proc:
-                            _recon_lime_top = max(
-                                _fail_avg_proc, key=lambda x: abs(_fail_avg_proc[x])
-                            )
-                            _recon_lime_defects = PROCESS_DEFECT_MAP.get(
-                                _recon_lime_top, {}
-                            ).get('defects', [])
+                            # Get observed defects in the failure population
+                            _obs_fail_defects = set()
+                            if len(_failure_enh) > 0:
+                                _fail_mean = _failure_enh.mean(numeric_only=True)
+                                _obs_fail_defects = {
+                                    dc for dc in defect_cols
+                                    if dc in DEFECT_TO_PROCESSES
+                                    and float(_fail_mean.get(dc, 0)) > 0
+                                }
+                            # For each process in LIME output, list its defects
+                            # and their co-occurrence score
+                            for _proc_name, _proc_weight in sorted(
+                                _fail_avg_proc.items(),
+                                key=lambda x: abs(x[1]), reverse=True
+                            )[:6]:  # top 6 processes
+                                _proc_defects = PROCESS_DEFECT_MAP.get(
+                                    _proc_name, {}
+                                ).get('defects', [])
+                                _present = [
+                                    d.replace('_rate','').replace('_',' ').title()
+                                    for d in _proc_defects
+                                    if d in _obs_fail_defects
+                                ]
+                                _absent = [
+                                    d.replace('_rate','').replace('_',' ').title()
+                                    for d in _proc_defects
+                                    if d not in _obs_fail_defects and d in defect_cols
+                                ]
+                                _coo_score = process_co_occurrence_score(
+                                    _proc_name, _obs_fail_defects
+                                )
+                                _recon_lime_rows.append({
+                                    'process': _proc_name,
+                                    'weight': _proc_weight,
+                                    'co_occurrence': _coo_score,
+                                    'defects_present': _present,
+                                    'defects_absent': _absent,
+                                    'rule': PROCESS_DEFECT_MAP.get(
+                                        _proc_name, {}
+                                    ).get('campbell_rule', ''),
+                                })
                     except Exception:
                         pass
 
-                    if _recon_pareto_top and _recon_lime_top:
-                        _agree = (_recon_pareto_top == _recon_lime_top)
+                    if _recon_pareto_rows and _recon_lime_rows:
+                        # Top pareto row by signal
+                        _par_top = sorted(
+                            _recon_pareto_rows,
+                            key=lambda x: x['signal'], reverse=True
+                        )[0]
+                        _lime_top = _recon_lime_rows[0]  # already sorted by weight
 
-                        # Summary agreement metric
+                        # Check overlap: do both signals implicate the same process?
+                        _par_procs = {p for p, _ in _par_top['processes']}
+                        _lime_procs = {r['process'] for r in _recon_lime_rows[:3]}
+                        _overlap = _par_procs & _lime_procs
+
+                        # ── Display ───────────────────────────────────────
                         _rc1, _rc2 = st.columns(2)
                         with _rc1:
-                            st.metric(
-                                "Pareto Top Process",
-                                _recon_pareto_top,
-                                help=f"Highest elevated defect during failures: {_recon_pareto_defect}"
+                            st.markdown("**📊 Pareto: Top Elevated Defect**")
+                            st.markdown(
+                                f"**{_par_top['defect_disp']}** "
+                                f"({_par_top['fail_rate']:.2f}% failure rate, "
+                                f"{_par_top['multiplier']:.1f}× elevation)"
                             )
-                        with _rc2:
-                            st.metric(
-                                "LIME Top Process",
-                                _recon_lime_top,
-                                help=(
-                                    "Process with highest cumulative LIME weight "
-                                    "after defect decomposition. Defects: "
-                                    + ", ".join(_recon_lime_defects)
+                            st.markdown(
+                                f"Possible processes: **{_par_top['proc_labels']}**"
+                            )
+                            if len(_par_top['processes']) > 1:
+                                st.caption(
+                                    "\\* = primary Campbell origin.  "
+                                    "Defect co-occurrence in this run determines "
+                                    "which process is more likely."
                                 )
+                        with _rc2:
+                            st.markdown("**🤖 LIME: Top Scored Process**")
+                            st.markdown(
+                                f"**{_lime_top['process']}** "
+                                f"(avg weight: {_lime_top['weight']:+.3f}, "
+                                f"co-occurrence score: {_lime_top['co_occurrence']:.2f})"
                             )
+                            st.markdown(
+                                f"*{_lime_top['rule']}*"
+                            )
+                            if _lime_top['defects_present']:
+                                st.caption(
+                                    f"Observed in run: "
+                                    + ", ".join(_lime_top['defects_present'])
+                                )
+                            if _lime_top['defects_absent']:
+                                st.caption(
+                                    f"Not observed: "
+                                    + ", ".join(_lime_top['defects_absent'])
+                                    + " — if these appear in future runs, "
+                                    "confidence in this process increases."
+                                )
 
-                        if _agree:
+                        st.markdown("---")
+
+                        if _overlap:
+                            _agreed = sorted(_overlap)[0]
                             st.success(
-                                f"✅ **Both signals agree: {_recon_pareto_top}** — "
-                                "high-confidence intervention target.  The Pareto shows this "
-                                "process's defects are most elevated during failures, and the "
-                                "Random Forest independently learned to weight this process's "
-                                "defects most heavily for discrimination.  Act here first."
+                                f"✅ **Both signals implicate {_agreed}** — "
+                                "high-confidence intervention target. "
+                                "The Pareto shows this process's defects are elevated "
+                                "during failures; the RF independently weighted them "
+                                "most heavily across all three hierarchy stages."
                             )
                         else:
                             st.warning(
-                                f"⚠️ **Signals diverge — Pareto → {_recon_pareto_top} | "
-                                f"LIME → {_recon_lime_top}**"
+                                f"⚠️ Pareto top defect points to "
+                                f"**{_par_top['proc_labels']}** while LIME top "
+                                f"process is **{_lime_top['process']}** — signals diverge."
                             )
-                            with st.expander(
-                                "📖 How to interpret this divergence — click to expand"
-                            ):
-                                st.markdown(f"""
+
+                        with st.expander(
+                            "📖 How to read this — co-occurrence logic and decision guide"
+                        ):
+                            st.markdown(f"""
 **What each signal measures**
 
-| Signal | What it counts | Basis |
-|--------|---------------|-------|
-| **Pareto** | Which defect has the highest rate *during* failure events, weighted by how much it exceeds its historical baseline (elevation ratio) | Descriptive frequency analysis of {n_failures} failure run(s) |
-| **LIME** | Which defects the Random Forest *learned* to use as the strongest discriminators between failure and non-failure, averaged across {n_failures} failure run(s) through all three hierarchy stages | Model-learned weights via local linear approximation |
+| Signal | What it measures | Basis |
+|--------|-----------------|-------|
+| **Pareto** | Which defect is most elevated during failure events vs. baseline — elevation ratio × failure rate | Frequency analysis of {n_failures} failure run(s) |
+| **LIME** | Which features the RF learned to weight most heavily for discriminating failure from non-failure — averaged across all three hierarchy stages | Model-learned local linear approximation, {n_failures} run(s) |
 
 ---
 
-**Why they can diverge**
+**How co-occurrence scoring works**
 
-*Case 1 — The Pareto defect is a symptom, not a cause.*
-The top Pareto defect ({_recon_pareto_defect} → **{_recon_pareto_top}**) may be highly elevated
-during failures simply because it is a downstream consequence of the real root cause.
-The RF may have learned that another defect is the *leading* indicator — it appears first
-in the run history before failure — while the Pareto defect appears at the same time as
-the failure and therefore looks correlated but is not predictive.
+When a defect can originate from more than one process, this dashboard
+scores each candidate process by asking: *how many of this process's other
+defect signatures are also present in the failure runs?*
 
-*Case 2 — The LIME defect is a detection-stage artifact.*
-If the LIME top process is Inspection (e.g., `zyglo_rate`, `outside_process_scrap_rate`),
-the RF may have learned these as failure proxies even though they are classification
-labels, not process origins.  In that case, trust the Pareto for the process to intervene on.
+> **Score = defects from this process observed in run ÷ total defects this process can cause**
 
-*Case 3 — Multi-cause defect.*
-Some defects map to one Campbell process in this framework but can originate from
-multiple processes in a specific foundry.  For example, porosity can originate from
-Melting (gas entrainment), Core Making (core outgassing), or Gating Design (turbulence).
-If the dataset terminology does not distinguish cause, both signals may be partially correct.
+Example: *gas_porosity_rate* can come from Melting, Core Making, or Pouring.
+- If the failure runs also show *dross_rate* (Melting signature): Melting scores higher.
+- If the failure runs also show *core_rate* or *crush_rate* (Core Making signatures): Core Making scores higher.
+- If only *gas_porosity_rate* appears with no other signatures: all three score equally — the manager decides.
 
 ---
 
-**Decision rule for the foundry manager**
+**Decision guide**
 
-1. **If the LIME top process is not Inspection or Finishing** → prefer LIME.
-   The RF has seen the full feature space including run history and MTTS signals.
-   It is telling you which defect accumulation pattern *preceded* failure events,
-   not just which defect was present at failure time.
+1. **Overlap exists** (both signals agree on a process) → act there first. Two independent methods converging is the strongest signal this framework can produce.
 
-2. **If the LIME top process is Inspection or Finishing** → use the Pareto.
-   Detection-stage classifications are not process-origin signals.  The RF may be
-   over-weighting these because they are correlated with scrap by definition.
+2. **No overlap, LIME top process = Inspection or Finishing** → trust the Pareto. These are detection-stage labels, not process origins. The RF may overweight them because they correlate with scrap by definition.
 
-3. **Check whether the processes share defects** — if both processes appear in the
-   top 3 of the LIME Campbell bar, investigate both.  The divergence may be noise
-   rather than a genuine disagreement.
+3. **No overlap, LIME process has high co-occurrence score (≥0.5)** → prefer LIME. The RF saw multiple defects from this process's signature preceding failures, which is stronger evidence than the Pareto's frequency count alone.
 
-4. **Validate against your foundry's process knowledge.**
-   This framework is a proof-of-concept mapping (Campbell, 2003).  Your process
-   engineers should confirm whether the implicated defect actually originates from
-   the mapped process stage in your specific equipment configuration.
+4. **No overlap, low co-occurrence scores for all processes** → both signals are uncertain. Investigate the top defect's process candidates directly using your process knowledge. This framework is a proof-of-concept — your engineers must validate the mapping against your specific equipment configuration.
+
+*Reference: Campbell, J. (2003). Castings Practice: The 10 Rules. Elsevier.*
 """)
 
-                    elif not _recon_pareto_top or not _recon_lime_top:
+                        # ── Detailed process candidates table ─────────────
+                        with st.expander("📋 All LIME process candidates — co-occurrence detail"):
+                            _lime_tbl = pd.DataFrame([
+                                {
+                                    'Process': r['process'],
+                                    'Campbell Rule': r['rule'],
+                                    'LIME Weight': f"{r['weight']:+.3f}",
+                                    'Co-occurrence Score': f"{r['co_occurrence']:.2f}",
+                                    'Defects Observed in Run': ', '.join(r['defects_present']) or '—',
+                                    'Defects Not Yet Observed': ', '.join(r['defects_absent']) or '—',
+                                }
+                                for r in _recon_lime_rows
+                            ])
+                            st.dataframe(_lime_tbl, use_container_width=True, hide_index=True)
+                            st.caption(
+                                "Co-occurrence score: 1.0 = all of this process's defect "
+                                "signatures present in the failure runs. "
+                                "0.0 = none present. "
+                                "Higher score → stronger co-occurrence evidence for this process."
+                            )
+
+                    elif not _recon_pareto_rows or not _recon_lime_rows:
                         st.info(
                             "Reconciliation requires both Pareto defect data and LIME "
-                            "Campbell attribution.  Ensure the threshold slider produces "
+                            "Campbell attribution. Ensure the threshold slider produces "
                             "at least one failure run."
                         )
 
