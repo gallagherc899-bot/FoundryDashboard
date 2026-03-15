@@ -3759,6 +3759,71 @@ def main():
                     num_features=10
                 )
 
+            # ── Helper: annotate a bare feature name with defect + process ─
+            def _annotate_feat(bare):
+                """
+                Return a display label that includes the raw defect name
+                and its Campbell process group wherever available.
+
+                Raw defect  → 'Dross  →  Melting (Rule 1)'
+                Interaction → 'Core × Sand  →  Core Making × Sand System'
+                Aggregate   → 'Total Defect Rate  [aggregate — see Campbell panel]'
+                Model signal→ 'Defect Cluster Probability  [model signal]'
+                MTTS feat   → 'Hazard Rate  [MTTS/reliability]'
+                Other       → title-cased bare name
+                """
+                if bare in DEFECT_TO_PROCESS:
+                    proc = DEFECT_TO_PROCESS[bare]
+                    rule = PROCESS_DEFECT_MAP[proc]['campbell_rule']
+                    disp = bare.replace('_rate', '').replace('_', ' ').title()
+                    return f"{disp}  →  {proc} ({rule})"
+
+                if bare == 'total_defect_rate':
+                    return "Total Defect Rate  [aggregate — see Campbell panel]"
+                if bare == 'max_defect_rate':
+                    return "Max Defect Rate  [dominant defect — see Campbell panel]"
+                if bare == 'defect_concentration':
+                    return "Defect Concentration  [aggregate — see Campbell panel]"
+                if bare in ('n_defect_types', 'has_multiple_defects'):
+                    return f"{bare.replace('_',' ').title()}  [multi-defect flag]"
+
+                if bare in ('global_scrap_probability', 'defect_cluster_probability'):
+                    return f"{bare.replace('_',' ').title()}  [model signal]"
+
+                _mtts_set = {
+                    'mtts_runs','hazard_rate','reliability_score',
+                    'runs_since_last_failure','cumulative_scrap_in_cycle',
+                    'degradation_velocity','degradation_acceleration',
+                    'cycle_hazard_indicator','rul_proxy',
+                }
+                if bare in _mtts_set:
+                    return f"{bare.replace('_',' ').title()}  [MTTS/reliability]"
+
+                _temp_set = {
+                    'total_defect_rate_trend','total_defect_rate_roll3',
+                    'scrap_percent_trend','scrap_percent_roll3',
+                    'month','quarter',
+                    'scrap_percent_roll3','total_defect_rate_roll3',
+                }
+                if bare in _temp_set:
+                    return f"{bare.replace('_',' ').title()}  [temporal]"
+
+                if '_x_' in bare:
+                    parts = bare.split('_x_')
+                    labels = []
+                    for p in parts:
+                        dc = p + '_rate'
+                        if dc in DEFECT_TO_PROCESS:
+                            labels.append(
+                                f"{p.replace('_',' ').title()} "
+                                f"({DEFECT_TO_PROCESS[dc]})"
+                            )
+                        else:
+                            labels.append(p.replace('_', ' ').title())
+                    return "Interaction: " + " × ".join(labels)
+
+                return bare.replace('_', ' ').title()
+
             # ── Helper: run LIME pattern for one stage ───────────────────
             def _run_stage_pattern(sc, fail_df, max_runs=20):
                 feats = sc['features']
@@ -3807,17 +3872,26 @@ def main():
                     st.info("No explanation data.")
                     return
                 df_l = pd.DataFrame(expl, columns=['Feature', 'Weight'])
+                # Build enriched y-axis labels: defect name + Campbell process
+                def _enrich(feat_str):
+                    bare = feat_str.split(' ')[0].strip()
+                    annotation = _annotate_feat(bare)
+                    # Keep the LIME numeric condition after the bare name
+                    condition = feat_str[len(bare):].strip()
+                    return f"{annotation}  [{condition}]" if condition else annotation
+                df_l['Label'] = df_l['Feature'].apply(_enrich)
                 df_l = df_l.sort_values('Weight')
                 colors = ['#EF5350' if w > 0 else '#66BB6A' for w in df_l['Weight']]
                 fig = go.Figure(go.Bar(
-                    x=df_l['Weight'], y=df_l['Feature'],
+                    x=df_l['Weight'], y=df_l['Label'],
                     orientation='h', marker_color=colors,
                     text=[f"{w:+.3f}" for w in df_l['Weight']],
                     textposition='outside'
                 ))
                 fig.update_layout(
-                    title=title, xaxis_title="Weight", yaxis_title="Feature",
-                    height=height, showlegend=False,
+                    title=title, xaxis_title="Weight", yaxis_title="",
+                    height=max(height, len(df_l) * 45 + 80),
+                    showlegend=False,
                     xaxis=dict(zeroline=True, zerolinewidth=2, zerolinecolor='black'),
                     margin=dict(l=10, r=10, t=40, b=10)
                 )
@@ -3840,7 +3914,7 @@ def main():
                 ))
                 top10 = dict(list(avg.items())[:10])
                 pairs = sorted(top10.items(), key=lambda x: x[1])
-                fn_s = [p[0] for p in pairs]
+                fn_s = [_annotate_feat(p[0]) for p in pairs]
                 fv_s = [p[1] for p in pairs]
                 colors = ['#EF5350' if v > 0 else '#66BB6A' for v in fv_s]
                 full_title = title + (f"  (threshold: {threshold_label})" if threshold_label else "")
@@ -3851,7 +3925,9 @@ def main():
                 fig.update_layout(
                     title=full_title,
                     xaxis_title="Avg Weight (across Stages 1, 2, 3)",
-                    yaxis_title="Feature", height=420, showlegend=False,
+                    yaxis_title="",
+                    height=max(420, len(fn_s) * 48 + 80),
+                    showlegend=False,
                     xaxis=dict(zeroline=True, zerolinewidth=2, zerolinecolor='black'),
                     margin=dict(l=10, r=10, t=50, b=10)
                 )
@@ -4032,7 +4108,7 @@ def main():
                                           f"{pr['n_explained']}/{pr['n_runs']}")
                                 top10 = dict(list(pr['avg_weights'].items())[:10])
                                 pairs = sorted(top10.items(), key=lambda x: x[1])
-                                fn_s = [p[0] for p in pairs]
+                                fn_s = [_annotate_feat(p[0]) for p in pairs]
                                 fv_s = [p[1] for p in pairs]
                                 colors = ['#EF5350' if v > 0 else '#66BB6A' for v in fv_s]
                                 fig = go.Figure(go.Bar(
@@ -4044,8 +4120,9 @@ def main():
                                 fig.update_layout(
                                     title=f"{sc['name']}: Avg Weights",
                                     xaxis_title="Avg Weight",
-                                    yaxis_title="Feature",
-                                    height=370, showlegend=False,
+                                    yaxis_title="",
+                                    height=max(370, len(fn_s) * 45 + 80),
+                                    showlegend=False,
                                     xaxis=dict(zeroline=True, zerolinewidth=2,
                                                zerolinecolor='black'),
                                     margin=dict(l=10, r=10, t=40, b=10)
@@ -4106,6 +4183,161 @@ def main():
                         )
                     else:
                         st.info("No failure LIME data to attribute to Campbell processes.")
+
+                    # ── Pareto vs. LIME Reconciliation ────────────────────
+                    st.markdown("---")
+                    st.markdown("#### ⚖️ Pareto vs. LIME Reconciliation")
+                    st.caption(
+                        "*When the Failure-Conditional Pareto and the LIME Campbell attribution "
+                        "point to different processes, this panel explains why and which signal "
+                        "to act on.*"
+                    )
+
+                    # Derive top Pareto process from analysis_df + failure_df
+                    _recon_pareto_top = None
+                    _recon_pareto_defect = None
+                    try:
+                        _par_data = []
+                        for _dc in defect_cols:
+                            if _dc not in DEFECT_TO_PROCESS:
+                                continue
+                            if _dc not in analysis_df.columns:
+                                continue
+                            _hist = analysis_df[_dc].mean() * 100
+                            if _hist <= 0:
+                                continue
+                            _fail_r = (
+                                failure_df[_dc].mean() * 100
+                                if n_failures > 0 else _hist
+                            )
+                            _mult = _fail_r / _hist if _hist > 0 else 1.0
+                            _par_data.append({
+                                'defect_col': _dc,
+                                'process': DEFECT_TO_PROCESS[_dc],
+                                'fail_rate': _fail_r,
+                                'multiplier': _mult,
+                            })
+                        if _par_data:
+                            _par_df = pd.DataFrame(_par_data)
+                            # Top Pareto process by elevation × failure rate
+                            _par_df['signal'] = _par_df['fail_rate'] * _par_df['multiplier']
+                            _par_df_top = _par_df.sort_values('signal', ascending=False).iloc[0]
+                            _recon_pareto_top = _par_df_top['process']
+                            _recon_pareto_defect = _par_df_top['defect_col'].replace('_rate','').replace('_',' ').title()
+                    except Exception:
+                        pass
+
+                    # Top LIME Campbell process
+                    _recon_lime_top = None
+                    _recon_lime_defects = []
+                    try:
+                        if n_stages_fail > 0 and _fail_avg_proc:
+                            _recon_lime_top = max(
+                                _fail_avg_proc, key=lambda x: abs(_fail_avg_proc[x])
+                            )
+                            _recon_lime_defects = PROCESS_DEFECT_MAP.get(
+                                _recon_lime_top, {}
+                            ).get('defects', [])
+                    except Exception:
+                        pass
+
+                    if _recon_pareto_top and _recon_lime_top:
+                        _agree = (_recon_pareto_top == _recon_lime_top)
+
+                        # Summary agreement metric
+                        _rc1, _rc2 = st.columns(2)
+                        with _rc1:
+                            st.metric(
+                                "Pareto Top Process",
+                                _recon_pareto_top,
+                                help=f"Highest elevated defect during failures: {_recon_pareto_defect}"
+                            )
+                        with _rc2:
+                            st.metric(
+                                "LIME Top Process",
+                                _recon_lime_top,
+                                help=(
+                                    "Process with highest cumulative LIME weight "
+                                    "after defect decomposition. Defects: "
+                                    + ", ".join(_recon_lime_defects)
+                                )
+                            )
+
+                        if _agree:
+                            st.success(
+                                f"✅ **Both signals agree: {_recon_pareto_top}** — "
+                                "high-confidence intervention target.  The Pareto shows this "
+                                "process's defects are most elevated during failures, and the "
+                                "Random Forest independently learned to weight this process's "
+                                "defects most heavily for discrimination.  Act here first."
+                            )
+                        else:
+                            st.warning(
+                                f"⚠️ **Signals diverge — Pareto → {_recon_pareto_top} | "
+                                f"LIME → {_recon_lime_top}**"
+                            )
+                            with st.expander(
+                                "📖 How to interpret this divergence — click to expand"
+                            ):
+                                st.markdown(f"""
+**What each signal measures**
+
+| Signal | What it counts | Basis |
+|--------|---------------|-------|
+| **Pareto** | Which defect has the highest rate *during* failure events, weighted by how much it exceeds its historical baseline (elevation ratio) | Descriptive frequency analysis of {n_failures} failure run(s) |
+| **LIME** | Which defects the Random Forest *learned* to use as the strongest discriminators between failure and non-failure, averaged across {n_failures} failure run(s) through all three hierarchy stages | Model-learned weights via local linear approximation |
+
+---
+
+**Why they can diverge**
+
+*Case 1 — The Pareto defect is a symptom, not a cause.*
+The top Pareto defect ({_recon_pareto_defect} → **{_recon_pareto_top}**) may be highly elevated
+during failures simply because it is a downstream consequence of the real root cause.
+The RF may have learned that another defect is the *leading* indicator — it appears first
+in the run history before failure — while the Pareto defect appears at the same time as
+the failure and therefore looks correlated but is not predictive.
+
+*Case 2 — The LIME defect is a detection-stage artifact.*
+If the LIME top process is Inspection (e.g., `zyglo_rate`, `outside_process_scrap_rate`),
+the RF may have learned these as failure proxies even though they are classification
+labels, not process origins.  In that case, trust the Pareto for the process to intervene on.
+
+*Case 3 — Multi-cause defect.*
+Some defects map to one Campbell process in this framework but can originate from
+multiple processes in a specific foundry.  For example, porosity can originate from
+Melting (gas entrainment), Core Making (core outgassing), or Gating Design (turbulence).
+If the dataset terminology does not distinguish cause, both signals may be partially correct.
+
+---
+
+**Decision rule for the foundry manager**
+
+1. **If the LIME top process is not Inspection or Finishing** → prefer LIME.
+   The RF has seen the full feature space including run history and MTTS signals.
+   It is telling you which defect accumulation pattern *preceded* failure events,
+   not just which defect was present at failure time.
+
+2. **If the LIME top process is Inspection or Finishing** → use the Pareto.
+   Detection-stage classifications are not process-origin signals.  The RF may be
+   over-weighting these because they are correlated with scrap by definition.
+
+3. **Check whether the processes share defects** — if both processes appear in the
+   top 3 of the LIME Campbell bar, investigate both.  The divergence may be noise
+   rather than a genuine disagreement.
+
+4. **Validate against your foundry's process knowledge.**
+   This framework is a proof-of-concept mapping (Campbell, 2003).  Your process
+   engineers should confirm whether the implicated defect actually originates from
+   the mapped process stage in your specific equipment configuration.
+""")
+
+                    elif not _recon_pareto_top or not _recon_lime_top:
+                        st.info(
+                            "Reconciliation requires both Pareto defect data and LIME "
+                            "Campbell attribution.  Ensure the threshold slider produces "
+                            "at least one failure run."
+                        )
 
                     with st.expander("📋 Numerical Detail — All 3 Stage Patterns"):
                         for sc, pr in zip(_stage_cfgs, _pat_results):
