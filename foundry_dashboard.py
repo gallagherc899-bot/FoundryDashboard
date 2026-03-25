@@ -6372,237 +6372,232 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             <strong>Projection Logic:</strong> Months 33–64 mirror the Month 1–32 order pattern rescheduled
             with top-8 priority parts running first each month. Each top-8 run reduces its active Pareto
             defects by 0.5% total (distributed equally across active defects). Reductions carry forward
-            globally to all facility parts sharing those defects. Floor = each part\'s historical minimum scrap%.
+            globally to all facility parts sharing those defects. Floor = each part's historical minimum scrap%.
             <br><strong>Conservative claim:</strong> Model never projects below what has already been demonstrated.
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Try to load projection data ───────────────────────────────────
-        PROJ_EXCEL_PATHS = [
-            "Foundry_PM_Projection.xlsx",
-            "/home/claude/Foundry_PM_Projection.xlsx",
-            "data/Foundry_PM_Projection.xlsx",
-        ]
-        proj_xl = None
-        for pp in PROJ_EXCEL_PATHS:
-            try:
-                proj_xl = pd.ExcelFile(pp)
-                break
-            except Exception:
-                continue
+        # ── Embedded projection data (from sim64_v3 simulation) ───────────
+        _hist_mo = {
+            1:6.0457,2:4.7150,3:3.0072,4:3.9289,5:1.7964,6:3.4186,
+            7:3.5600,8:7.9633,9:7.9682,10:6.0478,11:4.4875,12:5.4421,
+            13:7.1241,14:7.0552,15:5.9763,16:4.2630,17:7.7667,18:5.2848,
+            19:3.8604,20:4.1769,21:4.1493,22:3.0585,23:4.6963,24:2.4482,
+            25:2.2924,26:3.2894,27:6.0848,28:4.2234,29:5.2317,30:6.5476,
+            31:4.4938,32:5.4519,
+        }
+        _proj_mo = {
+            33:4.2275,34:3.2907,35:3.2980,36:3.7712,37:4.0497,38:3.1511,
+            39:3.7377,40:5.0065,41:5.2048,42:4.3126,43:4.8494,44:4.1564,
+            45:5.5667,46:5.0642,47:5.4636,48:3.7900,49:5.8981,50:4.3807,
+            51:3.7441,52:4.4929,53:4.2482,54:3.1748,55:4.2750,56:3.7951,
+            57:2.9999,58:3.7938,59:5.9598,60:4.7520,61:3.5350,62:5.0945,
+            63:5.4463,64:4.5912,
+        }
+        _avd_mo = {
+            33:110.8,34:65.3,35:38.1,36:189.9,37:0.0,38:239.1,
+            39:57.4,40:1292.2,41:881.3,42:1362.5,43:574.5,44:1074.6,
+            45:1079.5,46:2564.5,47:2130.1,48:1704.8,49:977.4,50:1543.3,
+            51:404.4,52:739.9,53:558.5,54:515.6,55:537.3,56:57.0,
+            57:207.0,58:136.8,59:80.7,60:152.5,61:279.6,62:58.0,
+            63:319.0,64:136.8,
+        }
+        _ps_mo = {
+            33:8,34:10,35:16,36:12,37:0,38:16,39:6,40:106,41:27,42:72,
+            43:92,44:317,45:146,46:278,47:180,48:106,49:108,50:122,
+            51:57,52:36,53:120,54:38,55:30,56:8,57:35,58:10,59:16,
+            60:16,61:68,62:5,63:15,64:15,
+        }
+        _hist_avg = 4.9757
+        _doe      = 2519.0
+        _y1_avd=5886; _y2_avd=12812; _y3_avd=1370
+        _y1_ps=682;   _y2_ps=1229;   _y3_ps=181
+        cal_labels = {i: (pd.Timestamp("2023-01-01")+pd.DateOffset(months=i-1)).strftime("%b %Y") for i in range(1,65)}
 
-        if proj_xl is not None:
-            # Monthly Summary
-            try:
-                ms_df = proj_xl.parse("Monthly Summary")
-                ms_df.columns = ms_df.columns.str.strip()
-            except Exception:
-                ms_df = None
+        # ── Headline metrics ──────────────────────────────────────────────
+        col_h1, col_h2, col_h3, col_h4 = st.columns(4)
+        col_h1.metric("Annualized Avoided", "7,526 lbs/yr", "DOE target: 2,519 lbs/yr")
+        col_h2.metric("DOE Target Achievement", "299%", "H3 ✓ PASS")
+        col_h3.metric("Year 1 Avoided", f"{_y1_avd:,} lbs", "Months 33–44")
+        col_h4.metric("Year 2 Avoided", f"{_y2_avd:,} lbs", f"2.2× Year 1 — compound acceleration")
 
-            # ── Headline metrics ──────────────────────────────────────────
-            col_h1, col_h2, col_h3, col_h4 = st.columns(4)
-            col_h1.metric("Annualized Avoided", "7,526 lbs/yr", "vs DOE target 2,519 lbs/yr")
-            col_h2.metric("DOE Target Achievement", "299%", "H3 ✓ PASS")
-            col_h3.metric("Year 1 Avoided", "5,886 lbs", "Months 33–44")
-            col_h4.metric("Year 2 Avoided", "12,812 lbs", "2.2× Year 1 compound")
+        st.markdown("---")
 
-            st.markdown("---")
+        # ── 64-Month Scrap% Line Chart ────────────────────────────────────
+        st.markdown("#### Facility-Wide Average Scrap % — Historical (Mo 1–32) vs Projected PM (Mo 33–64)")
+        fig_64 = go.Figure()
+        hist_x = list(_hist_mo.keys())
+        hist_y = list(_hist_mo.values())
+        proj_x = list(_proj_mo.keys())
+        proj_y = list(_proj_mo.values())
+        fig_64.add_trace(go.Scatter(
+            x=hist_x, y=hist_y, mode="lines+markers",
+            name="Historical Mo 1–32",
+            line=dict(color="#1F4E79", width=2.5),
+            marker=dict(size=5),
+            hovertemplate="Mo %{x}: %{y:.2f}%<extra>Historical</extra>"
+        ))
+        fig_64.add_trace(go.Scatter(
+            x=proj_x, y=proj_y, mode="lines+markers",
+            name="Projected with PM Improvements Mo 33–64",
+            line=dict(color="#ED7D31", width=2.5),
+            marker=dict(size=5),
+            hovertemplate="Mo %{x}: %{y:.2f}%<extra>Projected</extra>"
+        ))
+        fig_64.add_hline(y=_hist_avg, line_dash="dash", line_color="#888888",
+                          annotation_text=f"32-mo hist mean {_hist_avg:.2f}%",
+                          annotation_position="right")
+        fig_64.add_vrect(x0=32.5, x1=64.5, fillcolor="#FFF3E0", opacity=0.15,
+                          layer="below", line_width=0,
+                          annotation_text="◀ Projected PM Period", annotation_position="top left")
+        fig_64.update_layout(
+            height=420,
+            xaxis=dict(title="Month  (1–32 = Historical  |  33–64 = Projected)",
+                       tickvals=list(range(1,65,4)),
+                       ticktext=[cal_labels[i] for i in range(1,65,4)],
+                       tickangle=-45),
+            yaxis=dict(title="Facility Avg Scrap %", ticksuffix="%"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            margin=dict(t=20, b=80, l=55, r=20)
+        )
+        st.plotly_chart(fig_64, use_container_width=True)
 
-            # ── 64-Month Scrap% Line Chart ────────────────────────────────
-            try:
-                chart_df = proj_xl.parse("64-Mo Scrap% Chart")
-                chart_df.columns = chart_df.columns.str.strip()
-                st.markdown("#### Facility-Wide Average Scrap % — Historical vs Projected (64 Months)")
+        # Download chart data as CSV
+        _chart_rows = (
+            [{"Month":mo,"Calendar":cal_labels[mo],"Type":"Historical","Avg Scrap%":round(v,4)}
+             for mo,v in _hist_mo.items()] +
+            [{"Month":mo,"Calendar":cal_labels[mo],"Type":"Projected","Avg Scrap%":round(v,4),
+              "Scrap Avoided (lbs)":round(_avd_mo.get(mo,0),1)}
+             for mo,v in _proj_mo.items()]
+        )
+        _chart_csv = pd.DataFrame(_chart_rows).to_csv(index=False)
+        st.download_button("⬇️ Download 64-Month Chart Data (CSV)",
+                           data=_chart_csv, file_name="64mo_scrap_chart.csv",
+                           mime="text/csv", key="dl_64mo_csv")
 
-                fig_64 = go.Figure()
-                # Historical (months 1-32)
-                hist_mask = chart_df.iloc[:,0].between(1,32) if chart_df.shape[1]>2 else pd.Series(False, index=chart_df.index)
-                proj_mask = chart_df.iloc[:,0].between(33,64) if chart_df.shape[1]>2 else pd.Series(False, index=chart_df.index)
+        st.markdown("---")
 
-                hist_data = chart_df[chart_df.iloc[:,0].between(1,32)]
-                proj_data = chart_df[chart_df.iloc[:,0].between(33,64)]
+        # ── Scrap Avoided Monthly Bar ─────────────────────────────────────
+        st.markdown("#### Monthly Scrap Avoided (lbs) — Months 33–64")
+        fig_avd = go.Figure(go.Bar(
+            x=[cal_labels[mo] for mo in range(33,65)],
+            y=[_avd_mo.get(mo,0) for mo in range(33,65)],
+            marker_color=["#1F4E79" if mo<=44 else "#ED7D31" if mo<=56 else "#4472C4"
+                          for mo in range(33,65)],
+            hovertemplate="%{x}: %{y:,.0f} lbs avoided<extra></extra>"
+        ))
+        fig_avd.add_hline(y=_doe/12, line_dash="dash", line_color="#C00000",
+                           annotation_text=f"DOE monthly target ({_doe/12:,.0f} lbs/mo)")
+        fig_avd.update_layout(
+            height=320,
+            xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
+            yaxis=dict(title="Lbs Avoided", tickformat=","),
+            margin=dict(t=20, b=80, l=55, r=20),
+            showlegend=False
+        )
+        # Color legend
+        st.plotly_chart(fig_avd, use_container_width=True)
+        st.caption("🔵 Year 1 (Mo 33–44)  🟠 Year 2 (Mo 45–56) — compound acceleration  🔷 Year 3 partial (Mo 57–64)")
 
-                if len(hist_data) > 0 and chart_df.shape[1] >= 3:
-                    fig_64.add_trace(go.Scatter(
-                        x=hist_data.iloc[:,0].tolist(),
-                        y=(hist_data.iloc[:,2].fillna(0)*100).tolist(),
-                        mode="lines+markers", name="Historical Mo 1–32",
-                        line=dict(color="#1F4E79", width=2.5),
-                        marker=dict(size=5)
-                    ))
-                if len(proj_data) > 0 and chart_df.shape[1] >= 4:
-                    fig_64.add_trace(go.Scatter(
-                        x=proj_data.iloc[:,0].tolist(),
-                        y=(proj_data.iloc[:,3].fillna(0)*100).tolist(),
-                        mode="lines+markers", name="Projected PM Improvement Mo 33–64",
-                        line=dict(color="#ED7D31", width=2.5),
-                        marker=dict(size=5)
-                    ))
-                # Reference line
-                fig_64.add_hline(y=4.976, line_dash="dash", line_color="#999999",
-                                  annotation_text="32-mo hist mean 4.976%")
+        st.markdown("---")
 
-                fig_64.add_vrect(x0=32.5, x1=64.5, fillcolor="#FFF3E0",
-                                  opacity=0.15, layer="below", line_width=0,
-                                  annotation_text="Projected PM Period", annotation_position="top left")
+        # ── Scenario A vs B bar chart + pieces saved ──────────────────────
+        col_bar1, col_bar2 = st.columns([3,2])
+        with col_bar1:
+            st.markdown("#### Scrap Avoided — Scenario A (Top-8 Only) vs Scenario B (Full Model)")
+            _periods  = ["Year 1\n(Mo 33–44)", "Year 2\n(Mo 45–56)", "Annualized"]
+            _t8_vals  = [3600, 4514, 3132]
+            _full_vals = [5886, 12812, 7526]
+            fig_ab = go.Figure()
+            fig_ab.add_trace(go.Bar(name="Scenario A: Top-8 Only (no spillover)",
+                                    x=_periods, y=_t8_vals, marker_color="#1F4E79",
+                                    text=[f"{v:,}" for v in _t8_vals], textposition="outside"))
+            fig_ab.add_trace(go.Bar(name="Scenario B: Full Model (top-8 + spillover)",
+                                    x=_periods, y=_full_vals, marker_color="#ED7D31",
+                                    text=[f"{v:,}" for v in _full_vals], textposition="outside"))
+            fig_ab.add_hline(y=2519, line_dash="dash", line_color="#C00000",
+                              annotation_text="DOE target: 2,519 lbs/yr", annotation_position="right")
+            fig_ab.update_layout(barmode="group", height=360,
+                                  yaxis_title="Lbs Avoided",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                                  margin=dict(t=20, b=50, l=55, r=20))
+            st.plotly_chart(fig_ab, use_container_width=True)
 
-                fig_64.update_layout(
-                    height=400, xaxis_title="Month", yaxis_title="Avg Scrap %",
-                    yaxis=dict(tickformat=".1f", ticksuffix="%"),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    margin=dict(t=30, b=40, l=50, r=20)
-                )
-                st.plotly_chart(fig_64, use_container_width=True)
+        with col_bar2:
+            st.markdown("#### Key Findings")
+            st.markdown(f"""
+            | Scenario | Annualized | vs DOE | H3 |
+            |----------|-----------|--------|-----|
+            | **A: Top-8 only** | **3,132 lbs/yr** | **124%** | **✓ PASS** |
+            | **B: Full model** | **7,526 lbs/yr** | **299%** | **✓ PASS** |
 
-                # Download chart data
-                csv_64 = chart_df.to_csv(index=False)
-                st.download_button("⬇️ Download 64-Month Chart Data (CSV)",
-                                   data=csv_64, file_name="64mo_scrap_chart.csv",
-                                   mime="text/csv", key="dl_64mo_csv")
-            except Exception as e:
-                st.warning(f"64-Month chart data not available: {e}")
+            **8 parts out of 359 (2.2%) alone exceed the benchmark.**
 
-            st.markdown("---")
+            Spillover mechanism: PM on Melting + Sand System carries forward to
+            **67% of all facility parts** sharing those defect families.
 
-            # ── Year-by-Year Avoided Scrap Bar Chart ─────────────────────
-            st.markdown("#### Scrap Avoided by Year — Top-8 Only vs Full Model")
-            col_bar1, col_bar2 = st.columns([2,1])
-            with col_bar1:
-                years  = ["Year 1 (Mo 33–44)", "Year 2 (Mo 45–56)", "Annualized"]
-                t8_vals= [3600, 4514, 3132]
-                full_vals=[5886, 12812, 7526]
-
-                fig_bar = go.Figure()
-                fig_bar.add_trace(go.Bar(
-                    name="Scenario A: Top-8 Only (no spillover)",
-                    x=years, y=t8_vals,
-                    marker_color="#1F4E79",
-                    text=[f"{v:,}" for v in t8_vals], textposition="outside"
-                ))
-                fig_bar.add_trace(go.Bar(
-                    name="Scenario B: Full Model (top-8 + spillover)",
-                    x=years, y=full_vals,
-                    marker_color="#ED7D31",
-                    text=[f"{v:,}" for v in full_vals], textposition="outside"
-                ))
-                fig_bar.add_hline(y=2519, line_dash="dash", line_color="#C00000",
-                                   annotation_text="DOE 10% target: 2,519 lbs/yr")
-                fig_bar.update_layout(
-                    barmode="group", height=380, yaxis_title="Lbs Avoided",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    margin=dict(t=30, b=40)
-                )
-                st.plotly_chart(fig_bar, use_container_width=True)
-
-            with col_bar2:
-                st.markdown("""
-                **Key finding:**
-                - Top-8 alone: **3,132 lbs/yr = 124% of DOE target ✓**
-                - Full model: **7,526 lbs/yr = 299% of DOE target ✓**
-                - 8 parts (2.2% of 359) exceed the benchmark alone
-                - Spillover carries improvements to 67% of facility parts
-                
-                *"What is good for the most is good for the little"*
-                """)
-
-            st.markdown("---")
-
-            # ── Pieces Saved Chart ────────────────────────────────────────
-            st.markdown("#### Production & Quality — Pieces Saved from Scrap")
-            col_pq1, col_pq2 = st.columns([2,1])
-            with col_pq1:
-                try:
-                    pq_df = proj_xl.parse("Production & Quality")
-                    # Find monthly pieces saved columns
-                    mo_col_mask = pq_df.iloc[:,0].apply(lambda x: isinstance(x,(int,float)) and 33<=x<=64)
-                    pq_monthly = pq_df[mo_col_mask] if mo_col_mask.any() else None
-
-                    fig_pq = go.Figure()
-                    fig_pq.add_trace(go.Bar(
-                        x=list(range(33,65)), y=[50]*32,  # placeholder — will be overridden
-                        name="Pieces Saved",
-                        marker_color="#70AD47"
-                    ))
-                    # Use known values
-                    mo_range = list(range(33,65))
-                    # Build from known year totals proportionally
-                    fig_pq.data = []
-                    fig_pq.add_trace(go.Bar(
-                        x=["Year 1\n(Mo 33–44)", "Year 2\n(Mo 45–56)", "Year 3 Partial\n(Mo 57–64)", "Total"],
-                        y=[682, 1229, 181, 2091],
-                        text=["682", "1,229", "181", "2,091"],
-                        textposition="outside",
-                        marker_color=["#1F4E79","#ED7D31","#4472C4","#70AD47"],
-                        name="Pieces Saved from Scrap"
-                    ))
-                    fig_pq.update_layout(
-                        height=340, yaxis_title="Pieces Delivered to Customer (not scrapped)",
-                        showlegend=False, margin=dict(t=30,b=40)
-                    )
-                    st.plotly_chart(fig_pq, use_container_width=True)
-                except Exception:
-                    # Fallback hardcoded chart
-                    fig_pq = go.Figure(go.Bar(
-                        x=["Year 1 (Mo 33–44)", "Year 2 (Mo 45–56)", "Year 3 Partial", "Total 32-Mo"],
-                        y=[682, 1229, 181, 2091],
-                        text=["682", "1,229", "181", "2,091"],
-                        textposition="outside",
-                        marker_color=["#1F4E79","#ED7D31","#4472C4","#70AD47"]
-                    ))
-                    fig_pq.update_layout(height=340, yaxis_title="Pieces Saved from Scrap",
-                                          showlegend=False, margin=dict(t=30,b=40))
-                    st.plotly_chart(fig_pq, use_container_width=True)
-
-            with col_pq2:
-                st.markdown("""
-                **Production + Quality Metrics:**
-                | Metric | Value |
-                |--------|-------|
-                | Total pieces saved | **2,091** |
-                | Annualized | **784 pieces/yr** |
-                | Good metal delivered | **20,085 lbs** |
-                | Facility yield gain | **+0.73 pp** |
-                
-                Each piece saved = one more casting
-                delivered to the customer instead of
-                re-melted. Same labor, energy, and
-                raw material — finished product output.
-                """)
-
-            st.markdown("---")
-
-            # ── H3 Validation Summary ─────────────────────────────────────
-            st.markdown("#### H3 Validation — DOE ENERGY STAR 10% Annual Reduction")
-            col_h3a, col_h3b, col_h3c = st.columns(3)
-            col_h3a.metric("Annualized Scrap Avoided", "7,526 lbs/yr",
-                            f"DOE target: 2,519 lbs/yr")
-            col_h3b.metric("vs DOE Target", "299%", "H3 ✓ PASS")
-            col_h3c.metric("Top-8 Only (conservative)", "3,132 lbs/yr",
-                            "124% of DOE — H3 ✓ PASS even without spillover")
-
-            st.markdown("""
-            > **Conservative claim:** Even under the most restrictive assumption — that PM improvements
-            > affect only the 8 priority parts and no other parts in the facility — the framework exceeds
-            > the DOE 10% annual target by 24%. With the physically correct process carry-forward (all
-            > castings sharing improved defect families benefit), the framework achieves 299% of the target.
+            *"What is good for the most is good for the little."*
             """)
 
-            # Download projection Excel
-            try:
-                with open("/home/claude/Foundry_PM_Projection.xlsx","rb") as f:
-                    xl_bytes = f.read()
-                st.download_button("⬇️ Download Full PM Projection Workbook (Excel)",
-                                   data=xl_bytes,
-                                   file_name="Foundry_PM_Projection.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   key="dl_proj_xl")
-            except Exception:
-                pass
+        st.markdown("---")
 
-        else:
-            st.warning("Foundry_PM_Projection.xlsx not found in the expected paths. "
-                       "Place it alongside this dashboard script or in the /home/claude/ directory.")
-            st.info("Expected paths: Foundry_PM_Projection.xlsx or /home/claude/Foundry_PM_Projection.xlsx")
+        # ── Production & Quality ──────────────────────────────────────────
+        st.markdown("#### Production & Quality — Pieces Saved from Scrap")
+        col_pq1, col_pq2 = st.columns([3,2])
+        with col_pq1:
+            _ps_vals = [_y1_ps, _y2_ps, _y3_ps, _y1_ps+_y2_ps+_y3_ps]
+            _ps_lbls = ["Year 1\n(Mo 33–44)", "Year 2\n(Mo 45–56)",
+                        "Year 3 partial\n(Mo 57–64)", "Total 32-Mo"]
+            fig_ps = go.Figure(go.Bar(
+                x=_ps_lbls, y=_ps_vals,
+                text=[f"{v:,}" for v in _ps_vals], textposition="outside",
+                marker_color=["#1F4E79","#ED7D31","#4472C4","#70AD47"]
+            ))
+            fig_ps.update_layout(height=320, yaxis_title="Pieces Delivered to Customer (not scrapped)",
+                                  showlegend=False, margin=dict(t=20,b=50,l=55,r=20))
+            st.plotly_chart(fig_ps, use_container_width=True)
+
+        with col_pq2:
+            st.markdown("#### Production Yield Metrics")
+            st.markdown(f"""
+            | Metric | Value |
+            |--------|-------|
+            | Total pieces saved (32-mo) | **2,091** |
+            | Annualized | **784 pieces/yr** |
+            | Good metal delivered | **20,085 lbs** |
+            | Facility yield gain | **+0.73 pp** |
+
+            Every piece = one more casting reaching
+            the customer instead of the scrap bin.
+            Same labor, energy, raw material → 
+            finished product, not recycled metal.
+            """)
+
+        st.markdown("---")
+
+        # ── H3 Validation ─────────────────────────────────────────────────
+        st.markdown("#### H3 Validation — DOE ENERGY STAR 10% Annual Reduction")
+        col_v1, col_v2, col_v3 = st.columns(3)
+        col_v1.metric("Annualized Avoided", "7,526 lbs/yr",
+                       f"Basis: 25,194 lbs/yr annualized facility scrap")
+        col_v2.metric("vs DOE 10% Target (2,519 lbs/yr)", "299%", "H3 ✓ PASS")
+        col_v3.metric("Top-8 Only (conservative floor)", "3,132 lbs/yr",
+                       "124% — H3 ✓ PASS without any spillover")
+        st.success("""**H3 ✓ PASS** — Even under the most conservative assumption (top-8 parts only, 
+        no process carry-forward), the framework exceeds the DOE 10% annual target by 24%. 
+        With the physically correct process-level carry-forward (Scenario B), it achieves 299% of the target.""")
+
+        # Download projection Excel
+        _proj_paths = ["/home/claude/Foundry_PM_Projection.xlsx", "Foundry_PM_Projection.xlsx"]
+        for _pp in _proj_paths:
+            try:
+                with open(_pp,"rb") as _f: _xl = _f.read()
+                st.download_button("⬇️ Download Full PM Projection Workbook (Excel)",
+                                   data=_xl, file_name="Foundry_PM_Projection.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="dl_proj_xl_t8")
+                break
+            except Exception: continue
 
     with tab9:
         st.header("⬇️ Downloads — Scripts, Data, and Reference Files")
