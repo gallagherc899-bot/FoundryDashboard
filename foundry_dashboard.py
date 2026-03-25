@@ -6174,22 +6174,46 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         last_run_proc = "—"
 
         try:
-            # Score last run through global model Stage 3
+            # Properly prepare last run through the three-stage pipeline
             part_data_s = part_data_t7.copy()
-            last_row = part_data_s.iloc[[-1]]
+
+            # Step 1: Add multi-defect and temporal features
+            part_data_s = add_multi_defect_features(part_data_s, defect_cols)
+            part_data_s = add_temporal_features(part_data_s)
+
+            # Step 2: Add MPTS sequential features
+            part_data_s = add_mtts_features(part_data_s, part_threshold_t7)
+
+            # Step 3: Attach training-derived features (mean_scrap_rate_train, part_freq)
+            part_data_s = attach_train_features(
+                part_data_s,
+                global_model["scrap_rate_train"],
+                global_model["part_freq_train"],
+                global_model["default_scrap_rate"],
+                global_model["default_freq"],
+            )
+
+            # Step 4: Add Stage 1 and Stage 2 inherited probabilities
+            part_data_s = add_stage1_features(part_data_s, global_model["stage1"], defect_cols)
+            part_data_s = add_stage2_features(part_data_s, global_model["stage2"], defect_cols)
+
+            # Step 5: Score last run with the final Stage 3 calibrated model
+            last_row  = part_data_s.iloc[[-1]]
             feat_cols = global_model["features"]
             last_feat = last_row.reindex(columns=feat_cols, fill_value=0).fillna(0)
-            rf_last_prob = round(float(global_model["model"].predict_proba(last_feat)[:,1][0]) * 100, 1)
+            rf_last_prob = round(float(global_model["cal_model"].predict_proba(last_feat)[:,1][0]) * 100, 1)
 
-            # Last-run active defect
-            last_rates = {c: float(last_row[c].iloc[0]) for c in defect_cols
-                          if c in last_row.columns and float(last_row[c].iloc[0]) > 0}
+            # Last-run active defect (from raw data, not feature-engineered)
+            raw_last = part_data_t7.iloc[-1]
+            last_rates = {c: float(raw_last[c]) for c in defect_cols
+                          if c in part_data_t7.columns and float(raw_last[c]) > 0}
             if last_rates:
                 top_dc = max(last_rates, key=last_rates.get)
                 last_run_def  = top_dc.replace("_rate","").replace("_"," ").title()
                 last_run_proc = DEFECT_TO_PROC.get(top_dc, "—")
-        except Exception:
-            rf_last_prob  = pooled_t7.get("rf_prob", None)
+        except Exception as _rf_err:
+            # Fallback: use pooled MTTS-based estimate if RF pipeline fails
+            rf_last_prob = pooled_t7.get("rf_prob", None)
 
         # ── Divergence & scenario ─────────────────────────────────────────
         DIV_THR = 5.0
@@ -6249,7 +6273,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             | Threshold (avg scrap%) | {part_threshold_t7:.3f}% |
             | Chronic Top Defect | {mpts_top_def} |
             | **Chronic Campbell Process** | **{mpts_top_proc}** |
-            | Calibration MAE (22-part cohort) | ~5.8 pp |
+            | Prob. Calibration MAE (22-part cohort) | 5.8pp MPTS vs 19.8pp RF — MPTS 3.4× more accurate |
             """)
             st.caption("Eq 3.1: MPTS = Total Parts ÷ Failure Runs  |  "
                        "Eq 3.2: h(t) = 1 ÷ MPTS  |  Eq 3.3: R(n) = e^(−n × h(t))")
