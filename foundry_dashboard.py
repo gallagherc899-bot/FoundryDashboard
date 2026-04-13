@@ -94,6 +94,11 @@ from sklearn.metrics import (
 )
 from scipy import stats
 from datetime import datetime
+try:
+    from statsmodels.stats.diagnostic import lilliefors as lilliefors_test
+    LILLIEFORS_AVAILABLE = True
+except ImportError:
+    LILLIEFORS_AVAILABLE = False
 
 # ================================================================
 # LIME - LOCAL INTERPRETABLE MODEL-AGNOSTIC EXPLANATIONS
@@ -147,8 +152,13 @@ TEMPORAL_FEATURES_ENABLED = True
 MTTS_FEATURES_ENABLED = True
 
 # DOE Energy Benchmarks
+# Source: Eppich (2004), Exhibit ii, p. v — Permanent Mold/Sand Aluminum facility
+# Tacit (primary) energy = 47,250 BTU/lb (94.5 MMBtu/ton), confirmed by
+# Kermeli et al. (2016) ENERGY STAR Metal Casting Guide, Table 10, p. 99.
+# Prior value (22,922 BTU/lb) was the Die Casting Al-1 direct-site-energy figure — wrong
+# facility type and excludes upstream electrical multiplier (2.86×).
 DOE_BENCHMARKS = {
-    'average': 22922,
+    'average': 47250,       # BTU/lb — Permanent Mold/Sand Al, tacit (Eppich 2004)
     'best_practice': 18500,
     'theoretical_minimum': 5000
 }
@@ -1480,7 +1490,16 @@ def compute_empirical_hazard(df, threshold_mode='part_mean'):
     from scipy.stats import kendalltau
     tau, tau_p = kendalltau(np.arange(n), all_normalized)
     
-    ks_stat, ks_p = sp_stats.kstest(all_normalized, 'expon', args=(0, 1))
+    # Lilliefors-corrected KS test: adjusts critical values because the scale
+    # parameter (MPTS_runs) is estimated from the same data being tested.
+    # Standard kstest critical values are too liberal when parameters are
+    # estimated from the sample (Lilliefors, 1967; Meeker & Escobar, 1998).
+    if LILLIEFORS_AVAILABLE:
+        ks_stat, ks_p = lilliefors_test(all_normalized, dist='exp')
+        ks_method = 'Lilliefors-corrected'
+    else:
+        ks_stat, ks_p = sp_stats.kstest(all_normalized, 'expon', args=(0, 1))
+        ks_method = 'Standard KS (statsmodels unavailable)'
     
     mean_norm = float(all_normalized.mean())
     cv_norm = float(all_normalized.std() / all_normalized.mean()) if all_normalized.mean() > 0 else 0
@@ -1496,6 +1515,7 @@ def compute_empirical_hazard(df, threshold_mode='part_mean'):
         'chi2': float(chi2), 'chi2_p': float(chi2_p),
         'kendall_tau': float(tau), 'kendall_p': float(tau_p),
         'ks_stat': float(ks_stat), 'ks_p': float(ks_p),
+        'ks_method': ks_method,
         'all_normalized': all_normalized,
     }
 
@@ -4959,8 +4979,8 @@ Example: *gas_porosity_rate* can come from Melting, Core Making, or Pouring.
         
         st.markdown("""
         <div class="citation-box">
-            <strong>Research Question 1:</strong> Does MPTS provide valid reliability-based scrap-risk scheduling with Campbell's process attribution confirmed by RF convergent validity?
-            <br><strong>Hypothesis H1:</strong> MPTS will demonstrate hazard stability and achieve ≥90% Campbell process attribution agreement with RF-derived Pareto attribution.
+            <strong>Research Question 1:</strong> Can a PHM framework using SPC data achieve prognostic recall ≥80% for reliability-risk classification associated with scrap threshold exceedance?
+            <br><strong>Hypothesis H1:</strong> The three-stage hierarchical ML framework will achieve ≥80% recall for reliability-risk classification, with the lower bound of the 95% Clopper–Pearson confidence interval exceeding 80%, without sensors or new infrastructure.
         </div>
         """, unsafe_allow_html=True)
         
@@ -5196,8 +5216,8 @@ Model learns **systemic process signatures**, not part identities (Deming, 1986)
         
         st.markdown("""
         <div class="citation-box">
-            <strong>Research Question 2:</strong> Can a three-stage RF classifier achieve ≥80% recall and provide complementary run-level scrap-risk alarm detection?
-            <br><strong>Hypothesis H2:</strong> The RF classifier will achieve ≥80% recall and generate operationally distinct alarm signals comparable to MPTS scheduling, with the lower bound of the 95% Clopper–Pearson confidence interval exceeding 80%.
+            <strong>Research Question 2:</strong> Does the reliability-based MTTS framework provide valid reliability-equivalent decision-support metrics for forecasting process reliability degradation associated with scrap risk?
+            <br><strong>Hypothesis H2:</strong> Following Ebeling's (1997) reliability framework, MTTS-derived R(t) and λ(t) yield interpretable reliability estimates under empirically stable hazard conditions, enabling actionable decision support.
         </div>
         """, unsafe_allow_html=True)
         
@@ -5288,7 +5308,7 @@ Model learns **systemic process signatures**, not part identities (Deming, 1986)
 | **Bin CV** | {hazard_results['bin_cv']:.2f} | {'Approximately flat ✅' if hazard_results['bin_cv'] < 0.30 else 'Moderate variation' if hazard_results['bin_cv'] < 0.50 else 'Substantial variation ⚠️'} |
 | **χ² equal-counts** | p = {hazard_results['chi2_p']:.3f} | {'Cannot reject uniform hazard ✅' if hazard_results['chi2_p'] > 0.05 else 'Bins significantly unequal ⚠️'} |
 | **Kendall τ trend** | τ = {hazard_results['kendall_tau']:.3f}, p = {hazard_results['kendall_p']:.3f} | {'No monotonic trend ✅' if hazard_results['kendall_p'] > 0.05 else 'Significant trend ⚠️'} |
-| **KS vs Exp(1)** | D = {hazard_results['ks_stat']:.3f}, p = {hazard_results['ks_p']:.3f} | {'Exact Exp(1) rejected; underdispersion (CV<1) means CFR approximation remains plausible' if hazard_results['ks_p'] < 0.05 else 'Cannot reject Exp(1) ✅'} |
+| **KS vs Exp(1)** ({hazard_results.get('ks_method','Lilliefors-corrected')}) | D = {hazard_results['ks_stat']:.3f}, p = {hazard_results['ks_p']:.3f} | {'Exact Exp(1) rejected; underdispersion (CV<1) means CFR approximation remains plausible — Lilliefors correction applied (Lilliefors, 1967)' if hazard_results['ks_p'] < 0.05 else 'Cannot reject Exp(1) ✅'} |
             """)
             
             # Nelson-Aalen Cumulative Hazard
@@ -5464,58 +5484,60 @@ Adjust target scrap rate to achieve ≥10% relative reduction.
             ci_lower_val, ci_upper_val = clopper_pearson_ci(tp_sum, n_fail_sum, alpha=0.05)
             ci_pass_tab5 = ci_lower_val >= 0.80
         
-        h2_pass_global = recall_pass_tab5 and (ci_pass_tab5 if ci_lower_val is not None else recall_pass_tab5)
+        h1_pass = recall_pass_tab5 and (ci_pass_tab5 if ci_lower_val is not None else recall_pass_tab5)
         
         # Compute seen/unseen for summary
         seen_unseen_summary = compute_seen_unseen_metrics(global_model)
         
-        # Compute hazard for summary — H1 (MPTS) gates on diagnostics only
+        # Compute hazard for summary — H2 gates on diagnostics only
         hazard_summary = compute_empirical_hazard(df)
-        h1_pass_global = False
+        h2_pass = False
         if hazard_summary:
-            h1_pass_global = (hazard_summary['cv_normalized'] < 1.0 and 
+            h2_pass = (hazard_summary['cv_normalized'] < 1.0 and 
                       hazard_summary['chi2_p'] > 0.05 and 
                       hazard_summary['kendall_p'] > 0.05)
         
         c1, c2 = st.columns(2)
         with c1:
-            if h1_pass_global:
-                hazard_text = ""
-                if hazard_summary:
-                    hazard_text = f"""
-
-**Hazard Stability Diagnostics (H1 Decision Criteria):**
-- Underdispersion CV: {hazard_summary['cv_normalized']:.2f} < 1.0 — **conservative model** ✓
-- Equal-width bin CV: {hazard_summary['bin_cv']:.2f} — {'approximately flat ✅' if hazard_summary['bin_cv'] < 0.30 else 'moderate variation'}
-- Kendall τ trend: p = {hazard_summary['kendall_p']:.3f} — {'no trend ✅' if hazard_summary['kendall_p'] > 0.05 else 'trend detected'}
-- χ² uniform hazard: p = {hazard_summary['chi2_p']:.3f} — {'cannot reject ✅' if hazard_summary['chi2_p'] > 0.05 else 'rejected'}"""
-
-                st.success(f"""### ✅ H1: SUPPORTED — MPTS Hazard Stability Validated
-
-MPTS-derived R(t) and λ(t) yield interpretable reliability estimates under empirically stable hazard conditions (Ebeling, 1997).{hazard_text}
-                """)
-            else:
-                st.warning(f"### ⚠️ H1: Partially Supported")
-        with c2:
-            if h2_pass_global:
+            if h1_pass:
                 ci_text = ""
                 if ci_lower_val is not None:
                     ci_text = f"\n- **95% Clopper–Pearson CI:** [{ci_lower_val*100:.1f}%, {ci_upper_val*100:.1f}%] — lower bound {'exceeds' if ci_lower_val >= 0.80 else 'below'} 80%"
-
+                
                 su_text = ""
                 if seen_unseen_summary and 'unseen' in seen_unseen_summary:
                     u_data = seen_unseen_summary['unseen']
                     u_cp_lo, u_cp_hi = clopper_pearson_ci(u_data['tp'], u_data['failures'], alpha=0.05) if u_data['failures'] > 0 else (0.0, 1.0)
                     su_text = f"\n- **Never-seen parts recall:** {u_data['recall']*100:.1f}% ({u_data['tp']}/{u_data['failures']} failures, {u_data['n_parts']} parts) — 95% CP CI [{u_cp_lo*100:.1f}%, {u_cp_hi*100:.1f}%]"
-
-                st.success(f"""### ✅ H2: SUPPORTED — Recall ≥80% with CI Verified
-
+                
+                st.success(f"""### ✅ H1: SUPPORTED — Recall ≥80% with CI Verified
+                
 **Primary Decision Criteria:**
 - **Recall: {metrics['recall']*100:.1f}%** — Target: ≥80% ✓{ci_text}
 **Supporting Metrics:**
 - **Precision: {metrics['precision']*100:.1f}%** (≥70% ✓)
 - **AUC-ROC: {metrics['auc']:.3f}** (≥0.80 ✓)
 - **Brier Score: {metrics['brier']:.3f}** (≤0.25 ✓){su_text}
+                """)
+            else:
+                st.warning(f"### ⚠️ H1: Partially Supported")
+        with c2:
+            if h2_pass:
+                hazard_text = ""
+                if hazard_summary:
+                    hazard_text = f"""
+
+**Hazard Stability Diagnostics (H2 Decision Criteria):**
+- Underdispersion CV: {hazard_summary['cv_normalized']:.2f} < 1.0 — **conservative model** ✓
+- Equal-width bin CV: {hazard_summary['bin_cv']:.2f} — {'approximately flat ✅' if hazard_summary['bin_cv'] < 0.30 else 'moderate variation'}
+- Kendall τ trend: p = {hazard_summary['kendall_p']:.3f} — {'no trend ✅' if hazard_summary['kendall_p'] > 0.05 else 'trend detected'}
+- χ² uniform hazard: p = {hazard_summary['chi2_p']:.3f} — {'cannot reject ✅' if hazard_summary['chi2_p'] > 0.05 else 'rejected'}
+
+**Supporting Context:** PHM Equivalence: {phm_equiv:.1f}%"""
+                
+                st.success(f"""### ✅ H2: SUPPORTED — MTTS Reliability Metrics Validated
+
+MTTS-derived R(t) and λ(t) yield interpretable reliability estimates under empirically stable hazard conditions (Ebeling, 1997).{hazard_text}
                 """)
             else:
                 st.warning(f"### ⚠️ H2: Partially Supported")
@@ -5603,10 +5625,8 @@ This dashboard treats scrap as a **systemic issue**—the result of interconnect
                 part_phm_equiv = (reliability / 0.90) * 100 if reliability > 0 else 0
                 
                 # Determine H1/H2 pass status
-                # H1 = MPTS: part-level reliability indicates hazard-stable scheduling
                 h1_pass_part = reliability >= 0.80
-                # H2 = RF: global recall result applied uniformly (RF is a single global model)
-                h2_pass_part = h2_pass_global
+                h2_pass_part = part_phm_equiv >= 80
                 
                 part_results.append({
                     'Part ID': pid,
@@ -5637,8 +5657,8 @@ This dashboard treats scrap as a **systemic issue**—the result of interconnect
         
         s1, s2, s3, s4, s5 = st.columns(5)
         s1.metric("Total Parts", f"{total_parts}")
-        s2.metric("H1 Pass Rate (MPTS)", f"{h1_pass_count/total_parts*100:.1f}%", f"{h1_pass_count}/{total_parts}")
-        s3.metric("H2 Pass Rate (RF)", f"{h2_pass_count/total_parts*100:.1f}%", f"{h2_pass_count}/{total_parts}")
+        s2.metric("H1 Pass Rate", f"{h1_pass_count/total_parts*100:.1f}%", f"{h1_pass_count}/{total_parts}")
+        s3.metric("H2 Pass Rate", f"{h2_pass_count/total_parts*100:.1f}%", f"{h2_pass_count}/{total_parts}")
         s4.metric("Limited Data (< 30)", f"{pooled_count}", "Dual results shown")
         s5.metric("Avg Reliability", f"{results_df['Reliability R(1)'].mean():.1f}%")
         
