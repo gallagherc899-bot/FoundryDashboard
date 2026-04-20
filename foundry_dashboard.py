@@ -5386,13 +5386,13 @@ MTTS-derived reliability functions serve as **conservative and interpretable dec
         
         c1, c2 = st.columns(2)
         with c1:
-            annual_production = st.number_input("Annual Production (lbs)", value=int(annual_prod), min_value=1000)
-            current_scrap = st.number_input("Current Scrap Rate (%)", value=float(current_scrap))
-            material_cost = st.number_input("Material Cost ($/lb)", value=2.50)
+            annual_production = st.number_input("Annual Production (lbs)", value=int(annual_prod), min_value=1000, key="tab4_annual_production")
+            current_scrap = st.number_input("Current Scrap Rate (%)", value=float(current_scrap), key="tab4_current_scrap")
+            material_cost = st.number_input("Material Cost ($/lb)", value=2.50, key="tab4_material_cost")
         with c2:
-            target_scrap = st.number_input("Target Scrap Rate (%)", value=max(0, current_scrap * 0.85))
-            implementation_cost = st.number_input("Implementation Cost ($)", value=2000.0)
-            energy_cost = st.number_input("Energy Cost ($/MMBtu)", value=12.0)
+            target_scrap = st.number_input("Target Scrap Rate (%)", value=max(0, current_scrap * 0.85), key="tab4_target_scrap")
+            implementation_cost = st.number_input("Implementation Cost ($)", value=2000.0, key="tab4_implementation_cost")
+            energy_cost = st.number_input("Energy Cost ($/MMBtu)", value=12.0, key="tab4_energy_cost")
         
         tte = calculate_tte_savings(current_scrap, target_scrap, annual_production)
         material_savings = tte["avoided_scrap_lbs"] * material_cost
@@ -6385,24 +6385,29 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         # 7 Campbell process groups)
         COHORT_8 = [15, 63, 124, 40, 120, 100, 6, 67]
 
-        # ── Editable parameters (sidebar-style expander) ──────────────────
-        with st.expander("⚙️ Methodological parameters (editable for sensitivity analysis)",
+        # ── Parameters driven by Tab 4 (RQ3: Operational Impact) ──────────
+        # Material Cost, Energy Cost, and Implementation Cost pull live from
+        # Tab 4 so the whole dashboard has one source of truth. Change them
+        # on Tab 4 and the H3 scenario results here recalculate automatically.
+        material_cost = st.session_state.get("tab4_material_cost", 2.50)
+        energy_cost = st.session_state.get("tab4_energy_cost", 12.00)
+        impl_cost = st.session_state.get("tab4_implementation_cost", 2000.0)
+
+        st.info(
+            f"**Cost parameters sourced from Tab 4 (RQ3: Operational Impact):** "
+            f"Material ${material_cost:.2f}/lb · "
+            f"Energy ${energy_cost:.2f}/MMBtu · "
+            f"Implementation ${impl_cost:,.0f}. "
+            f"Edit these on Tab 4 to see the H3 scenarios recalculate."
+        )
+
+        with st.expander("⚙️ H3-specific parameters (editable for sensitivity analysis)",
                          expanded=False):
-            st.markdown("*Defaults match praxis §3.5 Table 3-6. Adjust to explore "
-                        "parameter sensitivity. Reset by reloading the page.*")
-            pcol1, pcol2, pcol3 = st.columns(3)
+            st.markdown("*BTU/lb, GHG factor, CP factor, and decay rate are "
+                        "methodological constants specific to H3. Material, "
+                        "energy, and implementation costs are managed on Tab 4.*")
+            pcol1, pcol2 = st.columns(2)
             with pcol1:
-                st.markdown("**Financial**")
-                material_cost = st.number_input("Material Cost ($/lb)",
-                                                value=2.50, min_value=0.0, step=0.25,
-                                                key="h3_material_cost")
-                energy_cost = st.number_input("Energy Cost ($/MMBtu)",
-                                              value=12.00, min_value=0.0, step=0.50,
-                                              key="h3_energy_cost")
-                impl_cost = st.number_input("Implementation Cost ($)",
-                                            value=2000, min_value=0, step=250,
-                                            key="h3_impl_cost")
-            with pcol2:
                 st.markdown("**Energy & emissions**")
                 btu_per_lb = st.number_input("TTE intensity (BTU/lb)",
                                              value=47250, min_value=0, step=500,
@@ -6413,7 +6418,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                                                     value=53.06, min_value=0.0, step=0.1,
                                                     key="h3_kg_co2_per_mmbtu",
                                                     help="EPA natural gas combustion — EPA (2023)")
-            with pcol3:
+            with pcol2:
                 st.markdown("**Classifier uncertainty**")
                 cp_factor = st.number_input("CP recall lower bound",
                                             value=0.924, min_value=0.0, max_value=1.0,
