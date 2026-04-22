@@ -511,11 +511,44 @@ def load_data(filepath):
     
     if "week_ending" in df.columns:
         df["week_ending"] = df["week_ending"].astype(str).str.strip()
-        df["week_ending"] = pd.to_datetime(df["week_ending"], errors="coerce")
-        df = df.dropna(subset=["week_ending"])
+        # Tolerant parser — format='mixed' accepts both 'M/D/YYYY' and 'MM/DD/YYYY'
+        # variants present in the source workbook. Prior behavior used the strict
+        # default parser which silently dropped rows whose dates used a different
+        # numeric padding, producing a census that did not match §3.2.1 of the
+        # dissertation.
+        df["week_ending"] = pd.to_datetime(
+            df["week_ending"], errors="coerce", format="mixed"
+        )
+        # If any dates still fail to parse after the tolerant pass, keep the row
+        # but assign a sentinel so downstream sort_values() works. Do NOT drop.
+        # This prevents silent census loss from date-format inconsistencies.
+        if df["week_ending"].isna().any():
+            n_bad = df["week_ending"].isna().sum()
+            print(f"[load_data] Warning: {n_bad} rows had unparseable dates; "
+                  f"assigned to epoch start for sorting only (rows retained).")
+            df["week_ending"] = df["week_ending"].fillna(pd.Timestamp("1970-01-01"))
         df = df.sort_values("week_ending").reset_index(drop=True)
     else:
         df["week_ending"] = pd.date_range(end=pd.Timestamp.today(), periods=len(df), freq='W')
+
+    # ------------------------------------------------------------------
+    # §3.2.1 DATA-INTEGRITY EXCLUSION
+    # ------------------------------------------------------------------
+    # The dissertation's Section 3.2.1 excludes runs where pieces_scrapped
+    # exceeds order_quantity (an impossible state that indicates data-entry
+    # error). Prior versions of this dashboard did not apply this rule,
+    # producing an H1 cohort that disagreed with the dissertation by one
+    # part. The rule is applied here so the dashboard's working census
+    # exactly matches the dissertation's stated methodology.
+    if "pieces_scrapped" in df.columns and "order_quantity" in df.columns:
+        df["pieces_scrapped"] = pd.to_numeric(
+            df["pieces_scrapped"], errors="coerce").fillna(0)
+        integrity_mask = df["pieces_scrapped"] <= df["order_quantity"]
+        n_excluded = (~integrity_mask).sum()
+        if n_excluded > 0:
+            print(f"[load_data] §3.2.1 exclusion: dropped {n_excluded} rows where "
+                  f"pieces_scrapped > order_quantity (data-entry errors).")
+        df = df[integrity_mask].reset_index(drop=True)
     
     defect_cols = [c for c in df.columns if c.endswith("_rate") and "total" not in c.lower()]
     
@@ -1416,8 +1449,10 @@ def compute_empirical_hazard(df, threshold_mode='part_mean'):
     """
     Compute empirical hazard by equal-width bins on normalized inter-failure intervals.
     
-    For the 28+ assessable parts (≥3 inter-failure intervals), normalizes 
-    intervals by part-specific MTTS and bins into equal-width segments.
+    For the H1 assessable cohort (parts with ≥4 failures → ≥3 inter-failure
+    intervals), normalizes intervals by part-specific MTTS and bins into
+    equal-width segments. The cohort size is determined dynamically from the
+    working census; with the §3.2.1-compliant working census it yields 30 parts.
     
     Returns dict with bin hazards, formal test results, and part-level stats.
     """
@@ -6358,10 +6393,13 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         st.dataframe(pd.DataFrame(scen_data), hide_index=True, use_container_width=True)
         st.caption("Divergence = RF last-run probability − MPTS probability (simple subtraction, pp). "
                    "Threshold ±5pp filters calibration noise between two independently developed models. "
-                   "22/22 parts show process attribution agreement (convergent validity, Campbell & Fiske 1959).")
+                   "Per §4.4.3: of 22 parts, 14 met the minimum-production-history criteria; "
+                   "13 of 14 qualifying parts (92.9%) show Pareto-Campbell process attribution "
+                   "agreement, exceeding the ≥90% convergent validity threshold "
+                   "(Campbell & Fiske, 1959).")
 
     with tab8:
-        st.header("🎯 H3 Scenario Envelope — 22-Part vs 8-Part Priority")
+        st.header("🎯 H3 Scenario Envelope — 22-Part Dual-Model vs 7-Part Priority")
 
         st.markdown("""
         <div class="citation-box">
@@ -6377,13 +6415,22 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Cohort definitions (from praxis §3.2.2) ───────────────────────
-        # 22-part validation cohort by scrap weight (top-22 Pareto-weight rank)
-        COHORT_22 = [3, 6, 15, 16, 40, 63, 67, 71, 74, 82, 88, 90,
-                     99, 100, 101, 120, 122, 124, 134, 185, 198, 229]
-        # 8-part priority (top-8 by scrap weight + stable run counts; covers all
-        # 7 Campbell process groups)
-        COHORT_8 = [15, 63, 124, 40, 120, 100, 6, 67]
+        # ── Cohort definitions (from praxis §3.2.2 / Table 4-9) ───────────
+        # 22-part Dual-Model operational cohort (Pareto vital-few by joint
+        # frequency, scrap weight, and full-process-coverage criteria).
+        # Matches the parts listed in Chapter 4 Table 4-9.
+        COHORT_22 = [3, 4, 6, 15, 20, 30, 40, 63, 85, 94, 99, 105,
+                     110, 117, 122, 124, 134, 172, 194, 227, 229, 307]
+        # 7-part H3 priority deployment cohort.
+        # Highest scrap-weight 7 parts within the 22 that ALSO satisfy H1
+        # (≥4 failure events). Part 229 was excluded from the priority cohort
+        # because it has only 1 failure event, which is below the H1
+        # statistical-support threshold. Restricting H3 deployment to parts
+        # with individually-tested CFR assumptions yields strict cohort
+        # nesting: 7 ⊂ 22 ⊂ 30 (H1 cohort). Every part in the H3 cohort is
+        # therefore validated by H1 (per-part CFR), H2 (RF classifier on the
+        # full working census), and the Dual-Model Complementary Validation.
+        COHORT_7 = [3, 6, 15, 40, 63, 122, 124]
 
         # ── Parameters driven by Tab 4 (RQ3: Operational Impact) ──────────
         # Material Cost, Energy Cost, and Implementation Cost pull live from
@@ -6557,7 +6604,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             )
 
         _res22 = _compute_all(COHORT_22, "22-Part Pareto Cohort")
-        _res8 = _compute_all(COHORT_8, "8-Part Priority Cohort")
+        _res7 = _compute_all(COHORT_7, "7-Part Priority Cohort")
 
         # ── Headline metric strip ─────────────────────────────────────────
         st.markdown("### Headline metrics (annualized, CP-adjusted)")
@@ -6570,14 +6617,14 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                      f"{_res22['s2_ann']:,.0f} lbs/yr",
                      f"{_res22['s2_casc']['fac']:.1f}% facility | "
                      f"{_res22['s2_casc']['roi']:.1f}× ROI")
-        hcol3.metric("8-part Scenario 1",
-                     f"{_res8['s1_ann']:,.0f} lbs/yr",
-                     f"{_res8['s1_casc']['fac']:.1f}% facility | "
-                     f"{_res8['s1_casc']['roi']:.1f}× ROI")
-        hcol4.metric("8-part Scenario 2",
-                     f"{_res8['s2_ann']:,.0f} lbs/yr",
-                     f"{_res8['s2_casc']['fac']:.1f}% facility | "
-                     f"{_res8['s2_casc']['roi']:.1f}× ROI")
+        hcol3.metric("7-part Scenario 1",
+                     f"{_res7['s1_ann']:,.0f} lbs/yr",
+                     f"{_res7['s1_casc']['fac']:.1f}% facility | "
+                     f"{_res7['s1_casc']['roi']:.1f}× ROI")
+        hcol4.metric("7-part Scenario 2",
+                     f"{_res7['s2_ann']:,.0f} lbs/yr",
+                     f"{_res7['s2_casc']['fac']:.1f}% facility | "
+                     f"{_res7['s2_casc']['roi']:.1f}× ROI")
 
         st.markdown("---")
 
@@ -6622,7 +6669,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         with col_left:
             _render_cohort(_res22)
         with col_right:
-            _render_cohort(_res8)
+            _render_cohort(_res7)
 
         st.markdown("---")
 
@@ -6637,13 +6684,13 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             "Period": ["End of Year 1", "End of Year 2", "End of Month 32"],
             "22-part S1": [_res22["s1_y1"], _res22["s1_y2"], _res22["s1_full"]],
             "22-part S2": [_res22["s2_y1"], _res22["s2_y2"], _res22["s2_full"]],
-            "8-part S1": [_res8["s1_y1"], _res8["s1_y2"], _res8["s1_full"]],
-            "8-part S2": [_res8["s2_y1"], _res8["s2_y2"], _res8["s2_full"]],
+            "7-part S1": [_res7["s1_y1"], _res7["s1_y2"], _res7["s1_full"]],
+            "7-part S2": [_res7["s2_y1"], _res7["s2_y2"], _res7["s2_full"]],
         })
         _fig_cum = go.Figure()
         _colors = {"22-part S1": "#1F4E79", "22-part S2": "#4472C4",
-                   "8-part S1": "#C55A11", "8-part S2": "#ED7D31"}
-        for col in ["22-part S1", "22-part S2", "8-part S1", "8-part S2"]:
+                   "7-part S1": "#C55A11", "7-part S2": "#ED7D31"}
+        for col in ["22-part S1", "22-part S2", "7-part S1", "7-part S2"]:
             _fig_cum.add_trace(go.Bar(
                 x=_chart_df["Period"], y=_chart_df[col], name=col,
                 marker_color=_colors[col],
@@ -6684,30 +6731,31 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             {"Cohort": "22-part", "Scenario": "2 (Conservative)",
              "Annual reduction (lbs/yr)": f"{_res22['s2_ann']:,.0f}",
              "EPA band position": _band_status(_res22["s2_ann"])},
-            {"Cohort": "8-part", "Scenario": "1 (Replication)",
-             "Annual reduction (lbs/yr)": f"{_res8['s1_ann']:,.0f}",
-             "EPA band position": _band_status(_res8["s1_ann"])},
-            {"Cohort": "8-part", "Scenario": "2 (Conservative)",
-             "Annual reduction (lbs/yr)": f"{_res8['s2_ann']:,.0f}",
-             "EPA band position": _band_status(_res8["s2_ann"])},
+            {"Cohort": "7-part", "Scenario": "1 (Replication)",
+             "Annual reduction (lbs/yr)": f"{_res7['s1_ann']:,.0f}",
+             "EPA band position": _band_status(_res7["s1_ann"])},
+            {"Cohort": "7-part", "Scenario": "2 (Conservative)",
+             "Annual reduction (lbs/yr)": f"{_res7['s2_ann']:,.0f}",
+             "EPA band position": _band_status(_res7["s2_ann"])},
         ])
         st.table(_band_df.set_index(["Cohort", "Scenario"]))
 
         # ── Interpretation ────────────────────────────────────────────────
         st.markdown("### Interpretation")
         st.markdown(f"""
-        The framework's projection envelope spans **{min(_res22['s2_casc']['fac'], _res8['s2_casc']['fac']):.1f}%**
-        (most conservative: 8-part Scenario 2) to **{_res22['s1_casc']['fac']:.1f}%**
+        The framework's projection envelope spans **{min(_res22['s2_casc']['fac'], _res7['s2_casc']['fac']):.1f}%**
+        (most conservative: 7-part Scenario 2) to **{_res22['s1_casc']['fac']:.1f}%**
         (most aggressive: 22-part Scenario 1) of facility-wide scrap reduction.
         All four combinations exceed the EPA ENERGY STAR 3–10% range, with ROI
-        ranging from **{min(_res8['s2_casc']['roi'], _res22['s2_casc']['roi']):.1f}×**
+        ranging from **{min(_res7['s2_casc']['roi'], _res22['s2_casc']['roi']):.1f}×**
         to **{_res22['s1_casc']['roi']:.1f}×** against the $2,000 implementation cost.
 
-        The 8-part priority cohort demonstrates that targeting only **2.2% of the
-        part population (8 of 359 parts)** is sufficient to exceed the EPA upper
-        benchmark. This is the dissertation's strongest operational finding: the
-        reliability-driven framework identifies a vital-few intervention boundary
-        where modest implementation effort produces substantial facility impact.
+        The 7-part priority cohort demonstrates that targeting only **1.9% of the
+        part population (7 of 359 parts)** is sufficient to exceed the EPA upper
+        benchmark. All 7 parts in this priority cohort are validated by H1
+        (per-part CFR diagnostics), H2 (RF classifier on the full working
+        census), and the Dual-Model Complementary Validation on the 22-part
+        cohort, giving strict validation nesting: 7 ⊂ 22 ⊂ 30.
 
         *Methodology reference: Praxis §3.5, Equations 3-17 through 3-20 and
         3-17a. CP factor from §4.2.2. EPA benchmark from EPA (2016).*
@@ -6717,13 +6765,14 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         with st.expander("📋 Cohort part lists"):
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("**22-part cohort (by scrap weight rank)**")
+                st.markdown("**22-part Dual-Model cohort (Table 4-9)**")
                 st.code(", ".join(str(p) for p in sorted(COHORT_22)))
             with c2:
-                st.markdown("**8-part priority cohort**")
-                st.code(", ".join(str(p) for p in sorted(COHORT_8)))
-            st.caption(f"All 8 priority parts are members of the 22-part cohort: "
-                       f"{set(COHORT_8).issubset(set(COHORT_22))}")
+                st.markdown("**7-part H3 priority cohort**")
+                st.code(", ".join(str(p) for p in sorted(COHORT_7)))
+            st.caption(f"Strict nesting check — all 7 priority parts are members "
+                       f"of the 22-part cohort: "
+                       f"{set(COHORT_7).issubset(set(COHORT_22))}")
 
 # ============================================================================
 
