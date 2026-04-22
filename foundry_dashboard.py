@@ -528,9 +528,33 @@ def load_data(filepath):
             print(f"[load_data] Warning: {n_bad} rows had unparseable dates; "
                   f"assigned to epoch start for sorting only (rows retained).")
             df["week_ending"] = df["week_ending"].fillna(pd.Timestamp("1970-01-01"))
-        df = df.sort_values("week_ending").reset_index(drop=True)
+        # ------------------------------------------------------------------
+        # DETERMINISTIC SORT
+        # ------------------------------------------------------------------
+        # Capture the original CSV row index as a stable tiebreak before any
+        # sort. Multiple rows can share the same (week_ending, work_order_#,
+        # part_id) triple (76 such rows exist in this dataset). Without a
+        # final unique tiebreak, different transforms in the pipeline can
+        # reorder rows within identical primary keys, producing a non-
+        # deterministic 60/20/20 split boundary and shifting the test-set
+        # failure count by ±1 between runs.
+        #
+        # The triple-key sort below is applied in load_data and MUST be
+        # preserved by every downstream transform. All sort_values() calls
+        # elsewhere in this module use the same key sequence.
+        if "_csv_row_idx" not in df.columns:
+            df["_csv_row_idx"] = np.arange(len(df))
+        _sort_keys = ["week_ending"]
+        if "work_order_#" in df.columns:
+            _sort_keys.append("work_order_#")
+        if "part_id" in df.columns:
+            _sort_keys.append("part_id")
+        _sort_keys.append("_csv_row_idx")
+        df = df.sort_values(_sort_keys).reset_index(drop=True)
     else:
         df["week_ending"] = pd.date_range(end=pd.Timestamp.today(), periods=len(df), freq='W')
+        if "_csv_row_idx" not in df.columns:
+            df["_csv_row_idx"] = np.arange(len(df))
 
     # ------------------------------------------------------------------
     # §3.2.1 DATA-INTEGRITY EXCLUSION
@@ -608,11 +632,19 @@ def add_multi_defect_features(df, defect_cols):
 # TEMPORAL FEATURES (FROM ENHANCED V3.1)
 # ================================================================
 def add_temporal_features(df):
-    """Add temporal trend features matching enhanced version."""
+    """Add temporal trend features matching enhanced version.
+    
+    Uses the deterministic sort key established by load_data (week_ending,
+    work_order_#, part_id, _csv_row_idx) to preserve the stable row order.
+    """
     df = df.copy()
     
     if 'week_ending' in df.columns:
-        df = df.sort_values('week_ending').reset_index(drop=True)
+        _keys = ['week_ending']
+        for k in ['work_order_#', 'part_id', '_csv_row_idx']:
+            if k in df.columns:
+                _keys.append(k)
+        df = df.sort_values(_keys).reset_index(drop=True)
     
     for col in ['total_defect_rate', 'scrap_percent']:
         if col not in df.columns:
@@ -716,7 +748,12 @@ def add_mtts_sequential_features(df, threshold):
     (Ebeling, 1997, An Introduction to Reliability and Maintainability Engineering).
     """
     df = df.copy()
-    df = df.sort_values(['part_id', 'week_ending']).reset_index(drop=True)
+    # Process per-part with stable secondary keys (preserves pipeline determinism)
+    _sort_keys = ['part_id', 'week_ending']
+    for k in ['work_order_#', '_csv_row_idx']:
+        if k in df.columns:
+            _sort_keys.append(k)
+    df = df.sort_values(_sort_keys).reset_index(drop=True)
     
     df['runs_since_last_failure'] = 0
     df['cumulative_scrap_in_cycle'] = 0.0
@@ -871,7 +908,11 @@ def add_mtts_features(df, threshold):
     compute_mtts_on_train() → attach_mtts_aggregate_features().
     """
     df = df.copy()
-    df = df.sort_values(['part_id', 'week_ending']).reset_index(drop=True)
+    _sort_keys = ['part_id', 'week_ending']
+    for k in ['work_order_#', '_csv_row_idx']:
+        if k in df.columns:
+            _sort_keys.append(k)
+    df = df.sort_values(_sort_keys).reset_index(drop=True)
     
     df['runs_since_last_failure'] = 0
     df['cumulative_scrap_in_cycle'] = 0.0
@@ -1333,8 +1374,18 @@ def compute_pooled_prediction(df, part_id, threshold_pct):
 # 60-20-20 TEMPORAL SPLIT
 # ================================================================
 def time_split_60_20_20(df):
-    """Split data temporally: 60% train, 20% calibration, 20% test."""
-    df = df.sort_values("week_ending").reset_index(drop=True)
+    """Split data temporally: 60% train, 20% calibration, 20% test.
+    
+    Uses the deterministic sort established by load_data. The triple-key
+    sort (week_ending, work_order_#, part_id, _csv_row_idx) guarantees
+    that the split boundary is stable across pipeline runs — critical
+    for reproducible recall / CI metrics in Chapter 4.
+    """
+    _keys = ['week_ending']
+    for k in ['work_order_#', 'part_id', '_csv_row_idx']:
+        if k in df.columns:
+            _keys.append(k)
+    df = df.sort_values(_keys).reset_index(drop=True)
     n = len(df)
     train_end = int(n * 0.6)
     calib_end = int(n * 0.8)
@@ -1622,6 +1673,12 @@ def compute_dual_model_validation_table(df, defect_cols, global_model, cohort_pa
             signal = "—"
 
         # ── Convergent-validity agreement ─────────────────────────────
+        # Per §4.4.3: convergent validity agreement is computed over the
+        # data-sufficient subset only (parts with ≥2 observed failure runs).
+        # Parts with <2 failure runs cannot support a reliable MPTS Pareto-
+        # Campbell attribution and are therefore excluded from the agreement
+        # denominator. The filter is applied at the summary-rollup step below
+        # (not here), so each row still records its raw agreement result.
         if mpts_top_proc == "—" or rf_top_proc == "—":
             agree = "—"
         elif mpts_top_proc == rf_top_proc:
@@ -1632,6 +1689,7 @@ def compute_dual_model_validation_table(df, defect_cols, global_model, cohort_pa
         rows.append({
             "Part": pid,
             "n": n_runs,
+            "Failure Runs": fail_count,
             "Avg Scrap%": round(avg_scrap_pct, 3),
             "Last Scrap%": round(last_scrap_pct, 3),
             "MPTS P%": mpts_prob,
@@ -1645,18 +1703,31 @@ def compute_dual_model_validation_table(df, defect_cols, global_model, cohort_pa
 
     result_df = pd.DataFrame(rows)
 
-    # ── Convergent-validity summary (attributable subset only) ──────
-    attributable = result_df[result_df["Agree"].isin(["✓ Agree", "✗ Differ"])]
-    n_attr = len(attributable)
-    n_agree = int((attributable["Agree"] == "✓ Agree").sum())
-    agreement_pct = round(100 * n_agree / n_attr, 1) if n_attr > 0 else None
+    # ── Convergent-validity summary (§4.4.3 data-sufficiency filter) ──
+    # Qualifying parts are those with ≥2 observed failure runs AND both
+    # methods producing an attributable result. This matches the
+    # dissertation's §4.4.3 definition and the Campbell & Fiske (1959)
+    # convergent-validity framework.
+    attributable_mask = result_df["Agree"].isin(["✓ Agree", "✗ Differ"])
+    sufficient_mask = result_df["Failure Runs"] >= 2
+    qualifying = result_df[attributable_mask & sufficient_mask]
+    n_qual = len(qualifying)
+    n_agree = int((qualifying["Agree"] == "✓ Agree").sum())
+    agreement_pct = round(100 * n_agree / n_qual, 1) if n_qual > 0 else None
+
+    # Also report excluded parts for transparency
+    excluded_insufficient = result_df[attributable_mask & ~sufficient_mask]
+    excluded_unattributable = result_df[~attributable_mask]
 
     summary = {
         "cohort_size": len(cohort_parts),
-        "attributable_parts": n_attr,
+        "qualifying_parts": n_qual,                        # ≥2 failure runs AND attributable
         "agreeing_parts": n_agree,
         "agreement_pct": agreement_pct,
+        "excluded_insufficient": len(excluded_insufficient),   # attributable but <2 failures
+        "excluded_unattributable": len(excluded_unattributable),  # at least one method produced "—"
         "divergence_threshold_pp": 5.0,
+        "filter_description": "Per §4.4.3: qualifying = ≥2 observed failure runs AND both methods attributable",
     }
     return result_df, summary
 
@@ -6698,20 +6769,28 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             display_df = t7_result_df[table_cols].copy()
             st.dataframe(display_df, hide_index=True, use_container_width=True)
 
-            # Summary metrics
+            # Summary metrics — per §4.4.3 data-sufficiency definition
             sc1, sc2, sc3 = st.columns(3)
             sc1.metric("Cohort size", f"{t7_summary['cohort_size']} parts")
-            sc2.metric("Attributable (both methods)",
-                       f"{t7_summary['attributable_parts']} parts")
+            sc2.metric("Qualifying (≥2 failure runs, attributable)",
+                       f"{t7_summary['qualifying_parts']} parts",
+                       f"Excluded: {t7_summary['excluded_insufficient']} insufficient, "
+                       f"{t7_summary['excluded_unattributable']} unattributable")
             if t7_summary["agreement_pct"] is not None:
                 pct = t7_summary["agreement_pct"]
                 delta_pct = "exceeds 90% threshold ✓" if pct >= 90 else "below 90% threshold"
                 sc3.metric("Campbell process agreement",
                            f"{pct}%",
-                           f"{t7_summary['agreeing_parts']}/{t7_summary['attributable_parts']} — {delta_pct}")
+                           f"{t7_summary['agreeing_parts']}/{t7_summary['qualifying_parts']} — {delta_pct}")
             else:
                 sc3.metric("Campbell process agreement", "N/A",
-                           "Too few attributable parts")
+                           "Too few qualifying parts")
+            st.caption(
+                "**Per §4.4.3 convergent-validity definition:** "
+                "qualifying parts have ≥2 observed failure runs AND both the MPTS "
+                "and RF methods produce a Pareto-Campbell process attribution. "
+                "This is the Campbell & Fiske (1959) data-sufficiency criterion."
+            )
 
             # ── Downloads: CSV, Excel, Word ──────────────────────────
             st.markdown("### ⬇️ Download Table 4-9")
@@ -6736,15 +6815,20 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                                         index=False)
                     summary_rows = [
                         ("Cohort size", t7_summary["cohort_size"]),
-                        ("Attributable parts (both methods)",
-                         t7_summary["attributable_parts"]),
+                        ("Qualifying parts (≥2 failure runs AND attributable)",
+                         t7_summary["qualifying_parts"]),
                         ("Parts with process agreement",
                          t7_summary["agreeing_parts"]),
                         ("Agreement rate",
                          f"{t7_summary['agreement_pct']}%"
                          if t7_summary["agreement_pct"] is not None else "N/A"),
+                        ("Excluded: <2 failure runs (data-insufficient)",
+                         t7_summary["excluded_insufficient"]),
+                        ("Excluded: unattributable (one or both methods)",
+                         t7_summary["excluded_unattributable"]),
                         ("Divergence threshold (pp)",
                          t7_summary["divergence_threshold_pp"]),
+                        ("Filter rule", t7_summary["filter_description"]),
                     ]
                     pd.DataFrame(summary_rows,
                                  columns=["Metric", "Value"]).to_excel(
@@ -6812,11 +6896,16 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 _p_sum.add_run("Convergent-validity summary: ").bold = True
                 _p_sum.add_run(
                     f"{t7_summary['agreeing_parts']} of "
-                    f"{t7_summary['attributable_parts']} attributable parts "
+                    f"{t7_summary['qualifying_parts']} qualifying parts "
                     f"show Campbell process agreement "
                     f"({t7_summary['agreement_pct']}%). "
-                    f"Parts with fewer than two observed failure runs are excluded "
-                    f"from the agreement denominator per §3.4.5."
+                    f"Qualifying parts are those with ≥2 observed failure runs "
+                    f"AND both methods producing a Pareto-Campbell attribution "
+                    f"(§4.4.3 data-sufficiency filter; Campbell & Fiske, 1959). "
+                    f"Excluded from the denominator: "
+                    f"{t7_summary['excluded_insufficient']} parts with <2 failure runs, "
+                    f"{t7_summary['excluded_unattributable']} parts where one or both "
+                    f"methods produced no attribution."
                 )
 
                 docx_buf = _io2.BytesIO()
