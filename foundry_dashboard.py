@@ -6762,8 +6762,28 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         try:
             t7_result_df, t7_summary = _run_22_part_validation()
 
+            # Defensive: detect stale Streamlit cache from an older version of
+            # compute_dual_model_validation_table (pre-§4.4.3-filter). The new
+            # schema has 'qualifying_parts' and 'Failure Runs'; legacy caches
+            # have neither. Clear and re-run if detected.
+            if ("qualifying_parts" not in t7_summary
+                    or "Failure Runs" not in t7_result_df.columns):
+                try:
+                    _run_22_part_validation.clear()
+                except Exception:
+                    pass
+                st.cache_data.clear()
+                st.warning(
+                    "Detected legacy cached validation result — clearing cache "
+                    "and recomputing. This typically happens after a dashboard "
+                    "code update. Please reload the tab if this message persists."
+                )
+                st.rerun()
+
             # Display the table with the same column order as Table 4-9
-            table_cols = ["Part", "n", "Avg Scrap%", "Last Scrap%",
+            # "Failure Runs" added per §4.4.3 data-sufficiency filter —
+            # makes the qualifying-parts denominator auditable at a glance.
+            table_cols = ["Part", "n", "Failure Runs", "Avg Scrap%", "Last Scrap%",
                           "MPTS P%", "RF Last%", "Δ (pp)", "Signal",
                           "Chronic Process", "Agree", "Last-Run Active"]
             display_df = t7_result_df[table_cols].copy()
