@@ -3390,8 +3390,24 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         
-        # Get pooled prediction for this part using PART-SPECIFIC threshold
-        pooled_result = compute_pooled_prediction(df, selected_part, part_threshold)
+        # Get pooled prediction for this part using the LIVE threshold from
+        # the Scrap Exceedance Threshold slider (rendered further below). On
+        # first render or after a part change, fall back to part_threshold
+        # so the initial Prediction Summary matches the part's average scrap.
+        # FIX (2026-04-26): Previously hard-coded to part_threshold, which
+        # caused R(n), F(n), and MPTS to be unresponsive to the slider while
+        # the Failure Runs count and Pareto charts below DID respond — two
+        # different threshold logics on the same screen. Now unified.
+        if st.session_state.get('_threshold_part') != selected_part:
+            # Part just changed — reset slider state so a fresh part_threshold
+            # is used for both the Prediction Summary and the slider initial
+            # position. The full slider state init still runs further below.
+            unified_threshold_live = part_threshold
+        else:
+            unified_threshold_live = st.session_state.get(
+                'unified_threshold_slider', part_threshold)
+        pooled_result = compute_pooled_prediction(
+            df, selected_part, unified_threshold_live)
         
         # Show CLT-based notification
         if pooled_result.get('show_dual'):
@@ -3603,11 +3619,16 @@ def main():
             pass
         
         # MTTS info bar (shown for all parts)
+        # If the user has moved the slider off the part average, label the
+        # threshold source accordingly so the banner doesn't mislead.
+        threshold_source_display = threshold_source
+        if abs(effective_threshold - part_threshold) > 0.01:
+            threshold_source_display = 'slider override'
         if failure_count > 0:
             st.success(f"""
             **MTTS (parts):** {total_parts_produced:,.0f} parts ÷ {failure_count} failures = **{mtts_parts:,.0f} parts** 
             — *On average, {mtts_parts:,.0f} parts produced between scrap events* 
-            (Threshold: {effective_threshold:.2f}%, {threshold_source})
+            (Threshold: {effective_threshold:.2f}%, {threshold_source_display})
             """)
         else:
             st.warning(f"""
