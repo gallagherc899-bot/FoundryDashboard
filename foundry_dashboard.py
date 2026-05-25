@@ -7252,6 +7252,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         def _build_walkforward(part_id):
             """Return a per-step DataFrame: step, date, work_order, order_qty,
             scrap_pct, mpts_prob, rf_prob, delta, signal."""
+            part_id = str(part_id)  # dashboard stores part_id as string (data load line ~508)
             pdat = df[df["part_id"] == part_id].sort_values("week_ending").reset_index(drop=True)
             if len(pdat) == 0:
                 return None, None
