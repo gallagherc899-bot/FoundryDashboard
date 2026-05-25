@@ -7423,12 +7423,20 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
         )
 
         _MIN_TRAIN_ROWS = 30   # minimum cumulative pool to attempt a 60-20-20 split with both classes
+        _MPTS_MIN_FAILURES = 4   # O'Connor failure-count principle: >=4 failures (>=3 inter-failure intervals)
 
         @st.cache_data(show_spinner="Running Cold Start retraining loop (this is slow — retrains per event)…")
         def _cold_start_trace(part_id):
             """Faithful Cold Start protocol (§3.5.3): for each event of the part,
             accumulate all foundry runs up to that date, retrain three-stage from
-            scratch, score the just-completed run. Returns per-event DataFrame."""
+            scratch, score the just-completed run. Returns per-event DataFrame.
+
+            Two independent warmups:
+              - MPTS warmup: until the part has logged >=4 of its OWN failure events
+                (>=3 inter-failure intervals) — the H1/O'Connor reliability criterion.
+                MPTS does not report a value before this.
+              - RF warmup: until the cumulative FOUNDRY pool is large enough to train.
+            """
             part_id = str(part_id)
             pdat = df[df["part_id"] == part_id].sort_values("week_ending").reset_index(drop=True)
             if len(pdat) == 0:
@@ -7439,18 +7447,21 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 ev_date = pdat.iloc[i]["week_ending"]
                 pool = df[df["week_ending"] <= ev_date].copy()
                 pool_n = len(pool)
-                # MPTS (history-to-date for this part)
+                # --- MPTS (history-to-date for this part), gated by failure-count warmup ---
                 hist = pdat.iloc[:i + 1]
                 fc = int((hist["scrap_percent"] > thr).sum())
-                tp = hist["order_quantity"].sum(); avg_oq = tp / len(hist)
-                mpts_parts = tp / fc if fc > 0 else tp
-                mpts_p = round(100 * (1 - np.exp(-avg_oq / mpts_parts)), 1) if mpts_parts > 0 else 0.0
-                # Attempt Cold Start RF retrain on the accumulated pool
-                rf_p = None; trained = False
+                mpts_ready = fc >= _MPTS_MIN_FAILURES
+                if mpts_ready:
+                    tp = hist["order_quantity"].sum(); avg_oq = tp / len(hist)
+                    mpts_parts = tp / fc if fc > 0 else tp
+                    mpts_p = round(100 * (1 - np.exp(-avg_oq / mpts_parts)), 1) if mpts_parts > 0 else 0.0
+                else:
+                    mpts_p = None   # MPTS in warmup — not enough failure events for a stable hazard
+                # --- Cold Start RF retrain on the accumulated foundry pool ---
+                rf_p = None; rf_ready = False
                 if pool_n >= _MIN_TRAIN_ROWS:
                     try:
                         pool_thr = pool["scrap_percent"].mean()
-                        # need both classes present to train
                         if (pool["scrap_percent"] > pool_thr).sum() >= 2 and \
                            (pool["scrap_percent"] <= pool_thr).sum() >= 2:
                             cs_model = train_three_stage_model(pool, defect_cols)
@@ -7458,7 +7469,6 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                             pe = penh[penh["part_id"] == part_id]
                             if "week_ending" in pe.columns:
                                 pe = pe.sort_values("week_ending")
-                            # score the run matching this event (last one <= ev_date)
                             pe_upto = pe[pe["week_ending"] <= ev_date]
                             if len(pe_upto) > 0:
                                 last = pe_upto.iloc[[-1]].copy()
@@ -7469,33 +7479,51 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                                 last = attach_mtts_aggregate_features(last, mtr)
                                 feat = last.reindex(columns=cs_model["features"], fill_value=0).fillna(0)
                                 rf_p = round(float(cs_model["cal_model"].predict_proba(feat)[:, 1][0]) * 100, 1)
-                                trained = True
+                                rf_ready = True
                     except Exception:
-                        rf_p = None; trained = False
+                        rf_p = None; rf_ready = False
+                # phase: framework live only when BOTH models are out of warmup
+                if mpts_ready and rf_ready:
+                    phase = "both live"
+                elif rf_ready and not mpts_ready:
+                    phase = "RF-only (MPTS warmup)"
+                elif mpts_ready and not rf_ready:
+                    phase = "MPTS-only (RF warmup)"
+                else:
+                    phase = "warmup (neither)"
                 rows.append(dict(
                     step=i,
                     date=str(ev_date.date()) if pd.notna(ev_date) else "",
                     pool_rows=pool_n,
+                    failures_to_date=fc,
                     scrap_pct=round(float(pdat.iloc[i]["scrap_percent"]), 3),
-                    mpts_prob=mpts_p,
+                    mpts_prob=mpts_p if mpts_p is not None else "",
                     rf_prob=rf_p if rf_p is not None else "",
-                    phase="trained" if trained else "warmup (MPTS-only)",
+                    phase=phase,
                 ))
             return pd.DataFrame(rows)
 
-        def _cold_start_figure(cs, part_id, proc_label):
+
+        def _cold_start_figure(cs, part_id, proc_label, both_live_step):
             steps = cs["step"].tolist()
-            warm = cs[cs["phase"].str.startswith("warmup")]["step"].tolist()
+            neither = cs[cs["phase"] == "warmup (neither)"]["step"].tolist()
             fig = go.Figure()
-            if warm:
-                fig.add_vrect(x0=min(warm) - 0.5, x1=max(warm) + 0.5,
-                              fillcolor="#fff1c8", opacity=0.5, line_width=0,
-                              annotation_text="warmup (MPTS-only)", annotation_position="top left")
-            fig.add_trace(go.Scatter(x=steps, y=cs["mpts_prob"].tolist(), mode="lines+markers",
-                name="MPTS P(scrap)", line=dict(color="#1f77b4", width=3), marker=dict(size=8)))
+            # shade region before BOTH models are live (framework not fully functional)
+            if both_live_step is not None:
+                fig.add_vrect(x0=-0.5, x1=both_live_step - 0.5,
+                              fillcolor="#fff1c8", opacity=0.45, line_width=0,
+                              annotation_text="framework warmup (one or both models in warmup)",
+                              annotation_position="top left")
+                fig.add_vline(x=both_live_step, line_width=2, line_dash="dash", line_color="#2ca02c",
+                              annotation_text="both models live", annotation_position="top right")
+            mpts_y = [v if v != "" else None for v in cs["mpts_prob"].tolist()]
+            fig.add_trace(go.Scatter(x=steps, y=mpts_y, mode="lines+markers",
+                name="MPTS P(scrap)", line=dict(color="#1f77b4", width=3), marker=dict(size=8),
+                connectgaps=False))
             rf_y = [v if v != "" else None for v in cs["rf_prob"].tolist()]
             fig.add_trace(go.Scatter(x=steps, y=rf_y, mode="lines+markers",
-                name="RF P(scrap) — Cold Start", line=dict(color="#000000", width=3), marker=dict(size=7)))
+                name="RF P(scrap) — Cold Start", line=dict(color="#000000", width=3), marker=dict(size=7),
+                connectgaps=False))
             fig.add_trace(go.Scatter(x=steps, y=cs["scrap_pct"].tolist(), mode="lines+markers",
                 name="Actual scrap %", yaxis="y2",
                 line=dict(color="#c0392b", width=2.5), marker=dict(size=10, symbol="star")))
@@ -7521,24 +7549,45 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             if cs is None:
                 st.warning(f"Part {_pid}: no records.")
                 continue
-            n_warm = int(cs["phase"].str.startswith("warmup").sum())
-            n_train = len(cs) - n_warm
-            first_train = cs[cs["phase"] == "trained"]["step"].min() if n_train > 0 else None
+            # first event where BOTH models are live
+            both = cs[cs["phase"] == "both live"]
+            both_live_step = int(both["step"].min()) if len(both) > 0 else None
+            # MPTS-ready and RF-ready first events
+            mpts_ready_step = cs[cs["mpts_prob"] != ""]["step"].min() if (cs["mpts_prob"] != "").any() else None
+            rf_ready_step = cs[cs["rf_prob"] != ""]["step"].min() if (cs["rf_prob"] != "").any() else None
             st.markdown(f"### Part {_pid} — {_PROC_CS[_pid]}")
-            fig = _cold_start_figure(cs, _pid, _PROC_CS[_pid])
+            fig = _cold_start_figure(cs, _pid, _PROC_CS[_pid], both_live_step)
             st.plotly_chart(fig, use_container_width=True)
-            if first_train is not None and not pd.isna(first_train):
-                pool_at = int(cs[cs["step"] == first_train]["pool_rows"].iloc[0])
-                st.caption(f"Part {_pid}: {n_warm} warmup events (MPTS-only); RF first trains at "
-                           f"step {int(first_train)} (pool {pool_at} foundry rows); {n_train} trained events total.")
+
+            # weeks from first event to both-models-live
+            first_date = pd.to_datetime(cs.iloc[0]["date"]) if cs.iloc[0]["date"] else None
+            if both_live_step is not None and first_date is not None:
+                live_date = pd.to_datetime(cs[cs["step"] == both_live_step]["date"].iloc[0])
+                weeks = (live_date - first_date).days / 7.0
+                pool_at = int(cs[cs["step"] == both_live_step]["pool_rows"].iloc[0])
+                st.caption(
+                    f"Part {_pid}: MPTS reaches its 4-failure minimum at step "
+                    f"{int(mpts_ready_step) if mpts_ready_step is not None else '—'}; "
+                    f"RF trains at step {int(rf_ready_step) if rf_ready_step is not None else '—'}. "
+                    f"**Both models live at step {both_live_step}** — "
+                    f"{weeks:.0f} weeks ({weeks/4.33:.1f} months) after this part's first event, "
+                    f"at a cumulative foundry pool of {pool_at} rows. The framework is not "
+                    f"functional before this point."
+                )
             else:
-                st.caption(f"Part {_pid}: RF never reached a trainable pool within this part's "
-                           f"events — insufficient accumulated history (data-sufficiency limit).")
+                st.caption(
+                    f"Part {_pid}: the framework **never reached the both-models-live state** "
+                    f"within this part's production history — MPTS did not accumulate the required "
+                    f"4 failure events and/or RF lacked a trainable pool. This is the data-sufficiency "
+                    f"limit: a qualifying part can still fail to support the dual model if its "
+                    f"production history is too short or too sparse."
+                )
             st.download_button(f"⬇️ CSV — Part {_pid} Cold Start",
                                cs.to_csv(index=False).encode(),
                                f"coldstart_part{_pid}.csv", "text/csv", key=f"cs_csv_{_pid}")
 
         st.markdown("---")
+
 
 
         # ── Side-by-side cascade tables ───────────────────────────────────
