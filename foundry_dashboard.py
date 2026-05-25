@@ -7405,6 +7405,142 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
 
         st.markdown("---")
 
+        # ====================================================================
+        #  COLD START vs DEPLOY-AND-MONITOR  — Parts 3, 14, 74  (§3.5.3)
+        #  Data-sufficiency demonstration: how many runs of accumulated foundry
+        #  history are required before the RF classifier can train and converge
+        #  with the pretrained model. Part 74 (compressed 8.4-month window) is
+        #  included as a counter-example illustrating the data-sufficiency limit.
+        # ====================================================================
+        st.markdown("## Cold Start vs Deploy-and-Monitor — Data Sufficiency")
+        st.caption(
+            "At each of a part's production events, the Cold Start condition collects all "
+            "foundry runs up to that event, applies the 60-20-20 split, retrains the RF "
+            "from scratch, and scores the just-completed run. Early events lack enough data "
+            "to train (warmup, MPTS-only). This demonstrates the framework's data-sufficiency "
+            "requirement — the underlying theme that job-shop foundries are challenged by "
+            "insufficient per-part history."
+        )
+
+        _MIN_TRAIN_ROWS = 30   # minimum cumulative pool to attempt a 60-20-20 split with both classes
+
+        @st.cache_data(show_spinner="Running Cold Start retraining loop (this is slow — retrains per event)…")
+        def _cold_start_trace(part_id):
+            """Faithful Cold Start protocol (§3.5.3): for each event of the part,
+            accumulate all foundry runs up to that date, retrain three-stage from
+            scratch, score the just-completed run. Returns per-event DataFrame."""
+            part_id = str(part_id)
+            pdat = df[df["part_id"] == part_id].sort_values("week_ending").reset_index(drop=True)
+            if len(pdat) == 0:
+                return None
+            thr = pdat["scrap_percent"].mean()
+            rows = []
+            for i in range(len(pdat)):
+                ev_date = pdat.iloc[i]["week_ending"]
+                pool = df[df["week_ending"] <= ev_date].copy()
+                pool_n = len(pool)
+                # MPTS (history-to-date for this part)
+                hist = pdat.iloc[:i + 1]
+                fc = int((hist["scrap_percent"] > thr).sum())
+                tp = hist["order_quantity"].sum(); avg_oq = tp / len(hist)
+                mpts_parts = tp / fc if fc > 0 else tp
+                mpts_p = round(100 * (1 - np.exp(-avg_oq / mpts_parts)), 1) if mpts_parts > 0 else 0.0
+                # Attempt Cold Start RF retrain on the accumulated pool
+                rf_p = None; trained = False
+                if pool_n >= _MIN_TRAIN_ROWS:
+                    try:
+                        pool_thr = pool["scrap_percent"].mean()
+                        # need both classes present to train
+                        if (pool["scrap_percent"] > pool_thr).sum() >= 2 and \
+                           (pool["scrap_percent"] <= pool_thr).sum() >= 2:
+                            cs_model = train_three_stage_model(pool, defect_cols)
+                            penh = cs_model["df_enhanced"]
+                            pe = penh[penh["part_id"] == part_id]
+                            if "week_ending" in pe.columns:
+                                pe = pe.sort_values("week_ending")
+                            # score the run matching this event (last one <= ev_date)
+                            pe_upto = pe[pe["week_ending"] <= ev_date]
+                            if len(pe_upto) > 0:
+                                last = pe_upto.iloc[[-1]].copy()
+                                last = attach_train_features(
+                                    last, cs_model["scrap_rate_train"], cs_model["part_freq_train"],
+                                    cs_model["default_scrap_rate"], cs_model["default_freq"])
+                                mtr = compute_mtts_on_train(cs_model["df_train"], cs_model["global_threshold"])
+                                last = attach_mtts_aggregate_features(last, mtr)
+                                feat = last.reindex(columns=cs_model["features"], fill_value=0).fillna(0)
+                                rf_p = round(float(cs_model["cal_model"].predict_proba(feat)[:, 1][0]) * 100, 1)
+                                trained = True
+                    except Exception:
+                        rf_p = None; trained = False
+                rows.append(dict(
+                    step=i,
+                    date=str(ev_date.date()) if pd.notna(ev_date) else "",
+                    pool_rows=pool_n,
+                    scrap_pct=round(float(pdat.iloc[i]["scrap_percent"]), 3),
+                    mpts_prob=mpts_p,
+                    rf_prob=rf_p if rf_p is not None else "",
+                    phase="trained" if trained else "warmup (MPTS-only)",
+                ))
+            return pd.DataFrame(rows)
+
+        def _cold_start_figure(cs, part_id, proc_label):
+            steps = cs["step"].tolist()
+            warm = cs[cs["phase"].str.startswith("warmup")]["step"].tolist()
+            fig = go.Figure()
+            if warm:
+                fig.add_vrect(x0=min(warm) - 0.5, x1=max(warm) + 0.5,
+                              fillcolor="#fff1c8", opacity=0.5, line_width=0,
+                              annotation_text="warmup (MPTS-only)", annotation_position="top left")
+            fig.add_trace(go.Scatter(x=steps, y=cs["mpts_prob"].tolist(), mode="lines+markers",
+                name="MPTS P(scrap)", line=dict(color="#1f77b4", width=3), marker=dict(size=8)))
+            rf_y = [v if v != "" else None for v in cs["rf_prob"].tolist()]
+            fig.add_trace(go.Scatter(x=steps, y=rf_y, mode="lines+markers",
+                name="RF P(scrap) — Cold Start", line=dict(color="#000000", width=3), marker=dict(size=7)))
+            fig.add_trace(go.Scatter(x=steps, y=cs["scrap_pct"].tolist(), mode="lines+markers",
+                name="Actual scrap %", yaxis="y2",
+                line=dict(color="#c0392b", width=2.5), marker=dict(size=10, symbol="star")))
+            fig.add_trace(go.Scatter(x=steps, y=cs["pool_rows"].tolist(), mode="lines",
+                name="Cumulative foundry pool (rows)", yaxis="y3",
+                line=dict(color="#7b3f99", width=2, dash="dot")))
+            fig.update_layout(
+                title=f"Part {part_id} — Cold Start ({proc_label})",
+                xaxis=dict(title="Production event (step)", tickmode="array", tickvals=steps),
+                yaxis=dict(title="P(scrap) %", range=[-5, 105], tickvals=[0, 20, 40, 60, 80, 100]),
+                yaxis2=dict(title="Scrap %", overlaying="y", side="right",
+                            range=[0, max(max(cs["scrap_pct"]), 0.1) * 1.15]),
+                yaxis3=dict(overlaying="y", side="right", position=0.97, showticklabels=False, range=[0, 1300]),
+                legend=dict(orientation="h", yanchor="bottom", y=-0.32, xanchor="center", x=0.5),
+                height=520, font=dict(size=13, color="black"),
+                plot_bgcolor="white", paper_bgcolor="white",
+            )
+            return fig
+
+        _PROC_CS = {3: "shift / Core Making", 14: "misrun / Pouring", 74: "gouged / Pattern/Tooling"}
+        for _pid in [3, 14, 74]:
+            cs = _cold_start_trace(_pid)
+            if cs is None:
+                st.warning(f"Part {_pid}: no records.")
+                continue
+            n_warm = int(cs["phase"].str.startswith("warmup").sum())
+            n_train = len(cs) - n_warm
+            first_train = cs[cs["phase"] == "trained"]["step"].min() if n_train > 0 else None
+            st.markdown(f"### Part {_pid} — {_PROC_CS[_pid]}")
+            fig = _cold_start_figure(cs, _pid, _PROC_CS[_pid])
+            st.plotly_chart(fig, use_container_width=True)
+            if first_train is not None and not pd.isna(first_train):
+                pool_at = int(cs[cs["step"] == first_train]["pool_rows"].iloc[0])
+                st.caption(f"Part {_pid}: {n_warm} warmup events (MPTS-only); RF first trains at "
+                           f"step {int(first_train)} (pool {pool_at} foundry rows); {n_train} trained events total.")
+            else:
+                st.caption(f"Part {_pid}: RF never reached a trainable pool within this part's "
+                           f"events — insufficient accumulated history (data-sufficiency limit).")
+            st.download_button(f"⬇️ CSV — Part {_pid} Cold Start",
+                               cs.to_csv(index=False).encode(),
+                               f"coldstart_part{_pid}.csv", "text/csv", key=f"cs_csv_{_pid}")
+
+        st.markdown("---")
+
+
         # ── Side-by-side cascade tables ───────────────────────────────────
         def _cascade_row(label, s1c, s2c, unit=""):
             return {
