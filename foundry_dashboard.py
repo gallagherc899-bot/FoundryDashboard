@@ -7249,18 +7249,28 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 return "S4", div
             return "S3", div
 
-        def _build_walkforward(part_id):
+        def _build_walkforward(part_id, direction="forward"):
             """Return a per-step DataFrame: step, date, work_order, order_qty,
-            scrap_pct, mpts_prob, rf_prob, delta, signal."""
+            scrap_pct, mpts_prob, rf_prob, delta, signal.
+
+            direction='forward'  -> months 1..32 (chronological, operational view)
+            direction='reverse'  -> months 32..1 (order-robustness sensitivity view)
+            The RF score per run is unchanged by direction (it reads that run's own
+            feature vector); only the MPTS accumulation order and the step index change.
+            """
             part_id = str(part_id)  # dashboard stores part_id as string (data load line ~508)
             pdat = df[df["part_id"] == part_id].sort_values("week_ending").reset_index(drop=True)
             if len(pdat) == 0:
                 return None, None
-            thr = pdat["scrap_percent"].mean()                     # per-part threshold
-            penh = _enh_all[_enh_all["part_id"] == part_id]
-            if "week_ending" in penh.columns:
-                penh = penh.sort_values("week_ending")
-            penh = penh.reset_index(drop=True)
+            penh_full = _enh_all[_enh_all["part_id"] == part_id]
+            if "week_ending" in penh_full.columns:
+                penh_full = penh_full.sort_values("week_ending")
+            penh_full = penh_full.reset_index(drop=True)
+            if direction == "reverse":
+                pdat = pdat.iloc[::-1].reset_index(drop=True)
+                penh_full = penh_full.iloc[::-1].reset_index(drop=True)
+            thr = pdat["scrap_percent"].mean()                     # per-part threshold (order-invariant)
+            penh = penh_full
 
             # chronic (MPTS) process = dominant defect over full history
             chronic_proc = "—"
@@ -7314,7 +7324,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
 
         _SIG_COLOR = {"S1": "#1f77b4", "S2": "#c0392b", "S3": "#2ca02c", "S4": "#7b3f99"}
 
-        def _figure(wf, part_id, thr, proc_label):
+        def _figure(wf, part_id, thr, proc_label, direction_label):
             steps = wf["step"].tolist()
             cum = wf["scrap_pct"].expanding().mean().round(3).tolist()
             fig = go.Figure()
@@ -7339,48 +7349,59 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 name="Cumulative avg scrap %", yaxis="y2",
                 line=dict(color="#2ca02c", width=2, dash="dash"), marker=dict(size=6, symbol="diamond")))
             fig.update_layout(
-                title=f"Part {part_id} — Observed-Sequence Walk-Forward  ({proc_label}; threshold {thr:.2f}%)",
-                xaxis=dict(title="Walk-Forward Step (each = next production run)",
+                title=f"Part {part_id} — Walk-Forward {direction_label}  ({proc_label}; threshold {thr:.2f}%)",
+                xaxis=dict(title="Walk-Forward Step (each = next production run in traversal order)",
                            tickmode="array", tickvals=steps),
                 yaxis=dict(title="P(scrap) %", range=[-5, 105],
                            tickvals=[0, 20, 40, 60, 80, 100]),
                 yaxis2=dict(title="Scrap %", overlaying="y", side="right",
                             range=[0, max(max(wf["scrap_pct"]), max(cum)) * 1.15]),
                 legend=dict(orientation="h", yanchor="bottom", y=-0.30, xanchor="center", x=0.5),
-                height=560, font=dict(size=14, color="black"),
+                height=520, font=dict(size=14, color="black"),
                 plot_bgcolor="white", paper_bgcolor="white",
             )
             return fig
 
         _PROC = {3: "shift / Core Making", 14: "misrun / Pouring", 74: "gouged / Pattern/Tooling"}
 
+        st.caption(
+            "Each part is shown in two traversal orders. **Forward (months 1→32)** is the "
+            "chronological operational view. **Reverse (months 32→1)** is an order-robustness "
+            "sensitivity view — the same foundry runs traversed in the opposite order. The RF "
+            "score for each run is identical in both (it reads that run's own feature vector); "
+            "only the MPTS accumulation order changes."
+        )
+
         for _pid in [3, 14, 74]:
-            wf, thr = _build_walkforward(_pid)
-            if wf is None:
-                st.warning(f"Part {_pid}: no records found.")
-                continue
-            fig = _figure(wf, _pid, thr, _PROC[_pid])
-            st.plotly_chart(fig, use_container_width=True)
+            st.markdown(f"### Part {_pid} — {_PROC[_pid]}")
+            for _dir, _dlabel in [("forward", "FORWARD (months 1→32)"),
+                                  ("reverse", "REVERSE (months 32→1)")]:
+                wf, thr = _build_walkforward(_pid, direction=_dir)
+                if wf is None:
+                    st.warning(f"Part {_pid}: no records found.")
+                    continue
+                fig = _figure(wf, _pid, thr, _PROC[_pid], _dlabel)
+                st.plotly_chart(fig, use_container_width=True)
 
-            # signal-count summary
-            counts = wf[wf["signal"] != ""]["signal"].value_counts().to_dict()
-            summary = " | ".join(f"{k}={counts[k]}" for k in ("S1", "S2", "S3", "S4") if k in counts)
-            st.caption(f"Part {_pid} signals: {summary if summary else 'RF scoring unavailable'}")
+                counts = wf[wf["signal"] != ""]["signal"].value_counts().to_dict()
+                summary = " | ".join(f"{k}={counts[k]}" for k in ("S1", "S2", "S3", "S4") if k in counts)
+                st.caption(f"Part {_pid} {_dlabel} signals: {summary if summary else 'RF scoring unavailable'}")
 
-            c1, c2 = st.columns(2)
-            with c1:
-                try:
-                    png = fig.to_image(format="png", scale=2, width=1500, height=560)
-                    st.download_button(f"⬇️ Export Part {_pid} Walk-Forward (PNG)", png,
-                                       f"Figure_4-WF_Part{_pid}_walkforward.png", "image/png",
-                                       key=f"wf_png_{_pid}")
-                except Exception:
-                    st.info("PNG export needs `kaleido` (pip install kaleido).")
-            with c2:
-                st.download_button(f"⬇️ Export Part {_pid} Walk-Forward (CSV)",
-                                   wf.to_csv(index=False).encode(),
-                                   f"walkforward_part{_pid}.csv", "text/csv",
-                                   key=f"wf_csv_{_pid}")
+                c1, c2 = st.columns(2)
+                with c1:
+                    try:
+                        png = fig.to_image(format="png", scale=2, width=1500, height=520)
+                        st.download_button(f"⬇️ PNG — Part {_pid} {_dir}", png,
+                                           f"Figure_4-WF_Part{_pid}_{_dir}.png", "image/png",
+                                           key=f"wf_png_{_pid}_{_dir}")
+                    except Exception:
+                        st.info("PNG export needs `kaleido` (pip install kaleido).")
+                with c2:
+                    st.download_button(f"⬇️ CSV — Part {_pid} {_dir}",
+                                       wf.to_csv(index=False).encode(),
+                                       f"walkforward_part{_pid}_{_dir}.csv", "text/csv",
+                                       key=f"wf_csv_{_pid}_{_dir}")
+
 
         st.markdown("---")
 
