@@ -798,6 +798,33 @@ def compute_louit_screening(df, part_id):
     return out
 
 
+def compute_louit_probplot_data(df, part_id):
+    """Return exponential probability-plot arrays for one part, on the SAME
+    parts-to-failure interval basis used for r2_parts in compute_louit_screening.
+    Returns dict with q (exp order-stat medians), xs (sorted intervals),
+    fit_slope, fit_intercept, r2, n_intervals — or None if untestable."""
+    g = df[df['part_id'] == str(part_id)].sort_values('week_ending').reset_index(drop=True)
+    if len(g) == 0:
+        return None
+    thr = float(g['scrap_percent'].mean())
+    g = g.copy()
+    g['fail'] = (g['scrap_percent'] > thr).astype(int)
+    parts_cum = g['order_quantity'].cumsum()
+    idx_fail = g.index[g['fail'] == 1].tolist()
+    if len(idx_fail) < LOUIT_MIN_FAILURES_FOR_R2:
+        return None
+    parts_at_fail = [float(parts_cum.iloc[i]) for i in idx_fail]
+    ivp = np.diff([0.0] + parts_at_fail)
+    xs = np.sort(ivp)
+    m = len(xs)
+    F = (np.arange(1, m + 1) - 0.375) / (m + 0.25)
+    q = -np.log(1 - F)
+    slope, intercept = np.polyfit(q, xs, 1)
+    r2 = float(np.corrcoef(q, xs)[0, 1] ** 2)
+    return {'q': q, 'xs': xs, 'slope': float(slope), 'intercept': float(intercept),
+            'r2': r2, 'n_intervals': m, 'threshold_pct': thr}
+
+
 
 
 
@@ -5678,6 +5705,46 @@ Model learns **systemic process signatures**, not part identities (Deming, 1986)
                 st.error(f"**Verdict:** {_ls['verdict']}")
             else:
                 st.caption(f"**Verdict:** {_ls['verdict']}")
+
+            # --- Exponential probability plot for the selected part ---
+            _pp = compute_louit_probplot_data(df, selected_part)
+            if _pp is not None:
+                import plotly.graph_objects as _go
+                _qline = np.linspace(_pp['q'].min(), _pp['q'].max(), 50)
+                _yline = _pp['intercept'] + _pp['slope'] * _qline
+                _fig_pp = _go.Figure()
+                _fig_pp.add_trace(_go.Scatter(
+                    x=list(_pp['q']), y=list(_pp['xs']), mode='markers',
+                    name='Ordered intervals',
+                    marker=dict(size=11, color='#2c3e50')))
+                _fig_pp.add_trace(_go.Scatter(
+                    x=list(_qline), y=list(_yline), mode='lines',
+                    name='Linear fit', line=dict(color='#c0392b', width=2)))
+                _fig_pp.update_layout(
+                    title=(f"Exponential Probability Plot \u2014 Part {selected_part}  "
+                           f"(r\u00b2 = {_pp['r2']:.3f}, {_pp['n_intervals']} intervals)"),
+                    xaxis_title="Exponential order-statistic medians (quantiles)",
+                    yaxis_title="Ordered parts-to-failure intervals (parts)",
+                    height=460, font=dict(size=13, color="black"),
+                    plot_bgcolor="white", paper_bgcolor="white",
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5))
+                _fig_pp.update_xaxes(showgrid=True, gridcolor="#eee")
+                _fig_pp.update_yaxes(showgrid=True, gridcolor="#eee")
+                st.plotly_chart(_fig_pp, use_container_width=True)
+                st.caption("Exponential probability plot (NIST/SEMATECH, 2012, \u00a71.3.3.22): ordered "
+                           "parts-to-failure intervals vs. exponential order-statistic medians. The "
+                           "correlation coefficient (r\u00b2) of the linear fit is reported as descriptive "
+                           "consistency, not a formal goodness-of-fit test at this sample size.")
+                try:
+                    _png_pp = _fig_pp.to_image(format="png", scale=2, width=1200, height=460)
+                    st.download_button(f"\u2b07\ufe0f Export Part {selected_part} Probability Plot (PNG)",
+                                       _png_pp, f"ExpProbPlot_Part{selected_part}.png", "image/png",
+                                       key=f"pp_png_{selected_part}")
+                except Exception:
+                    st.info("PNG export needs `kaleido` (pip install kaleido). Chart still displays above.")
+            else:
+                st.info(f"Part {selected_part}: fewer than {LOUIT_MIN_FAILURES_FOR_R2} failure events \u2014 "
+                        "probability plot not shown (insufficient intervals).")
 
         st.markdown("---")
 
