@@ -729,6 +729,78 @@ def compute_mtts_metrics(df, threshold):
     return pd.DataFrame(results)
 
 
+LOUIT_MIN_FAILURES_FOR_TREND = 5   # below this, trend tests are not meaningful
+LOUIT_MIN_FAILURES_FOR_R2 = 5
+LOUIT_LAPLACE_CRIT = 1.96          # standard normal, two-sided alpha = 0.05
+
+def compute_louit_screening(df, part_id):
+    """Louit et al. (2009) screening for one part. Threshold = part's own mean
+    scrap%. Returns metrics dict with honest sample-size gating."""
+    g = df[df['part_id'] == str(part_id)].sort_values('week_ending').reset_index(drop=True)
+    n_runs = len(g)
+    out = {'part_id': str(part_id), 'n_runs': n_runs}
+    if n_runs == 0:
+        out['status'] = 'no data'; return out
+
+    thr = float(g['scrap_percent'].mean())
+    g['run_idx'] = np.arange(1, n_runs + 1)
+    g['fail'] = (g['scrap_percent'] > thr).astype(int)
+    fr = g.loc[g['fail'] == 1, 'run_idx'].tolist()
+    nf = len(fr)
+    total_runs = n_runs
+    total_parts = float(g['order_quantity'].sum())
+    avg_oq = total_parts / total_runs if total_runs else 0.0
+    mpts_parts = total_parts / nf if nf > 0 else total_parts
+    mpts_runs = total_runs / nf if nf > 0 else total_runs
+    R_avg = float(np.exp(-avg_oq / mpts_parts)) if mpts_parts > 0 else 0.0
+    out.update({'threshold_pct': thr, 'n_failures': nf, 'total_runs': total_runs,
+                'total_parts': total_parts, 'avg_order_qty': avg_oq,
+                'mpts_parts': mpts_parts, 'mpts_runs': mpts_runs, 'R_at_avg_oq': R_avg})
+
+    if nf >= LOUIT_MIN_FAILURES_FOR_TREND:
+        T = np.asarray(fr, dtype=float); b = float(total_runs)
+        L = (T.sum() - nf * b / 2.0) / np.sqrt(nf * (b ** 2) / 12.0)
+        X = np.diff([0] + fr).astype(float)
+        cv = X.std(ddof=1) / X.mean() if (X.mean() > 0 and len(X) > 1) else np.nan
+        LR = L / cv if (cv and not np.isnan(cv) and cv != 0) else np.nan
+        out.update({'laplace_L': float(L),
+                    'cv_hat': (float(cv) if not np.isnan(cv) else None),
+                    'lewis_robinson_LR': (float(LR) if not np.isnan(LR) else None),
+                    'laplace_no_trend': bool(abs(L) < LOUIT_LAPLACE_CRIT),
+                    'lr_no_trend': (bool(abs(LR) < LOUIT_LAPLACE_CRIT) if not np.isnan(LR) else None),
+                    'trend_testable': True})
+    else:
+        out.update({'laplace_L': None, 'cv_hat': None, 'lewis_robinson_LR': None,
+                    'laplace_no_trend': None, 'lr_no_trend': None, 'trend_testable': False})
+
+    if nf >= LOUIT_MIN_FAILURES_FOR_R2:
+        parts_cum = g['order_quantity'].cumsum()
+        idx_fail = g.index[g['fail'] == 1].tolist()
+        parts_at_fail = [float(parts_cum.iloc[i]) for i in idx_fail]
+        ivp = np.diff([0.0] + parts_at_fail)
+        xs = np.sort(ivp); m = len(xs)
+        F = (np.arange(1, m + 1) - 0.375) / (m + 0.25)
+        q = -np.log(1 - F)
+        out['r2_parts'] = float(np.corrcoef(q, xs)[0, 1] ** 2)
+        out['r2_testable'] = True
+    else:
+        out['r2_parts'] = None; out['r2_testable'] = False
+
+    if not out['trend_testable']:
+        out['verdict'] = ("Insufficient failures (n=%d < %d) \u2014 trend test not meaningful"
+                          % (nf, LOUIT_MIN_FAILURES_FOR_TREND))
+    elif out['laplace_no_trend'] and out.get('lr_no_trend'):
+        out['verdict'] = "No significant trend (Laplace + Lewis\u2013Robinson) \u2014 renewal/HPP baseline supported"
+    elif out['laplace_no_trend'] and not out.get('lr_no_trend'):
+        out['verdict'] = "Laplace no-trend but Lewis\u2013Robinson flags trend \u2014 interpret with caution (underdispersion)"
+    else:
+        out['verdict'] = "Significant trend detected \u2014 consider NHPP, not renewal/MPTS"
+    return out
+
+
+
+
+
 def add_mtts_sequential_features(df, threshold):
     """
     Add per-record sequential MTTS features (NO future-data leakage).
@@ -5555,6 +5627,60 @@ Model learns **systemic process signatures**, not part identities (Deming, 1986)
     # ================================================================
     with tab3:
         st.header("RQ1: Reliability & PHM Equivalence (H1)")
+
+        # Louit, Pascual & Jardine (2009) model-selection screening
+        # Per-part: trend gate (Laplace + Lewis-Robinson) then exponential fit.
+        # Runs for ANY selected part, with honest sample-size gating.
+        # ====================================================================
+        st.subheader(f"Reliability Model Screening — Part {selected_part}")
+        st.caption("Louit, Pascual & Jardine (2009): test for trend; if no significant trend, "
+                   "adopt the renewal/HPP model and fit the exponential reliability function "
+                   "R(n) = e^(−n/MPTS). Threshold = part's own mean scrap %.")
+
+        _ls = compute_louit_screening(df, selected_part)
+
+        if _ls.get('status') == 'no data' or _ls['n_runs'] == 0:
+            st.warning(f"No data for Part {selected_part}.")
+        else:
+            lc1, lc2, lc3, lc4 = st.columns(4)
+            lc1.metric("Per-part threshold", f"{_ls['threshold_pct']:.2f}%")
+            lc2.metric("Failures / Runs", f"{_ls['n_failures']} / {_ls['total_runs']}")
+            lc3.metric("MPTS (parts)", f"{_ls['mpts_parts']:,.0f}")
+            lc4.metric("R(avg order qty)", f"{_ls['R_at_avg_oq']*100:.1f}%")
+
+            if _ls['trend_testable']:
+                tcol1, tcol2, tcol3 = st.columns(3)
+                _lp_ok = _ls['laplace_no_trend']
+                tcol1.metric("Laplace L", f"{_ls['laplace_L']:.3f}",
+                             "no trend" if _lp_ok else "trend",
+                             delta_color="normal" if _lp_ok else "inverse")
+                _lr_ok = _ls['lr_no_trend']
+                tcol2.metric("Lewis–Robinson LR", f"{_ls['lewis_robinson_LR']:.3f}",
+                             "no trend" if _lr_ok else "trend",
+                             delta_color="normal" if _lr_ok else "inverse")
+                _r2 = _ls['r2_parts']
+                tcol3.metric("Exp. prob-plot r² (parts)",
+                             f"{_r2:.3f}" if _r2 is not None else "n/a")
+                st.caption(f"Trend tests vs. ±{LOUIT_LAPLACE_CRIT} critical value "
+                           f"(standard normal under H₀, α = 0.05). "
+                           f"cv = {_ls['cv_hat']:.3f}. r² is descriptive consistency, not a "
+                           f"formal goodness-of-fit test at this sample size.")
+            else:
+                st.info(f"Part {selected_part} has only {_ls['n_failures']} failure event(s) "
+                        f"(< {LOUIT_MIN_FAILURES_FOR_TREND}). Trend tests are not statistically "
+                        f"meaningful at this sample size; MPTS shown for reference only.")
+
+            if _ls['trend_testable'] and _ls['laplace_no_trend'] and _ls.get('lr_no_trend'):
+                st.success(f"**Verdict:** {_ls['verdict']}")
+            elif _ls['trend_testable'] and _ls['laplace_no_trend'] and not _ls.get('lr_no_trend'):
+                st.warning(f"**Verdict:** {_ls['verdict']}")
+            elif _ls['trend_testable']:
+                st.error(f"**Verdict:** {_ls['verdict']}")
+            else:
+                st.caption(f"**Verdict:** {_ls['verdict']}")
+
+        st.markdown("---")
+
         
         st.markdown("""
         <div class="citation-box">
