@@ -729,6 +729,24 @@ def compute_mtts_metrics(df, threshold):
     return pd.DataFrame(results)
 
 
+def _nist_uniform_order_statistic_medians(m):
+    """NIST/SEMATECH e-Handbook §1.3.3.22 uniform order-statistic medians:
+        m(1)   = 1 - m(n)
+        m(i)   = (i - 0.3175) / (n + 0.365)   for i = 2..n-1
+        m(n)   = 0.5 ** (1/n)
+    Returns the length-m array of uniform medians U(i)."""
+    u = np.empty(m, dtype=float)
+    mn = 0.5 ** (1.0 / m)
+    for i in range(1, m + 1):
+        if i == 1:
+            u[0] = 1.0 - mn
+        elif i == m:
+            u[m - 1] = mn
+        else:
+            u[i - 1] = (i - 0.3175) / (m + 0.365)
+    return u
+
+
 LOUIT_MIN_FAILURES_FOR_TREND = 5   # below this, trend tests are not meaningful
 LOUIT_MIN_FAILURES_FOR_R2 = 5
 LOUIT_LAPLACE_CRIT = 1.96          # standard normal, two-sided alpha = 0.05
@@ -779,8 +797,8 @@ def compute_louit_screening(df, part_id):
         parts_at_fail = [float(parts_cum.iloc[i]) for i in idx_fail]
         ivp = np.diff([0.0] + parts_at_fail)
         xs = np.sort(ivp); m = len(xs)
-        F = (np.arange(1, m + 1) - 0.375) / (m + 0.25)
-        q = -np.log(1 - F)
+        U = _nist_uniform_order_statistic_medians(m)
+        q = -np.log(1 - U)          # exponential percent point function G(U)
         out['r2_parts'] = float(np.corrcoef(q, xs)[0, 1] ** 2)
         out['r2_testable'] = True
     else:
@@ -817,8 +835,8 @@ def compute_louit_probplot_data(df, part_id):
     ivp = np.diff([0.0] + parts_at_fail)
     xs = np.sort(ivp)
     m = len(xs)
-    F = (np.arange(1, m + 1) - 0.375) / (m + 0.25)
-    q = -np.log(1 - F)
+    U = _nist_uniform_order_statistic_medians(m)
+    q = -np.log(1 - U)          # exponential percent point function G(U)
     slope, intercept = np.polyfit(q, xs, 1)
     r2 = float(np.corrcoef(q, xs)[0, 1] ** 2)
     return {'q': q, 'xs': xs, 'slope': float(slope), 'intercept': float(intercept),
