@@ -7460,37 +7460,66 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 return "S4", div
             return "S3", div
 
+        def _train_at_step(pool_df, threshold):
+            """Retrain the global model on a pool snapshot. Returns the trained
+            model dict or None if training fails (pool too small or class imbalance)."""
+            try:
+                gm = train_global_model(pool_df.copy(), threshold, defect_cols)
+                if "cal_model" not in gm or "features" not in gm:
+                    return None
+                return gm
+            except Exception:
+                return None
+
+
         def _build_walkforward(part_id, direction="forward"):
-            """Return a per-step DataFrame: step, date, work_order, order_qty,
-            scrap_pct, mpts_prob, rf_prob, delta, signal.
+            """Per-step DataFrame: step, date, work_order, order_qty, scrap_pct,
+            mpts_prob, rf_prob, delta, signal, pool_size, retrain_status.
 
             direction='forward'  -> months 1..32 (chronological, operational view)
             direction='reverse'  -> months 32..1 (order-robustness sensitivity view)
-            The RF score per run is unchanged by direction (it reads that run's own
-            feature vector); only the MPTS accumulation order and the step index change.
+
+            PER-EVENT RETRAINING:
+              At each step i for the selected part, the global RF is retrained on
+              the cumulative foundry-wide pool of all runs up to and including
+              that event's date, then scores the event through the retrained
+              calibrated model.
+
+            If the pool at step i is too small to support a 60-20-20 split with
+            both classes present, falls back to the H2-validated fixed model.
             """
-            part_id = str(part_id)  # dashboard stores part_id as string (data load line ~508)
+            part_id = str(part_id)
             pdat = df[df["part_id"] == part_id].sort_values("week_ending").reset_index(drop=True)
             if len(pdat) == 0:
                 return None, None
-            penh_full = _enh_all[_enh_all["part_id"] == part_id]
-            if "week_ending" in penh_full.columns:
-                penh_full = penh_full.sort_values("week_ending")
-            penh_full = penh_full.reset_index(drop=True)
+
+            thr = pdat["scrap_percent"].mean()
+
             if direction == "reverse":
                 pdat = pdat.iloc[::-1].reset_index(drop=True)
-                penh_full = penh_full.iloc[::-1].reset_index(drop=True)
-            thr = pdat["scrap_percent"].mean()                     # per-part threshold (order-invariant)
-            penh = penh_full
 
-            # chronic (MPTS) process = dominant defect over full history
             chronic_proc = "—"
             rates = {c: pdat[c].mean() for c in defect_cols if c in pdat.columns}
             if rates and max(rates.values()) > 0:
                 chronic_proc = _DEFECT_TO_PROC.get(max(rates, key=rates.get), "—")
 
+            df_sorted = df.sort_values("week_ending").reset_index(drop=True)
+            train_thr = global_model["global_threshold"]
+
             rows = []
             for i in range(len(pdat)):
+                event_date = pdat.iloc[i]["week_ending"]
+
+                pool = df_sorted[df_sorted["week_ending"] <= event_date].copy()
+                pool_size = len(pool)
+
+                gm_step = _train_at_step(pool, train_thr)
+                if gm_step is None:
+                    gm_step = global_model
+                    retrain_status = "fallback (H2 fixed)"
+                else:
+                    retrain_status = "retrained"
+
                 hist = pdat.iloc[:i + 1]
                 fc = int((hist["scrap_percent"] > thr).sum())
                 total_parts = hist["order_quantity"].sum()
@@ -7499,15 +7528,30 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 R = np.exp(-avg_oq / mpts_parts) if mpts_parts > 0 else 0
                 mpts_p = round(100 * (1 - R), 1)
 
-                # RF score for THIS run (enhanced row i), if available
                 rf_p = None
-                if i < len(penh):
-                    try:
-                        rf_p = _rf_prob_for_row(penh.iloc[[i]].copy())
-                    except Exception:
-                        rf_p = None
+                try:
+                    enh = pool.copy()
+                    enh = add_multi_defect_features(enh, defect_cols)
+                    enh = add_temporal_features(enh)
+                    enh = add_mtts_sequential_features(enh, train_thr)
+                    event_rows = enh[
+                        (enh["part_id"] == part_id) &
+                        (enh["week_ending"] == event_date)
+                    ]
+                    if len(event_rows) > 0:
+                        last_enh = event_rows.iloc[[-1]].copy()
+                        last_enh = attach_train_features(
+                            last_enh,
+                            gm_step["scrap_rate_train"], gm_step["part_freq_train"],
+                            gm_step["default_scrap_rate"], gm_step["default_freq"],
+                        )
+                        mtts_tr = compute_mtts_on_train(gm_step["df_train"], train_thr)
+                        last_enh = attach_mtts_aggregate_features(last_enh, mtts_tr)
+                        feat = last_enh.reindex(columns=gm_step["features"], fill_value=0).fillna(0)
+                        rf_p = round(float(gm_step["cal_model"].predict_proba(feat)[:, 1][0]) * 100, 1)
+                except Exception:
+                    rf_p = None
 
-                # active process from this run's defect rates
                 last_proc = "—"
                 rr = {c: float(pdat.iloc[i][c]) for c in defect_cols
                       if c in pdat.columns and float(pdat.iloc[i][c]) > 0}
@@ -7530,7 +7574,10 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                     rf_prob=rf_p if rf_p is not None else "",
                     delta=delta if delta is not None else "",
                     signal=sig,
+                    pool_size=pool_size,
+                    retrain_status=retrain_status,
                 ))
+
             return pd.DataFrame(rows), thr
 
         _SIG_COLOR = {"S1": "#1f77b4", "S2": "#c0392b", "S3": "#2ca02c", "S4": "#7b3f99"}
