@@ -203,13 +203,13 @@ PROCESS_DEFECT_MAP = {
     "Shakeout": {"defects": ["bent_rate"], 
                  "description": "Casting extraction, cooling",
                  "campbell_rule": "Rule 9: Reduce Residual Stress"},
-    "Pattern/Tooling": {"defects": ["gouged_rate"], 
+    "Pattern/Tooling": {"defects": [], 
                         "description": "Pattern accuracy, wear",
                         "campbell_rule": "Rule 10: Provide Location Points"},
     "Inspection": {"defects": ["outside_process_scrap_rate", "zyglo_rate", "failed_zyglo_rate"], 
                    "description": "Quality control, NDT",
                    "campbell_rule": "Detection stage (not process-origin)"},
-    "Finishing": {"defects": ["over_grind_rate", "cut_into_rate"], 
+    "Finishing": {"defects": ["over_grind_rate", "cut_into_rate", "gouged_rate"], 
                   "description": "Grinding, machining",
                   "campbell_rule": "Post-casting operations"}
 }
@@ -239,7 +239,13 @@ DEFECT_TO_PROCESSES = {
     'runout_rate':             [('Pouring',         True)],
     'dirty_pattern_rate':      [('Sand System',     True)],
     'bent_rate':               [('Shakeout',        True)],
-    'gouged_rate':             [('Pattern/Tooling', True)],
+    # Gouged -> Finishing: in the casting literature 'gouging' is a
+    #   finishing/salvage operation (remove defective metal by grinding,
+    #   machining, or gouging with arc/gas/chisel before rectification)
+    #   per Beeley (2001), Ch.5 p.307 and dressing p.543 -- not a molding
+    #   defect. (Reassigned from Pattern/Tooling, which had no literature
+    #   support for a 'gouge' defect.)
+    'gouged_rate':             [('Finishing',       True)],
     'over_grind_rate':         [('Finishing',       True)],
     'cut_into_rate':           [('Finishing',       True)],
     'zyglo_rate':              [('Inspection',      True)],
@@ -1654,7 +1660,7 @@ def compute_dual_model_validation_table(df, defect_cols, global_model, cohort_pa
         "sand_rate": "Sand System", "dirty_pattern_rate": "Sand System",
         "core_rate": "Core Making", "crush_rate": "Core Making",
         "shift_rate": "Core Making",
-        "bent_rate": "Shakeout", "gouged_rate": "Pattern/Tooling",
+        "bent_rate": "Shakeout", "gouged_rate": "Finishing",
         "over_grind_rate": "Finishing", "cut_into_rate": "Finishing",
         "zyglo_rate": "Inspection", "failed_zyglo_rate": "Inspection",
         "outside_process_scrap_rate": "Inspection",
@@ -6616,10 +6622,10 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
              "Campbell Rule(s)": "Rule 9: Reduce Residual Stress",
              "Rationale": "Bent castings result from mechanical damage during extraction or residual stress "
                          "from premature shakeout before adequate cooling (Ch. 9)."},
-            {"Dashboard Process": "Pattern/Tooling", "Dataset Defect Columns": "gouged_rate",
-             "Campbell Rule(s)": "Rule 10: Provide Location Points (extended)",
-             "Rationale": "Gouging is a surface defect consistent with pattern wear, damage, or dimensional "
-                         "degradation. Campbell emphasizes pattern/tooling accuracy for dimensional conformance (Ch. 10)."},
+            {"Dashboard Process": "Finishing", "Dataset Defect Columns": "gouged_rate",
+             "Campbell Rule(s)": "Post-casting operations (Beeley Ch. 5)",
+             "Rationale": "In the casting literature 'gouging' is a finishing/salvage operation — removing defective "
+                         "metal by grinding, machining, or gouging (arc/gas/chisel) before rectification (Beeley 2001, Ch. 5, p.307; dressing p.543)."},
             {"Dashboard Process": "Inspection", "Dataset Defect Columns": "outside_process_scrap_rate, zyglo_rate, failed_zyglo_rate",
              "Campbell Rule(s)": "Detection, not origination",
              "Rationale": "These are detection-stage classifications, not process-origin defects. Zyglo (fluorescent "
@@ -6740,7 +6746,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             "shrink_rate":"Gating Design","tear_up_rate":"Gating Design","shrink_porosity_rate":"Gating Design",
             "sand_rate":"Sand System","dirty_pattern_rate":"Sand System",
             "core_rate":"Core Making","crush_rate":"Core Making","shift_rate":"Core Making",
-            "bent_rate":"Shakeout","gouged_rate":"Pattern/Tooling",
+            "bent_rate":"Shakeout","gouged_rate":"Finishing",
             "over_grind_rate":"Finishing","cut_into_rate":"Finishing",
             "zyglo_rate":"Inspection","failed_zyglo_rate":"Inspection",
             "outside_process_scrap_rate":"Inspection",
@@ -7425,7 +7431,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             "sand_rate": "Sand System", "dirty_pattern_rate": "Sand System",
             "core_rate": "Core Making", "crush_rate": "Core Making",
             "shift_rate": "Core Making",
-            "bent_rate": "Shakeout", "gouged_rate": "Pattern/Tooling",
+            "bent_rate": "Shakeout", "gouged_rate": "Finishing",
             "over_grind_rate": "Finishing", "cut_into_rate": "Finishing",
             "zyglo_rate": "Inspection", "failed_zyglo_rate": "Inspection",
             "outside_process_scrap_rate": "Inspection",
@@ -7620,7 +7626,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             )
             return fig
 
-        _PROC = {3: "shift / Core Making", 14: "misrun / Pouring", 74: "gouged / Pattern/Tooling"}
+        _PROC = {3: "shift / Core Making", 14: "misrun / Pouring", 74: "gouged / Finishing"}
 
         st.caption(
             "Each part is shown in two traversal orders. **Forward (months 1→32)** is the "
@@ -7801,7 +7807,7 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             )
             return fig
 
-        _PROC_CS = {3: "shift / Core Making", 14: "misrun / Pouring", 74: "gouged / Pattern/Tooling"}
+        _PROC_CS = {3: "shift / Core Making", 14: "misrun / Pouring", 74: "gouged / Finishing"}
         for _pid in [3, 14, 74]:
             cs = _cold_start_trace(_pid)
             if cs is None:
