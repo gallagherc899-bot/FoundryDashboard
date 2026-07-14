@@ -7499,13 +7499,23 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
             if len(pdat) == 0:
                 return None, None
 
-            thr = pdat["scrap_percent"].mean()
+            # Appendix D / Figure 4-3: the dual-model comparison is like-for-like
+            # against the GLOBAL scrap line, because P_RF is defined as the
+            # probability that the last run exceeds the global scrap average.
+            # The part's own mean is retained for context (H1 / Table 4-1).
+            thr_own    = pdat["scrap_percent"].mean()
+            thr_global = global_model["global_threshold"]
+            thr        = thr_global          # <-- Figure 4-3 basis
 
             if direction == "reverse":
                 pdat = pdat.iloc[::-1].reset_index(drop=True)
 
             chronic_proc = "—"
-            rates = {c: pdat[c].mean() for c in defect_cols if c in pdat.columns}
+            # Eq. D-25: P_chronic = At(r_hist); r_hist = mean defect-rates over
+            # the part's FAILURE runs (scrap > the part's own mean).
+            _fail = pdat[pdat["scrap_percent"] > thr_own]
+            _base = _fail if len(_fail) else pdat
+            rates = {c: _base[c].mean() for c in defect_cols if c in _base.columns}
             if rates and max(rates.values()) > 0:
                 chronic_proc = _DEFECT_TO_PROC.get(max(rates, key=rates.get), "—")
 
@@ -7569,6 +7579,14 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                 else:
                     sig, delta = "", None
 
+                # context traces plotted alongside the global trace in Figure 4-3
+                _fc_own = int((hist["scrap_percent"] > thr_own).sum())
+                _mp_own = total_parts / _fc_own if _fc_own > 0 else total_parts
+                mpts_own_p = round(100 * (1 - np.exp(-avg_oq / _mp_own)), 1) if _mp_own > 0 else 0.0
+                _fc_1 = max(int((hist["scrap_percent"] > 1.0).sum()), 1)
+                _mp_1 = total_parts / _fc_1
+                mpts_1pct_p = round(100 * (1 - np.exp(-avg_oq / _mp_1)), 1) if _mp_1 > 0 else 0.0
+
                 rows.append(dict(
                     step=i,
                     date=str(pdat.iloc[i]["week_ending"].date())
@@ -7577,6 +7595,8 @@ This means **{total_parts - h1_pass_count} parts ({(total_parts - h1_pass_count)
                     order_qty=int(pdat.iloc[i]["order_quantity"]),
                     scrap_pct=round(float(pdat.iloc[i]["scrap_percent"]), 3),
                     mpts_prob=mpts_p,
+                    mpts_own=mpts_own_p,
+                    mpts_1pct=mpts_1pct_p,
                     rf_prob=rf_p if rf_p is not None else "",
                     delta=delta if delta is not None else "",
                     signal=sig,
