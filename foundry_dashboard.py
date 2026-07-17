@@ -3502,13 +3502,19 @@ def main():
         d_data = df[df['part_id'] == d_part]
         d_part_avg = float(d_data['scrap_percent'].mean()) if len(d_data) else 0.0
         d_global = float(df['scrap_percent'].mean())
+        d_scrap_max = float(round(d_data['scrap_percent'].max() + 1, 1)) if len(d_data) else 12.0
+
+        # When the part changes, reset the threshold slider to THIS part's own average.
+        _thr_max = float(max(12.0, d_scrap_max))
+        if st.session_state.get("defense_last_part") != d_part:
+            st.session_state["defense_thr"] = float(min(max(round(d_part_avg, 2), 0.5), _thr_max))
+            st.session_state["defense_last_part"] = d_part
         with dcol2:
             d_thr = st.slider("Scrap % Threshold (failure definition)",
                               min_value=0.5,
-                              max_value=float(max(12.0, round(d_data['scrap_percent'].max() + 1, 1) if len(d_data) else 12.0)),
-                              value=round(d_part_avg, 2),
+                              max_value=_thr_max,
                               step=0.1, key="defense_thr",
-                              help="Defaults to the part's own average (the MPTS renewal baseline). "
+                              help="Defaults to the selected part's own average (the MPTS renewal baseline). "
                                    "Global average shown for reference.")
         st.markdown(
             f"<div style='background:#EAF4F0;border-left:5px solid #0E7C7B;padding:8px 12px;border-radius:4px;'>"
@@ -3530,10 +3536,35 @@ def main():
             louit = None
         pooled = compute_pooled_prediction(df, d_part, d_thr)
 
+        # MPTS parts at the current threshold (drives R(n) = e^(-n / MPTS_parts))
+        _mpts_parts = None
+        if louit and louit.get('mpts_parts'):
+            _mpts_parts = float(louit['mpts_parts'])
+        elif pooled.get('mtts_parts'):
+            _mpts_parts = float(pooled['mtts_parts'])
+
+        # Order quantity (parts in the next run): default to this part's average, editable.
+        _avg_oq = float(round(d_data['order_quantity'].mean())) if len(d_data) else 100.0
+        oqc1, oqc2 = st.columns([1, 2])
+        with oqc1:
+            d_oq = st.number_input("Parts in next run (order qty)",
+                                   min_value=1, value=int(max(1, _avg_oq)), step=1,
+                                   key="defense_oq",
+                                   help=f"Defaults to Part {d_part}'s average order quantity ({int(_avg_oq)}). "
+                                        "Enter any order size to see reliability for that run.")
+        # Reliability at the chosen order quantity
+        if _mpts_parts and _mpts_parts > 0:
+            d_reliab = float(np.exp(-d_oq / _mpts_parts))
+        else:
+            d_reliab = float(pooled.get('reliability_next_run', 0))
+        with oqc2:
+            st.caption(f"R(n) = e^(−n / MPTS) = e^(−{d_oq:,} / {(_mpts_parts or 0):,.0f}) "
+                       f"→ probability the run of {d_oq:,} parts completes without a scrap event.")
+
         h1c1, h1c2, h1c3, h1c4 = st.columns(4)
         h1c1.metric("MTTS (runs)", f"{pooled.get('mtts_runs', float('nan')):.1f}")
-        h1c2.metric("MTTS (parts)", f"{pooled.get('mtts_parts', 0):,.0f}")
-        h1c3.metric("Reliability (next run)", f"{pooled.get('reliability_next_run', 0)*100:.1f}%")
+        h1c2.metric("MTTS (parts)", f"{(_mpts_parts or pooled.get('mtts_parts', 0)):,.0f}")
+        h1c3.metric(f"Reliability (run of {d_oq:,})", f"{d_reliab*100:.1f}%")
         h1c4.metric("Failures / runs", f"{pooled.get('failure_count', 0)} / {len(d_data)}")
 
         if louit and louit.get('trend_testable'):
