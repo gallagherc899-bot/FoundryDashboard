@@ -3562,8 +3562,8 @@ def main():
                        f"→ probability the run of {d_oq:,} parts completes without a scrap event.")
 
         h1c1, h1c2, h1c3, h1c4 = st.columns(4)
-        h1c1.metric("MTTS (runs)", f"{pooled.get('mtts_runs', float('nan')):.1f}")
-        h1c2.metric("MTTS (parts)", f"{(_mpts_parts or pooled.get('mtts_parts', 0)):,.0f}")
+        h1c1.metric("MPTS (runs)", f"{pooled.get('mtts_runs', float('nan')):.1f}")
+        h1c2.metric("MPTS (parts)", f"{(_mpts_parts or pooled.get('mtts_parts', 0)):,.0f}")
         h1c3.metric(f"Reliability (run of {d_oq:,})", f"{d_reliab*100:.1f}%")
         h1c4.metric("Failures / runs", f"{pooled.get('failure_count', 0)} / {len(d_data)}")
 
@@ -3691,11 +3691,55 @@ def main():
         # H3 — Avoidance + energy / emissions (this part)
         # ============================================================
         st.subheader("H3 · Acting on it avoids scrap  (energy & emissions)")
+
+        # ---- Facility-level H3 results, as reported in the praxis ----
+        fh1, fh2, fh3, fh4 = st.columns(4)
+        fh1.metric("Scrap avoidance", "12.70%", help="Of the 20,629 lb facility scrap (first 12 months)")
+        fh2.metric("Avoidable scrap", "2,619 lbs/yr", help="Seven parts, Tier 1 clip-to-baseline, CP-adjusted")
+        fh3.metric("TTE / GHG avoided", "123.7 MMBtu · 6.56 MT CO₂")
+        fh4.metric("Benefit-Cost Ratio", "4.02×")
         st.markdown(
             "<div style='background:#EAF4F0;border-left:5px solid #1F8A52;padding:8px 12px;border-radius:4px;'>"
-            "<strong>Facility result (locked):</strong> 12.70% first-year scrap avoidance across the seven "
-            "MPTS-eligible parts (2,619 lbs/yr, CP-adjusted) — meets/exceeds the EPA ENERGY STAR 3–10% range. "
-            "Part 15 alone contributes 7.90%.</div>", unsafe_allow_html=True)
+            "<strong>Facility result (locked):</strong> the seven MPTS-eligible parts (4% of the catalogue) supply "
+            "39.25% of first-year scrap; a Tier 1 clip-to-baseline intervention yields <strong>12.70% avoidance</strong> "
+            "(2,619 lbs/yr, CP-adjusted) — meeting/exceeding the EPA ENERGY STAR 3–10% range and aligning with the DOE "
+            "10% target. Part 15 alone contributes 7.90%.</div>", unsafe_allow_html=True)
+
+        # ---- Table 4-6: seven-part per-part avoidance (computed live, clip-to-baseline) ----
+        with st.expander("Table 4-6 · Seven-part aggregate Tier 1 avoidable scrap (per part)", expanded=True):
+            _CP = 0.902
+            _seven = ['15', '63', '74', '122', '3', '14', '124']
+            _cs = pd.to_datetime(df['week_ending'], errors='coerce').min()
+            _w12 = _cs + pd.Timedelta(days=365)
+            _facility = 20629.0
+            _rows = []
+            _tot = 0.0
+            for _p in _seven:
+                _pp = df[df['part_id'] == _p].copy()
+                _pp['week_ending'] = pd.to_datetime(_pp['week_ending'], errors='coerce')
+                _bl = _pp['scrap_percent'].mean() / 100.0
+                _wn = _pp[_pp['week_ending'] < _w12]
+                _pw = _wn['piece_weight_lbs'] if 'piece_weight_lbs' in _wn.columns else 1.0
+                _ex = ((_wn['order_quantity'] * _pw * (_wn['scrap_percent'] / 100.0))
+                       - (_wn['order_quantity'] * _pw * _bl)).clip(lower=0)
+                _cp = float(_ex.sum()) * _CP
+                _tot += _cp
+                _rows.append({
+                    "Part": _p,
+                    "Chronic baseline %": f"{_pp['scrap_percent'].mean():.2f}%",
+                    "CP-adj avoidable (lbs/yr)": f"{_cp:,.0f}",
+                    "% of facility scrap": f"{100 * _cp / _facility:.2f}%",
+                })
+            _rows.append({"Part": "Total", "Chronic baseline %": "—",
+                          "CP-adj avoidable (lbs/yr)": f"{_tot:,.0f}",
+                          "% of facility scrap": f"{100 * _tot / _facility:.2f}%"})
+            st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+            st.caption("Each part clipped over the first 12 months back to its 32-month chronic baseline, "
+                       "Clopper-Pearson adjusted (×0.902), against the 20,629 lb facility scrap. "
+                       "Reproduces Table 4-6: 2,619 lbs / 12.70%, Part 15 = 7.90%.")
+
+        st.markdown(f"---")
+        st.markdown(f"**Selected part (Part {d_part}) — its own H3 contribution:**")
 
         # ---- Actual H3 method: clip first-12-month runs above the part's
         # 32-month chronic baseline back to that baseline; CP-adjust (×0.902). ----
