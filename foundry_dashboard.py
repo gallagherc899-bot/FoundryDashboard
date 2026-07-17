@@ -3493,12 +3493,12 @@ def main():
         st.caption("A single view of everything reported for a selected part. "
                    "Part and threshold controls mirror the Prognostic tab; no LIME.")
 
-        # ---- Controls: part + threshold (self-contained on this tab) ----
-        dcol1, dcol2 = st.columns([1, 1])
-        with dcol1:
-            d_part = st.selectbox("Select Part ID", part_ids,
-                                  index=part_ids.index(selected_part) if selected_part in part_ids else 0,
-                                  key="defense_part")
+        # ---- Controls: threshold only. The PART is the app-wide selector
+        # at the top of the page (selected_part) — no second dropdown here. ----
+        d_part = selected_part
+        st.caption(f"Showing results for **Part {d_part}** — change the part using the "
+                   f"**Select Part ID** control at the top of the page.")
+        _spacer, dcol2 = st.columns([1, 1])
         d_data = df[df['part_id'] == d_part]
         d_part_avg = float(d_data['scrap_percent'].mean()) if len(d_data) else 0.0
         d_global = float(df['scrap_percent'].mean())
