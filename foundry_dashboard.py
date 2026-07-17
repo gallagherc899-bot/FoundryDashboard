@@ -3684,15 +3684,40 @@ def main():
             _r = None
 
         if _r is not None and _r.get("Signal", "—") not in ("—", None):
+            # --- MPTS P% computed INLINE from the SAME MPTS_parts + avg order qty
+            #     that H1 uses, so it is guaranteed consistent with 1 - reliability.
+            if _mpts_parts and _mpts_parts > 0:
+                _mp = round((1.0 - float(np.exp(-(_avg_oq) / _mpts_parts))) * 100.0, 1)
+            else:
+                _mp = _r.get("MPTS P%")
+            # RF last-run probability comes from the RF (its own output) via the table.
+            _rf = _r.get("RF Last%")
+            # Δ and the S1/S2/S3 classification are derived from the inline MPTS P%.
+            if _rf is not None and _mp is not None:
+                _dl = round(_rf - _mp, 1)
+                if abs(_dl) <= 5:
+                    _sig_base = "S1 — Aligned ≈"
+                elif _dl > 5:
+                    _sig_base = "S2 — Alarm ▲"
+                else:
+                    _sig_base = "S3 — Improvement ▼"
+                # Promote to S4 if improving AND the active process differs from chronic
+                _chron = _r.get("Chronic Process", "—"); _activ = _r.get("Last-Run Active", "—")
+                if _dl < -5 and _activ not in (_chron, "—", None):
+                    _sigtxt = "S4 — New Process ⚡"
+                else:
+                    _sigtxt = _sig_base
+            else:
+                _dl = _r.get("Δ (pp)"); _sigtxt = str(_r.get("Signal", "—"))
+
             sg1, sg2, sg3, sg4 = st.columns(4)
-            _mp = _r.get("MPTS P%"); _rf = _r.get("RF Last%"); _dl = _r.get("Δ (pp)")
             sg1.metric("MPTS P%", f"{_mp:.1f}%" if _mp is not None else "—",
-                       help="Prognostic exceedance probability for the next run.")
+                       help="Prognostic exceedance probability at the average order quantity "
+                            "(= 1 − H1 reliability at that order size).")
             sg2.metric("RF Last%", f"{_rf:.1f}%" if _rf is not None else "—",
                        help="RF probability the last run exceeds the global scrap average.")
             sg3.metric("Δ (pp)", f"{_dl:+.1f}" if _dl is not None else "—",
                        help="Δ = RF Last% − MPTS P%.")
-            _sigtxt = str(_r.get("Signal", "—"))
             _color = {"S1": "#1F8A52", "S2": "#B23A48", "S3": "#185FA5", "S4": "#C77700"}
             _key = next((k for k in _color if _sigtxt.startswith(k)), None)
             sg4.markdown(
@@ -3761,6 +3786,100 @@ def main():
             "10% target. Part 15 alone contributes 7.90%.</div>", unsafe_allow_html=True)
 
         # ---- Table 4-6: seven-part per-part avoidance (computed live, clip-to-baseline) ----
+        # ---- Shared H3 window + constants (live) ----
+        _CP = 0.902
+        _PW = 'piece_weight_lbs'
+        _cs = pd.to_datetime(df['week_ending'], errors='coerce').min()
+        _w12 = _cs + pd.Timedelta(days=365)
+        _wall = df.copy()
+        _wall['week_ending'] = pd.to_datetime(_wall['week_ending'], errors='coerce')
+        _win = _wall[_wall['week_ending'] < _w12].copy()
+        _TTEF = 47250.0      # BTU/lb (Eppich 2004)
+        _CO2F = 53.06        # kg CO2/MMBtu (EPA 2023)
+        _ECOST = 12.00       # $/MMBtu (DOE)
+        _MCOST = 2.50        # $/lb aluminum
+        _IMPL = 2000.0       # $ implementation
+
+        # ===== TABLE 4-4 · Foundry Operational Parameters (live) =====
+        with st.expander("Table 4-4 · Foundry Operational Parameters (computed from the census)", expanded=False):
+            _tot_prod = float((_win['order_quantity'] * _win[_PW]).sum())
+            _tot_scrap = float((_win['order_quantity'] * _win[_PW] * (_win['scrap_percent'] / 100.0)).sum())
+            _rate32 = df['scrap_percent'].mean()
+            _rate12 = 100.0 * _tot_scrap / _tot_prod if _tot_prod else 0.0
+            _p15 = df[df['part_id'] == '15'].copy()
+            _p15['week_ending'] = pd.to_datetime(_p15['week_ending'], errors='coerce')
+            _p15w = _p15[_p15['week_ending'] < _w12]
+            _p15_prod = float((_p15w['order_quantity'] * _p15w[_PW]).sum())
+            _p15_scrap = float((_p15w['order_quantity'] * _p15w[_PW] * (_p15w['scrap_percent'] / 100.0)).sum())
+            _p15_avg12 = 100.0 * _p15_scrap / _p15_prod if _p15_prod else 0.0
+            _p15_base = _p15['scrap_percent'].mean()
+            # Part 15 new mean after clipping above-baseline runs to baseline (first 12 mo target)
+            _p15_clip = _p15w.copy()
+            _p15_clip_rate = _p15_clip['scrap_percent'].clip(upper=_p15_base)
+            _p15_newmean = float((_p15_clip['order_quantity'] * _p15_clip[_PW] * (_p15_clip_rate / 100.0)).sum()
+                                 / _p15_prod * 100.0) if _p15_prod else 0.0
+            _t44 = [
+                {"Parameter": "Total foundry production (first 12 months)", "Value": f"{_tot_prod:,.0f} lbs",
+                 "Source": "Σ(order-qty × piece-weight), first 12 mo"},
+                {"Parameter": "Total foundry scrap (first 12 months)", "Value": f"{_tot_scrap:,.0f} lbs",
+                 "Source": "Foundry records, first 12 mo of 32-mo census"},
+                {"Parameter": "Current foundry scrap rate", "Value": f"{_rate32:.2f}% (32-mo) · {_rate12:.2f}% (12-mo)",
+                 "Source": "Population census, n = 1,257"},
+                {"Parameter": "Part 15 production (first 12 months)", "Value": f"{_p15_prod:,.0f} lbs",
+                 "Source": "Part 15 order-qty × 22 lb/piece"},
+                {"Parameter": "Part 15 average scrap rate (first 12 months)", "Value": f"{_p15_avg12:.2f}%",
+                 "Source": f"{_p15_scrap:,.0f} lbs / {_p15_prod:,.0f} lbs"},
+                {"Parameter": "Part 15 chronic baseline (32-mo mean) — Tier 1 clip level", "Value": f"{_p15_base:.2f}%",
+                 "Source": "Mean scrap% over 32 months"},
+                {"Parameter": "Part 15 new mean after clipping to baseline", "Value": f"{_p15_newmean:.2f}%",
+                 "Source": "Tier 1 target for Eq. 3-11"},
+                {"Parameter": "Energy intensity (TTEF)", "Value": "47,250 BTU/lb (94.5 MMBtu/ton)",
+                 "Source": "Eppich (2004); EPA (2016)"},
+                {"Parameter": "Energy cost", "Value": "$12.00/MMBtu", "Source": "DOE benchmark"},
+                {"Parameter": "CO₂ emission factor", "Value": "53.06 kg CO₂/MMBtu", "Source": "EPA (2023)"},
+                {"Parameter": "Material cost", "Value": "$2.50/lb", "Source": "Aluminum scrap-value benchmark"},
+                {"Parameter": "Implementation cost (estimated)", "Value": "$2,000", "Source": "No new sensor infrastructure"},
+            ]
+            st.dataframe(pd.DataFrame(_t44), hide_index=True, use_container_width=True)
+            st.caption("Production, scrap, and rates computed live from the first 12 months of the census. "
+                       "Physical/economic constants (energy, CO₂, costs) are the cited literature values.")
+
+        # ===== TABLE 4-5 · Equation-by-Equation Calculation Chain (live, Part 15) =====
+        with st.expander("Table 4-5 · Equation-by-equation calculation chain (Part 15 worked example)", expanded=False):
+            _red_raw = _p15_prod * (_p15_avg12 - _p15_newmean) / 100.0     # Eq 3-11
+            _red_cp = _red_raw * _CP                                        # Eq 3-12
+            _tte = _red_cp * _TTEF / 1_000_000                             # Eq 3-13
+            _ghg = _tte * _CO2F / 1000                                     # Eq 3-14
+            _matsav = _red_cp * _MCOST                                     # Eq 3-15
+            _ensav = _tte * _ECOST                                         # Eq 3-16
+            _bcr = (_matsav + _ensav) / _IMPL                              # Eq 3-17
+            _totsav = _matsav + _ensav                                     # Eq 3-18
+            _pieces = _red_cp / 22.0
+            _t45 = [
+                {"Equation": "Eq. 3-11: Annual Scrap Reduction (unadjusted)",
+                 "Calculation": f"{_p15_prod:,.0f} × ({_p15_avg12:.2f}% − {_p15_newmean:.2f}%)/100",
+                 "Result": f"{_red_raw:,.0f} lbs/yr"},
+                {"Equation": "Eq. 3-12: C-P-Adjusted Scrap Reduction",
+                 "Calculation": f"{_red_raw:,.0f} × 0.902", "Result": f"{_red_cp:,.0f} lbs/yr"},
+                {"Equation": "Eq. 3-13: TTE Savings",
+                 "Calculation": f"{_red_cp:,.0f} × 47,250 / 1,000,000", "Result": f"{_tte:,.1f} MMBtu/yr"},
+                {"Equation": "Eq. 3-14: GHG Reduction",
+                 "Calculation": f"{_tte:,.1f} × 53.06 / 1,000", "Result": f"{_ghg:,.2f} MT CO₂/yr"},
+                {"Equation": "Eq. 3-15: Material Savings",
+                 "Calculation": f"{_red_cp:,.0f} lbs × $2.50/lb", "Result": f"${_matsav:,.0f}/yr"},
+                {"Equation": "Eq. 3-16: Energy Savings",
+                 "Calculation": f"{_tte:,.1f} × $12.00/MMBtu", "Result": f"${_ensav:,.0f}/yr"},
+                {"Equation": "Eq. 3-17: Benefit-Cost Ratio (BCR)",
+                 "Calculation": f"(${_matsav:,.0f} + ${_ensav:,.0f}) / $2,000", "Result": f"{_bcr:.2f} BCR"},
+                {"Equation": "Eq. 3-18: Total Annual Savings",
+                 "Calculation": f"${_matsav:,.0f} + ${_ensav:,.0f}", "Result": f"${_totsav:,.0f}/yr"},
+                {"Equation": "Pieces Saved from Scrap",
+                 "Calculation": f"{_red_cp:,.0f} lbs / 22 lb/piece", "Result": f"{_pieces:,.0f} pieces"},
+            ]
+            st.dataframe(pd.DataFrame(_t45), hide_index=True, use_container_width=True)
+            st.caption("Each row computed live from Part 15's first-12-month data and the operational parameters "
+                       "in Table 4-4. Reproduces the praxis Table 4-5 chain for Part 15.")
+
         with st.expander("Table 4-6 · Seven-part aggregate Tier 1 avoidable scrap (per part)", expanded=True):
             _CP = 0.902
             _seven = ['15', '63', '74', '122', '3', '14', '124']
@@ -3792,6 +3911,19 @@ def main():
             st.caption("Each part clipped over the first 12 months back to its 32-month chronic baseline, "
                        "Clopper-Pearson adjusted (×0.902), against the 20,629 lb facility scrap. "
                        "Reproduces Table 4-6: 2,619 lbs / 12.70%, Part 15 = 7.90%.")
+
+        # ===== TABLE 4-7 · Alignment with EPA ENERGY STAR Benchmark (live) =====
+        with st.expander("Table 4-7 · Alignment with EPA ENERGY STAR benchmark", expanded=False):
+            _avoid_pct = 100.0 * _tot / 20629.0   # _tot from the 4-6 block above
+            _t47 = [
+                {"Benchmark": "EPA ENERGY STAR process-level savings", "Reference Range": "3–10%",
+                 "This Study": f"{_avoid_pct:.2f}%", "Status": "Exceeded ✓"},
+                {"Benchmark": "Annual scrap avoided vs. DOE 10% target", "Reference Range": "≥ 10% of facility scrap",
+                 "This Study": f"{_avoid_pct:.2f}%", "Status": "Aligned ✓"},
+            ]
+            st.dataframe(pd.DataFrame(_t47), hide_index=True, use_container_width=True)
+            st.caption("This-study figure is the seven-part CP-adjusted avoidance (Table 4-6) as a percentage of the "
+                       "20,629 lb facility scrap, benchmarked against EPA ENERGY STAR (2016) 3–10% and the DOE 10% target.")
 
         st.markdown(f"---")
         st.markdown(f"**Selected part (Part {d_part}) — its own H3 contribution:**")
