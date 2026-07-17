@@ -3524,12 +3524,48 @@ def main():
             f"&nbsp;·&nbsp; runs <strong>{len(d_data)}</strong></div>",
             unsafe_allow_html=True)
 
+        # ============================================================
+        # ELIGIBILITY GATE — is this part valid for MPTS?
+        # Criteria (§3.3.1): ≥20 runs AND ≥4 own-mean exceedances AND no trend.
+        # The seven reported parts: 15, 63, 74, 122, 3, 14, 124.
+        # ============================================================
+        _ELIGIBLE_SEVEN = {'15', '63', '74', '122', '3', '14', '124'}
+        _n_runs = len(d_data)
+        _n_exceed = int((d_data['scrap_percent'] > d_part_avg).sum()) if _n_runs else 0
+        _is_seven = str(d_part) in _ELIGIBLE_SEVEN
+        _meets_runs = _n_runs >= 20
+        _meets_exceed = _n_exceed >= 4
+
+        if _is_seven:
+            st.success(f"✅ **Part {d_part} is one of the seven MPTS-eligible parts.** "
+                       f"All results below are valid and reported in the praxis "
+                       f"({_n_runs} runs · {_n_exceed} own-mean exceedances · no trend per Louit).")
+            _valid = True
+        elif _meets_runs and _meets_exceed:
+            st.info(f"ℹ️ **Part {d_part} meets the run/exceedance thresholds** "
+                    f"({_n_runs} runs · {_n_exceed} exceedances) but is not among the seven parts reported "
+                    f"in the praxis (it may not clear the Louit no-trend screen). Treat the figures below as "
+                    f"exploratory, not reported results.")
+            _valid = True
+        else:
+            _why = []
+            if not _meets_runs: _why.append(f"only {_n_runs} runs (needs ≥20)")
+            if not _meets_exceed: _why.append(f"only {_n_exceed} own-mean exceedances (needs ≥4)")
+            st.warning(f"⚠️ **Part {d_part} is NOT MPTS-eligible** — " + "; ".join(_why) + ". "
+                       "MPTS needs ≥20 runs and ≥4 scrap-threshold exceedances so the reliability estimate is "
+                       "statistically meaningful (§3.3.1). Any reliability, signal, or avoidance figure shown "
+                       "below for this part is **not valid** and is not part of the reported results — the seven "
+                       "reported parts are 15, 63, 74, 122, 3, 14, and 124.")
+            _valid = False
+
         st.divider()
 
         # ============================================================
         # H1 — Reliability licensed (Louit) + MPTS reliability
         # ============================================================
         st.subheader("H1 · Reliability model is licensed  (MPTS + Louit renewal screen)")
+        if not _valid:
+            st.caption("⚠️ Not valid for this part — shown for illustration only (part is not MPTS-eligible).")
         try:
             louit = compute_louit_screening(df, d_part)
         except Exception as e:
@@ -3630,6 +3666,8 @@ def main():
         # S-SIGNAL — dual-model divergence for THIS part
         # ============================================================
         st.subheader("Dual-model signal for this part  (MPTS vs RF → S1–S4)")
+        if not _valid:
+            st.caption("⚠️ Not valid for this part — the signal needs a stable MPTS baseline (≥20 runs, ≥4 exceedances).")
 
         @st.cache_data(show_spinner="Computing dual-model signal…")
         def _defense_signal(_part_id):
@@ -3664,6 +3702,23 @@ def main():
             _cc1, _cc2 = st.columns(2)
             _cc1.markdown(f"**Chronic process (MPTS):** {_r.get('Chronic Process','—')}")
             _cc2.markdown(f"**Last-run active process (RF):** {_r.get('Last-Run Active','—')}")
+            # Cross-check: the signal's MPTS P% must equal 1 - H1 reliability at the
+            # AVERAGE order quantity (both are 1 - e^(-avg_oq/MPTS)). If they differ,
+            # something is stale — surface it rather than let two numbers disagree.
+            try:
+                _h1_avg_R = float(np.exp(-(_avg_oq) / _mpts_parts)) if _mpts_parts else None
+                if _h1_avg_R is not None and _mp is not None:
+                    _implied = (1 - _h1_avg_R) * 100
+                    if abs(_implied - _mp) > 0.3:
+                        st.warning(f"Consistency note: signal MPTS P% ({_mp:.1f}%) and 1 − H1 reliability "
+                                   f"at avg order qty ({_implied:.1f}%) differ — clear the cache (⋮ → Clear cache) "
+                                   f"and rerun; they should be identical.")
+                    else:
+                        st.caption(f"✓ Cross-check: signal MPTS P% ({_mp:.1f}%) = 1 − reliability at the "
+                                   f"average order quantity ({int(_avg_oq)} parts). The H1 box lets you vary the "
+                                   f"order size; the signal is fixed at the average.")
+            except Exception:
+                pass
         else:
             st.info(f"Part {d_part} has insufficient failure history to produce a stable dual-model signal "
                     f"(the S-signal requires enough exceedance runs to define the MPTS baseline).")
@@ -3740,6 +3795,8 @@ def main():
 
         st.markdown(f"---")
         st.markdown(f"**Selected part (Part {d_part}) — its own H3 contribution:**")
+        if not _valid:
+            st.caption("⚠️ Part not MPTS-eligible — this per-part avoidance is illustrative and excluded from the reported 12.70%.")
 
         # ---- Actual H3 method: clip first-12-month runs above the part's
         # 32-month chronic baseline back to that baseline; CP-adjust (×0.902). ----
