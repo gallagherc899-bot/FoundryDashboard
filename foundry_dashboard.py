@@ -3620,7 +3620,61 @@ def main():
             pass
 
         st.caption("RF trained foundry-wide against the global scrap average (4.90%). It classifies completed "
-                   "runs — the diagnostic layer that checks whether 'other factors are at play' (Juran).")
+                   "runs — the diagnostic layer that checks whether 'other factors are at play' (Juran). "
+                   "These validation metrics are the single foundry-wide model's out-of-sample result "
+                   "(one RF for all parts), not a per-part figure — the same model then scores each part's last run below.")
+
+        st.divider()
+
+        # ============================================================
+        # S-SIGNAL — dual-model divergence for THIS part
+        # ============================================================
+        st.subheader("Dual-model signal for this part  (MPTS vs RF → S1–S4)")
+        try:
+            _sig_df, _ = compute_dual_model_validation_table(df, defect_cols, global_model, [d_part])
+            _r = _sig_df.iloc[0] if _sig_df is not None and len(_sig_df) else None
+        except Exception:
+            _r = None
+
+        if _r is not None and _r.get("Signal", "—") not in ("—", None):
+            sg1, sg2, sg3, sg4 = st.columns(4)
+            _mp = _r.get("MPTS P%"); _rf = _r.get("RF Last%"); _dl = _r.get("Δ (pp)")
+            sg1.metric("MPTS P%", f"{_mp:.1f}%" if _mp is not None else "—",
+                       help="Prognostic exceedance probability for the next run.")
+            sg2.metric("RF Last%", f"{_rf:.1f}%" if _rf is not None else "—",
+                       help="RF probability the last run exceeds the global scrap average.")
+            sg3.metric("Δ (pp)", f"{_dl:+.1f}" if _dl is not None else "—",
+                       help="Δ = RF Last% − MPTS P%.")
+            _sigtxt = str(_r.get("Signal", "—"))
+            _color = {"S1": "#1F8A52", "S2": "#B23A48", "S3": "#185FA5", "S4": "#C77700"}
+            _key = next((k for k in _color if _sigtxt.startswith(k)), None)
+            sg4.markdown(
+                f"<div style='padding:6px 10px;border-radius:6px;background:{_color.get(_key,'#55606B')};"
+                f"color:#fff;text-align:center;font-weight:700;font-size:15px;margin-top:6px;'>"
+                f"{_sigtxt}</div>", unsafe_allow_html=True)
+            _cc1, _cc2 = st.columns(2)
+            _cc1.markdown(f"**Chronic process (MPTS):** {_r.get('Chronic Process','—')}")
+            _cc2.markdown(f"**Last-run active process (RF):** {_r.get('Last-Run Active','—')}")
+        else:
+            st.info(f"Part {d_part} has insufficient failure history to produce a stable dual-model signal "
+                    f"(the S-signal requires enough exceedance runs to define the MPTS baseline).")
+
+        # ---- S1–S4 legend / key ----
+        st.markdown("**What the signals mean:**")
+        _legend = [
+            {"Signal": "S1 — Aligned ≈", "Meaning": "Δ within ±5pp. Nothing new at play — status-quo signature.",
+             "Manager action": "Conditions consistent with history. Schedule PM as planned."},
+            {"Signal": "S2 — Alarm ▲", "Meaning": "RF > MPTS + 5pp. Last run looks worse than the part's baseline.",
+             "Manager action": "Expedite PM — do not wait for the scheduled interval."},
+            {"Signal": "S3 — Improvement ▼", "Meaning": "RF < MPTS − 5pp. Last run better than baseline.",
+             "Manager action": "Confirm whether a prior PM intervention held."},
+            {"Signal": "S4 — New Process ⚡", "Meaning": "Improving, but the leading defect shifted to a different Campbell process.",
+             "Manager action": "Schedule chronic PM and watch the newly active process next run."},
+        ]
+        st.dataframe(pd.DataFrame(_legend), hide_index=True, use_container_width=True)
+        st.caption("Δ = RF last-run probability − MPTS probability (percentage points). The ±5pp band was "
+                   "determined by trial-and-error against the 32-month census to separate the four signals, and "
+                   "is a foundry-tunable parameter (proof of concept), not a universal cutoff.")
 
         st.divider()
 
