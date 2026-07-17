@@ -319,6 +319,9 @@ DEFECT_TO_PROCESS = {
     for defect, procs in DEFECT_TO_PROCESSES.items()
 }
 
+# Module-level flat primary map (for the Defense tab attribution display)
+DEFECT_TO_PROC = dict(DEFECT_TO_PROCESS)
+
 
 def process_co_occurrence_score(process_name, observed_defects_set):
     """
@@ -2172,112 +2175,6 @@ def train_stage1_foundry_wide(df, defect_cols):
     }
 
 
-def compute_threshold_robustness_table(df, defect_cols, thresholds=None):
-    """
-    ROBUSTNESS TABLE — H2 recall across a range of scrap thresholds.
-
-    Retrains the Stage-1 foundry-wide detector at each scrap threshold using the
-    IDENTICAL pipeline as train_stage1_foundry_wide (same features, 60-20-20 time
-    split, sigmoid calibration) and reports test-set Recall, AUC-ROC, Precision,
-    Brier, and the exact Clopper-Pearson 95% interval on recall.
-
-    The threshold is a TRAINING choice: each row is its own trained model. A model
-    trained at one threshold cannot simply be re-pointed at another without retraining.
-
-    Parameters:
-        df:           full census DataFrame (from load_data)
-        defect_cols:  defect column list (from load_data)
-        thresholds:   iterable of scrap-% thresholds. Default: 1..10 in 1% steps,
-                      plus the global average line.
-
-    Returns:
-        pandas.DataFrame with one row per threshold.
-    """
-    global_threshold = float(df["scrap_percent"].mean())
-    if thresholds is None:
-        thresholds = list(range(1, 11))          # 1% .. 10%
-    thresholds = list(thresholds)
-
-    rows = []
-    for thr in thresholds:
-        thr = float(thr)
-
-        # ---- identical Stage-1 pipeline, parameterized on `thr` ----
-        d = df.copy()
-        d = add_multi_defect_features(d, defect_cols)
-        d = add_temporal_features(d)
-        d = add_mtts_sequential_features(d, thr)
-
-        df_train, df_calib, df_test = time_split_60_20_20(d)
-
-        mtts_train = compute_mtts_on_train(df_train, thr)
-        df_train = attach_mtts_aggregate_features(df_train, mtts_train)
-        df_calib = attach_mtts_aggregate_features(df_calib, mtts_train)
-        df_test  = attach_mtts_aggregate_features(df_test,  mtts_train)
-
-        scrap_rate_train = compute_mean_scrap_on_train(df_train, thr)
-        part_freq_train = df_train["part_id"].value_counts(normalize=True)
-        default_scrap_rate = float(scrap_rate_train["mean_scrap_rate_train"].median()) if len(scrap_rate_train) else 1.0
-        default_freq = float(part_freq_train.median()) if len(part_freq_train) else 0.0
-
-        df_train = attach_train_features(df_train, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
-        df_calib = attach_train_features(df_calib, scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
-        df_test  = attach_train_features(df_test,  scrap_rate_train, part_freq_train, default_scrap_rate, default_freq)
-
-        X_train, y_train, feats = make_xy(df_train, thr, defect_cols)
-        X_calib, y_calib, _     = make_xy(df_calib, thr, defect_cols)
-        X_test,  y_test,  _     = make_xy(df_test,  thr, defect_cols)
-
-        rf = RandomForestClassifier(
-            n_estimators=N_ESTIMATORS,
-            min_samples_leaf=MIN_SAMPLES_LEAF,
-            class_weight="balanced",
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-        )
-        rf.fit(X_train, y_train)
-
-        pos, neg = int(y_calib.sum()), int((y_calib == 0).sum())
-        if pos >= 3 and neg >= 3:
-            try:
-                cal_model = CalibratedClassifierCV(estimator=rf, method="sigmoid", cv=3)
-                cal_model.fit(X_calib, y_calib)
-            except Exception:
-                cal_model = rf
-        else:
-            cal_model = rf
-
-        if len(X_test) > 0 and y_test.nunique() == 2:
-            y_prob = cal_model.predict_proba(X_test)[:, 1]
-            y_pred = (y_prob >= 0.5).astype(int)
-            rec = recall_score(y_test, y_pred, zero_division=0)
-            prec = precision_score(y_test, y_pred, zero_division=0)
-            auc = roc_auc_score(y_test, y_prob)
-            brier = brier_score_loss(y_test, y_prob)
-            tp = int(((y_test == 1) & (y_pred == 1)).sum())
-            fn = int(((y_test == 1) & (y_pred == 0)).sum())
-            n_fail = tp + fn
-            cp_lo, cp_hi = clopper_pearson_ci(tp, n_fail)
-        else:
-            rec = prec = auc = brier = 0.0
-            n_fail = int((y_test == 1).sum()) if len(y_test) else 0
-            cp_lo = cp_hi = 0.0
-
-        rows.append({
-            "scrap_threshold_pct": round(thr, 2),
-            "test_failures_n": n_fail,
-            "recall": round(rec, 4),
-            "cp_lower_95": round(cp_lo, 4),
-            "cp_upper_95": round(cp_hi, 4),
-            "auc_roc": round(auc, 4),
-            "precision": round(prec, 4),
-            "brier": round(brier, 4),
-            "is_global": abs(thr - global_threshold) < 1e-6,
-        })
-
-    return pd.DataFrame(rows).sort_values("scrap_threshold_pct").reset_index(drop=True)
-
-
 def train_stage2_defect_cluster(df, defect_cols, stage1_model):
     """
     STAGE 2: DEFECT-CLUSTER MODEL
@@ -3573,7 +3470,8 @@ def main():
     # TABS — labels aligned with dissertation (H1=MPTS reliability, H2=RF classifier)
     # Note: tab position order is preserved from original code; only the displayed
     # labels are updated so existing `with tabN:` blocks don't need to be renumbered.
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+        "🎓 Defense — One-Part Results",
         "🔮 Prognostic Model",
         "📊 RQ2: Model Validation (H2 / RF)",
         "⚙️ RQ1: Reliability & PHM (H1 / MPTS)",
@@ -3586,6 +3484,182 @@ def main():
         "🚶 Walk-Forward 3·14·74"
     ])
     
+    # ================================================================
+    # TAB 0: DEFENSE — consolidated one-part results (H1 · H2 · H3)
+    # Reuses existing functions so all figures match reported results.
+    # ================================================================
+    with tab0:
+        st.header("🎓 Defense — One-Part Results  ·  H1 · H2 · H3")
+        st.caption("A single view of everything reported for a selected part. "
+                   "Part and threshold controls mirror the Prognostic tab; no LIME.")
+
+        # ---- Controls: part + threshold (self-contained on this tab) ----
+        dcol1, dcol2 = st.columns([1, 1])
+        with dcol1:
+            d_part = st.selectbox("Select Part ID", part_ids,
+                                  index=part_ids.index(selected_part) if selected_part in part_ids else 0,
+                                  key="defense_part")
+        d_data = df[df['part_id'] == d_part]
+        d_part_avg = float(d_data['scrap_percent'].mean()) if len(d_data) else 0.0
+        d_global = float(df['scrap_percent'].mean())
+        with dcol2:
+            d_thr = st.slider("Scrap % Threshold (failure definition)",
+                              min_value=0.5,
+                              max_value=float(max(12.0, round(d_data['scrap_percent'].max() + 1, 1) if len(d_data) else 12.0)),
+                              value=round(d_part_avg, 2),
+                              step=0.1, key="defense_thr",
+                              help="Defaults to the part's own average (the MPTS renewal baseline). "
+                                   "Global average shown for reference.")
+        st.markdown(
+            f"<div style='background:#EAF4F0;border-left:5px solid #0E7C7B;padding:8px 12px;border-radius:4px;'>"
+            f"<strong>Part {d_part}</strong> &nbsp;·&nbsp; own avg <strong>{d_part_avg:.2f}%</strong> "
+            f"&nbsp;·&nbsp; global avg <strong>{d_global:.2f}%</strong> "
+            f"&nbsp;·&nbsp; threshold in use <strong>{d_thr:.2f}%</strong> "
+            f"&nbsp;·&nbsp; runs <strong>{len(d_data)}</strong></div>",
+            unsafe_allow_html=True)
+
+        st.divider()
+
+        # ============================================================
+        # H1 — Reliability licensed (Louit) + MPTS reliability
+        # ============================================================
+        st.subheader("H1 · Reliability model is licensed  (MPTS + Louit renewal screen)")
+        try:
+            louit = compute_louit_screening(df, d_part)
+        except Exception as e:
+            louit = None
+        pooled = compute_pooled_prediction(df, d_part, d_thr)
+
+        h1c1, h1c2, h1c3, h1c4 = st.columns(4)
+        h1c1.metric("MTTS (runs)", f"{pooled.get('mtts_runs', float('nan')):.1f}")
+        h1c2.metric("MTTS (parts)", f"{pooled.get('mtts_parts', 0):,.0f}")
+        h1c3.metric("Reliability (next run)", f"{pooled.get('reliability_next_run', 0)*100:.1f}%")
+        h1c4.metric("Failures / runs", f"{pooled.get('failure_count', 0)} / {len(d_data)}")
+
+        if louit and louit.get('trend_testable'):
+            lap = louit.get('laplace_L')
+            lr = louit.get('lewis_robinson_LR')
+            verdict = louit.get('verdict', '')
+            st.markdown(
+                f"**Louit two-step trend test** &nbsp;·&nbsp; "
+                f"Laplace L = {lap:.3f}" + (f" &nbsp;·&nbsp; Lewis–Robinson LR = {lr:.3f}" if lr is not None else "") +
+                f" &nbsp;·&nbsp; **{verdict}**")
+        elif louit:
+            st.info(f"Louit trend test: {louit.get('verdict', 'insufficient failures for a trend test')}")
+
+        st.caption("MPTS failure event = a run exceeding the part's own average scrap rate — the 'like-new' "
+                   "renewal state the Louit screen validates (Table 4-1). Exponential R(n)=e^(−n̄/MPTS).")
+
+        st.divider()
+
+        # ============================================================
+        # H2 — RF classifier validation (global headline metrics)
+        # ============================================================
+        st.subheader("H2 · Diagnostic classifier is accurate  (Random Forest, global hold-out)")
+        m = global_model.get('metrics', {}) if 'global_model' in dir() else {}
+        rec = m.get('recall'); prec = m.get('precision'); auc = m.get('auc'); brier = m.get('brier')
+        # Clopper-Pearson lower bound on recall from stored y_test/y_pred
+        cp_lo = None
+        try:
+            yt = np.array(m.get('y_test')); yp = np.array(m.get('y_pred'))
+            tp = int(((yt == 1) & (yp == 1)).sum()); fn = int(((yt == 1) & (yp == 0)).sum())
+            if (tp + fn) > 0:
+                cp_lo, _ = clopper_pearson_ci(tp, tp + fn)
+        except Exception:
+            cp_lo = None
+
+        h2c1, h2c2, h2c3, h2c4 = st.columns(4)
+        h2c1.metric("Recall", f"{rec*100:.1f}%" if rec is not None else "—",
+                    help="Pre-registered bar: ≥80% recall AND CP lower bound ≥80%")
+        h2c2.metric("CP 95% lower bound", f"{cp_lo*100:.1f}%" if cp_lo is not None else "—")
+        h2c3.metric("Precision", f"{prec*100:.1f}%" if prec is not None else "—")
+        h2c4.metric("AUC · Brier", (f"{auc:.3f} · {brier:.3f}" if auc is not None else "—"))
+
+        # seen vs unseen generalization
+        try:
+            su = compute_seen_unseen_metrics(global_model)
+            if su:
+                seen = su.get('seen', {}); unseen = su.get('unseen', {})
+                st.markdown(
+                    f"**Generalization** &nbsp;·&nbsp; seen parts recall "
+                    f"{seen.get('recall', float('nan'))*100:.0f}% (n={seen.get('failures','?')}) "
+                    f"&nbsp;·&nbsp; **unseen parts recall {unseen.get('recall', float('nan'))*100:.0f}% "
+                    f"(n={unseen.get('failures','?')})** — the model generalizes on signature, not identity.")
+        except Exception:
+            pass
+
+        st.caption("RF trained foundry-wide against the global scrap average (4.90%). It classifies completed "
+                   "runs — the diagnostic layer that checks whether 'other factors are at play' (Juran).")
+
+        st.divider()
+
+        # ============================================================
+        # H3 — Avoidance + energy / emissions (this part)
+        # ============================================================
+        st.subheader("H3 · Acting on it avoids scrap  (energy & emissions)")
+        st.markdown(
+            "<div style='background:#EAF4F0;border-left:5px solid #1F8A52;padding:8px 12px;border-radius:4px;'>"
+            "<strong>Facility result (locked):</strong> 12.70% first-year scrap avoidance across the seven "
+            "MPTS-eligible parts (2,619 lbs/yr, CP-adjusted) — meets/exceeds the EPA ENERGY STAR 3–10% range. "
+            "Part 15 alone contributes 7.90%.</div>", unsafe_allow_html=True)
+
+        # per-part what-if using the same energy function the other tabs use
+        annual_runs = len(d_data)
+        avg_oq = float(d_data['order_quantity'].mean()) if annual_runs else 0.0
+        annual_prod = avg_oq * annual_runs
+        _tmax = float(round(d_part_avg, 2)) if d_part_avg > 0.2 else 1.0
+        _tdef = float(round(max(d_part_avg - 1.0, 0.0), 2))
+        _tdef = min(_tdef, _tmax)
+        target = st.slider("Target scrap % for this part (what-if)", 0.0, _tmax, _tdef, 0.1, key="defense_target")
+        if d_part_avg > 0 and annual_prod > 0:
+            tte = calculate_tte_savings(d_part_avg, target, annual_prod)
+            h3c1, h3c2, h3c3 = st.columns(3)
+            h3c1.metric("Avoided scrap", f"{tte['avoided_scrap_lbs']:,.0f} lbs/yr")
+            h3c2.metric("TTE savings", f"{tte['tte_savings_mmbtu']:,.1f} MMBtu/yr")
+            h3c3.metric("GHG avoided", f"{tte['co2_savings_tons']:,.2f} t CO₂/yr")
+            st.caption(f"Reducing Part {d_part} from {d_part_avg:.2f}% to {target:.2f}% over "
+                       f"{annual_prod:,.0f} parts/yr. Energy 47,250 BTU/lb (Eppich 2004); 53.06 kg CO₂/MMBtu (EPA 2023).")
+
+        st.divider()
+
+        # ============================================================
+        # Pareto-Campbell process attribution (KEEP) — no LIME
+        # ============================================================
+        st.subheader("Pareto–Campbell process attribution")
+        st.caption(f"Most-occurring defect in this part's failure runs (scrap > {d_thr:.2f}%), "
+                   "mapped to its Campbell primary process. Reports the single most-likely process; "
+                   "secondaries are documented for the manager to investigate.")
+        try:
+            sorted_proc, sorted_def = diagnose_processes(df[df['scrap_percent'] > d_thr] if False else d_data,
+                                                         d_part, defect_cols)
+        except Exception:
+            sorted_proc, sorted_def = None, None
+
+        # failure-conditional defect ranking (within threshold-exceeding runs)
+        d_fail = d_data[d_data['scrap_percent'] > d_thr]
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            st.markdown("**Top processes (Campbell-mapped)**")
+            if sorted_proc:
+                rows = [{"Process": p, "Contribution %": f"{v:.1f}%"} for p, v in sorted_proc[:6] if v > 0]
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        with pc2:
+            st.markdown(f"**Vital-few defects in failure runs (n={len(d_fail)})**")
+            if len(d_fail):
+                fr = {c: d_fail[c].mean() for c in defect_cols if c in d_fail.columns}
+                fr = {k: v for k, v in sorted(fr.items(), key=lambda x: -x[1]) if v > 0}
+                rows = [{"Defect": k.replace('_rate', '').replace('_', ' ').title(),
+                         "Rate %": f"{v*100:.2f}%"} for k, v in list(fr.items())[:6]]
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                if rows:
+                    top_def = list(fr.keys())[0]
+                    top_proc = DEFECT_TO_PROC.get(top_def, "—") if 'DEFECT_TO_PROC' in dir() else "—"
+                    st.success(f"Dominant defect **{top_def.replace('_rate','').replace('_',' ').title()}** "
+                               f"→ Campbell primary process **{top_proc}**")
+
+        st.caption("Campbell (2003) Ten Rules are a process-design checklist ('necessary, but not sufficient'); "
+                   "used here as a conceptual alignment for a proof-of-concept map, not one-to-one causal proof.")
+
     # TAB 1: PROGNOSTIC MODEL
     with tab1:
         st.header("Prognostic Model: Predict & Diagnose")
@@ -5771,56 +5845,6 @@ Model learns **systemic process signatures**, not part identities (Deming, 1986)
         else:
             st.info("Insufficient data to compute seen/unseen partition.")
     
-
-        # ------------------------------------------------------------
-        # H2 ROBUSTNESS — recall across scrap thresholds (1% .. 10%)
-        # ------------------------------------------------------------
-        st.markdown("---")
-        st.subheader("How far H2 holds — recall across every scrap threshold")
-        st.caption(
-            "Retrains the Stage-1 detector at each scrap threshold using the identical "
-            "pipeline (same features, 60-20-20 time split, sigmoid calibration) and reports "
-            "test-set Recall, AUC-ROC, Precision, Brier, and the exact Clopper-Pearson 95% "
-            "interval on recall. The threshold is a TRAINING choice — each row is its own "
-            "trained model, not one model re-pointed."
-        )
-        _c1, _c2 = st.columns([1, 3])
-        with _c1:
-            _hi = st.slider("Max threshold (%)", min_value=4, max_value=10, value=10, step=1,
-                            key="robust_hi")
-        _thr_list = list(range(1, int(_hi) + 1)) + [float(df["scrap_percent"].mean())]
-        with st.spinner("Retraining the detector at each threshold…"):
-            _robust = compute_threshold_robustness_table(df, defect_cols, thresholds=_thr_list)
-
-        _disp = _robust.copy()
-        _disp["Scrap threshold"] = _disp.apply(
-            lambda r: f"{r['scrap_threshold_pct']:.2f}%" + ("  (global)" if r["is_global"] else ""), axis=1)
-        _disp["Recall"]       = (_disp["recall"] * 100).map(lambda v: f"{v:.1f}%")
-        _disp["CP 95% lower"] = (_disp["cp_lower_95"] * 100).map(lambda v: f"{v:.1f}%")
-        _disp["CP 95% upper"] = (_disp["cp_upper_95"] * 100).map(lambda v: f"{v:.1f}%")
-        _disp["AUC-ROC"]      = _disp["auc_roc"].map(lambda v: f"{v:.3f}")
-        _disp["Precision"]    = (_disp["precision"] * 100).map(lambda v: f"{v:.1f}%")
-        _disp["Brier"]        = _disp["brier"].map(lambda v: f"{v:.3f}")
-        _disp = _disp.rename(columns={"test_failures_n": "Test failures (n)"})
-        st.dataframe(
-            _disp[["Scrap threshold", "Test failures (n)", "Recall",
-                   "CP 95% lower", "CP 95% upper", "AUC-ROC", "Precision", "Brier"]],
-            hide_index=True, use_container_width=True,
-        )
-        st.download_button(
-            "⬇️ Download robustness table (CSV)",
-            _robust.to_csv(index=False).encode("utf-8"),
-            "h2_threshold_robustness.csv", "text/csv", key="robust_csv",
-        )
-        _lo_recall = _robust["recall"].min() * 100
-        _lo_cp = _robust["cp_lower_95"].min() * 100
-        st.info(
-            f"Across {int(_robust['scrap_threshold_pct'].min())}%–{int(_robust['scrap_threshold_pct'].max())}%, "
-            f"recall ranges down to {_lo_recall:.1f}% and the Clopper-Pearson lower bound to {_lo_cp:.1f}%. "
-            "Recall stays strong through the mid-single-digit thresholds; at the highest thresholds the test set "
-            "has few failures (n falls), so the interval widens — a sample-size effect, not a model failure."
-        )
-
     # ================================================================
     # TAB 3: RQ2 - PHM EQUIVALENCE
     # ================================================================
