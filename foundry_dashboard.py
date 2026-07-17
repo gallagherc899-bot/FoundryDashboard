@@ -3630,10 +3630,19 @@ def main():
         # S-SIGNAL — dual-model divergence for THIS part
         # ============================================================
         st.subheader("Dual-model signal for this part  (MPTS vs RF → S1–S4)")
+
+        @st.cache_data(show_spinner="Computing dual-model signal…")
+        def _defense_signal(_part_id):
+            _t, _ = compute_dual_model_validation_table(df, defect_cols, global_model, [_part_id])
+            return _t
+
+        _r = None
         try:
-            _sig_df, _ = compute_dual_model_validation_table(df, defect_cols, global_model, [d_part])
-            _r = _sig_df.iloc[0] if _sig_df is not None and len(_sig_df) else None
-        except Exception:
+            _sig_df = _defense_signal(d_part)
+            if _sig_df is not None and len(_sig_df):
+                _r = _sig_df.iloc[0]
+        except Exception as _e:
+            st.warning(f"Signal computation error for Part {d_part}: {type(_e).__name__}: {_e}")
             _r = None
 
         if _r is not None and _r.get("Signal", "—") not in ("—", None):
@@ -3688,22 +3697,41 @@ def main():
             "MPTS-eligible parts (2,619 lbs/yr, CP-adjusted) — meets/exceeds the EPA ENERGY STAR 3–10% range. "
             "Part 15 alone contributes 7.90%.</div>", unsafe_allow_html=True)
 
-        # per-part what-if using the same energy function the other tabs use
-        annual_runs = len(d_data)
-        avg_oq = float(d_data['order_quantity'].mean()) if annual_runs else 0.0
-        annual_prod = avg_oq * annual_runs
-        _tmax = float(round(d_part_avg, 2)) if d_part_avg > 0.2 else 1.0
-        _tdef = float(round(max(d_part_avg - 1.0, 0.0), 2))
-        _tdef = min(_tdef, _tmax)
-        target = st.slider("Target scrap % for this part (what-if)", 0.0, _tmax, _tdef, 0.1, key="defense_target")
-        if d_part_avg > 0 and annual_prod > 0:
-            tte = calculate_tte_savings(d_part_avg, target, annual_prod)
-            h3c1, h3c2, h3c3 = st.columns(3)
-            h3c1.metric("Avoided scrap", f"{tte['avoided_scrap_lbs']:,.0f} lbs/yr")
-            h3c2.metric("TTE savings", f"{tte['tte_savings_mmbtu']:,.1f} MMBtu/yr")
-            h3c3.metric("GHG avoided", f"{tte['co2_savings_tons']:,.2f} t CO₂/yr")
-            st.caption(f"Reducing Part {d_part} from {d_part_avg:.2f}% to {target:.2f}% over "
-                       f"{annual_prod:,.0f} parts/yr. Energy 47,250 BTU/lb (Eppich 2004); 53.06 kg CO₂/MMBtu (EPA 2023).")
+        # ---- Actual H3 method: clip first-12-month runs above the part's
+        # 32-month chronic baseline back to that baseline; CP-adjust (×0.902). ----
+        st.markdown(f"**This part's H3 contribution** — Tier 1, clip-to-baseline (the method behind the 12.70%):")
+        _CP = 0.902
+        _dd = d_data.copy()
+        if 'week_ending' in _dd.columns:
+            _dd['week_ending'] = pd.to_datetime(_dd['week_ending'], errors='coerce')
+            # Window B = first 12 months of the CENSUS (global start), per H3 method,
+            # not the part's own first run — this is what reproduces the 12.70%.
+            _census_start = pd.to_datetime(df['week_ending'], errors='coerce').min()
+            _w12 = _census_start + pd.Timedelta(days=365)
+            _win = _dd[_dd['week_ending'] < _w12].copy()
+        else:
+            _win = _dd.copy()
+        _baseline = d_part_avg / 100.0  # part's 32-month chronic baseline (fraction)
+        _pw = _win['piece_weight_lbs'] if 'piece_weight_lbs' in _win.columns else 1.0
+        _actual_lbs = _win['order_quantity'] * _pw * (_win['scrap_percent'] / 100.0)
+        _base_lbs = _win['order_quantity'] * _pw * _baseline
+        _excess = (_actual_lbs - _base_lbs).clip(lower=0)     # only runs ABOVE baseline
+        _avoid_raw = float(_excess.sum())
+        _avoid_cp = _avoid_raw * _CP
+        # energy + emissions on the avoidable pounds
+        _tte_mmbtu = _avoid_cp * 47250 / 1_000_000
+        _co2_t = _tte_mmbtu * 53.06 / 1000
+        _n_clip = int((_excess > 0).sum())
+
+        h3c1, h3c2, h3c3, h3c4 = st.columns(4)
+        h3c1.metric("Avoidable scrap (CP-adj)", f"{_avoid_cp:,.0f} lbs/yr")
+        h3c2.metric("Runs clipped (12 mo)", f"{_n_clip} of {len(_win)}")
+        h3c3.metric("TTE savings", f"{_tte_mmbtu:,.1f} MMBtu/yr")
+        h3c4.metric("GHG avoided", f"{_co2_t:,.2f} t CO₂/yr")
+        st.caption(f"Method: over the first 12 months, every run above Part {d_part}'s 32-month chronic "
+                   f"baseline ({d_part_avg:.2f}%) is clipped back to that baseline; the clipped excess is the "
+                   f"avoidable scrap, then Clopper-Pearson adjusted (×0.902). Energy 47,250 BTU/lb (Eppich 2004); "
+                   f"53.06 kg CO₂/MMBtu (EPA 2023). Seven parts sum to 2,619 lbs/yr = 12.70% of facility scrap.")
 
         st.divider()
 
