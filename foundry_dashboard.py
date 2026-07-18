@@ -1715,8 +1715,8 @@ def compute_dual_model_validation_table(df, defect_cols, global_model, cohort_pa
             rows.append({
                 "Part": pid, "n": 0, "Avg Scrap%": None, "Last Scrap%": None,
                 "MPTS P%": None, "RF Last%": None, "Δ (pp)": None,
-                "Signal": "—", "Chronic Process": "—",
-                "Agree": "—", "Last-Run Active": "—",
+                "Signal": "—", "Chronic Process": "—", "Chronic Defect": "—",
+                "Agree": "—", "Last-Run Active": "—", "Last-Run Defect": "—",
             })
             continue
         if "week_ending" in raw_part.columns:
@@ -1789,8 +1789,10 @@ def compute_dual_model_validation_table(df, defect_cols, global_model, cohort_pa
         if last_rates:
             top_lr = max(last_rates, key=last_rates.get)
             last_run_proc = DEFECT_TO_PROC.get(top_lr, "—")
+            last_run_def = top_lr.replace("_rate", "").replace("_", " ").title()
         else:
             last_run_proc = "—"
+            last_run_def = "—"
 
         # ── Divergence + scenario ─────────────────────────────────────
         if rf_last_prob is not None:
@@ -1832,8 +1834,10 @@ def compute_dual_model_validation_table(df, defect_cols, global_model, cohort_pa
             "Δ (pp)": divergence,
             "Signal": signal,
             "Chronic Process": mpts_top_proc,
+            "Chronic Defect": mpts_top_def,
             "Agree": agree,
             "Last-Run Active": last_run_proc,
+            "Last-Run Defect": last_run_def,
         })
 
     result_df = pd.DataFrame(rows)
@@ -3725,8 +3729,20 @@ def main():
                 f"color:#fff;text-align:center;font-weight:700;font-size:15px;margin-top:6px;'>"
                 f"{_sigtxt}</div>", unsafe_allow_html=True)
             _cc1, _cc2 = st.columns(2)
+            _mpts_def = _r.get('Chronic Defect', '—')
+            _rf_def = _r.get('Last-Run Defect', '—')
             _cc1.markdown(f"**Chronic process (MPTS):** {_r.get('Chronic Process','—')}")
+            _cc1.caption(f"driven by dominant defect **{_mpts_def}** (across failure runs)")
             _cc2.markdown(f"**Last-run active process (RF):** {_r.get('Last-Run Active','—')}")
+            _cc2.caption(f"driven by dominant defect **{_rf_def}** (last run)")
+            if _sigtxt.startswith("S4"):
+                st.caption(
+                    f"→ **S4 rationale:** last-run active process "
+                    f"(**{_r.get('Last-Run Active','—')}**, driven by {_rf_def}) differs from the "
+                    f"chronic process (**{_r.get('Chronic Process','—')}**, driven by {_mpts_def}) "
+                    f"while the run is improving (Δ = {_dl:+.1f} pp) — the leading defect has shifted "
+                    f"to a new Campbell process."
+                )
             # Cross-check: the signal's MPTS P% must equal 1 - H1 reliability at the
             # AVERAGE order quantity (both are 1 - e^(-avg_oq/MPTS)). If they differ,
             # something is stale — surface it rather than let two numbers disagree.
