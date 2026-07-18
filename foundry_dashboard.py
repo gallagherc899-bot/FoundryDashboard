@@ -3663,9 +3663,7 @@ def main():
         if not _valid:
             st.caption("⚠️ Not valid for this part — the signal needs a stable MPTS baseline (≥20 runs, ≥4 exceedances).")
 
-        # No @st.cache_data here: st.cache_data does not invalidate when the
-        # nested compute_dual_model_validation_table changes, which stales the
-        # defect columns. One part is a cheap inference, so recompute each run.
+        @st.cache_data(show_spinner="Computing dual-model signal…")
         def _defense_signal(_part_id):
             _t, _ = compute_dual_model_validation_table(df, defect_cols, global_model, [_part_id])
             return _t
@@ -3680,12 +3678,18 @@ def main():
             _r = None
 
         if _r is not None and _r.get("Signal", "—") not in ("—", None):
-            # --- MPTS P% computed INLINE from the SAME MPTS_parts + avg order qty
-            #     that H1 uses, so it is guaranteed consistent with 1 - reliability.
-            if _mpts_parts and _mpts_parts > 0:
-                _mp = round((1.0 - float(np.exp(-(_avg_oq) / _mpts_parts))) * 100.0, 1)
+            # --- MPTS P% for the SIGNAL is computed against the GLOBAL scrap line,
+            #     matching the RF and the walk-forward Fig 4-3 (global-vs-global Delta,
+            #     Appendix D). This is SEPARATE from the H1 panel, which keeps the
+            #     own-mean reliability for the renewal test -- so H1 is NOT affected.
+            _gthr = float(global_model.get("global_threshold", df["scrap_percent"].mean()))
+            _gf = int((d_data["scrap_percent"] > _gthr).sum()) if len(d_data) else 0
+            _gqty = float(d_data["order_quantity"].sum()) if len(d_data) else 0.0
+            if _gf > 0 and _gqty > 0:
+                _mpts_parts_glob = _gqty / _gf
+                _mp = round((1.0 - float(np.exp(-(_avg_oq) / _mpts_parts_glob))) * 100.0, 1)
             else:
-                _mp = _r.get("MPTS P%")
+                _mp = None  # clean part: never exceeds the global line
             # RF last-run probability comes from the RF (its own output) via the table.
             _rf = _r.get("RF Last%")
             # Δ and the S1/S2/S3 classification are derived from the inline MPTS P%.
@@ -3703,13 +3707,16 @@ def main():
                     _sigtxt = "S4 — New Process ⚡"
                 else:
                     _sigtxt = _sig_base
+            elif _mp is None:
+                _dl = None; _sigtxt = "—"
             else:
                 _dl = _r.get("Δ (pp)"); _sigtxt = str(_r.get("Signal", "—"))
 
             sg1, sg2, sg3, sg4 = st.columns(4)
             sg1.metric("MPTS P%", f"{_mp:.1f}%" if _mp is not None else "—",
-                       help="Prognostic exceedance probability at the average order quantity "
-                            "(= 1 − H1 reliability at that order size).")
+                       help="Prognostic probability the next run exceeds the GLOBAL scrap average, "
+                            "at the average order quantity — same basis as the RF and the walk-forward "
+                            "Delta. Own-mean reliability is shown in the H1 panel above.")
             sg2.metric("RF Last%", f"{_rf:.1f}%" if _rf is not None else "—",
                        help="RF probability the last run exceeds the global scrap average.")
             sg3.metric("Δ (pp)", f"{_dl:+.1f}" if _dl is not None else "—",
@@ -3735,21 +3742,20 @@ def main():
                     f"while the run is improving (Δ = {_dl:+.1f} pp) — the leading defect has shifted "
                     f"to a new Campbell process."
                 )
-            # Cross-check: the signal's MPTS P% must equal 1 - H1 reliability at the
-            # AVERAGE order quantity (both are 1 - e^(-avg_oq/MPTS)). If they differ,
-            # something is stale — surface it rather than let two numbers disagree.
+            # Two thresholds by design: the SIGNAL P% is global (to match the RF and the
+            # walk-forward Delta); the H1 panel above is own-mean (renewal "like-new" state).
             try:
-                _h1_avg_R = float(np.exp(-(_avg_oq) / _mpts_parts)) if _mpts_parts else None
-                if _h1_avg_R is not None and _mp is not None:
-                    _implied = (1 - _h1_avg_R) * 100
-                    if abs(_implied - _mp) > 0.3:
-                        st.warning(f"Consistency note: signal MPTS P% ({_mp:.1f}%) and 1 − H1 reliability "
-                                   f"at avg order qty ({_implied:.1f}%) differ — clear the cache (⋮ → Clear cache) "
-                                   f"and rerun; they should be identical.")
-                    else:
-                        st.caption(f"✓ Cross-check: signal MPTS P% ({_mp:.1f}%) = 1 − reliability at the "
-                                   f"average order quantity ({int(_avg_oq)} parts). The H1 box lets you vary the "
-                                   f"order size; the signal is fixed at the average.")
+                if _mp is not None:
+                    _own_imp = ((1 - float(np.exp(-(_avg_oq) / _mpts_parts))) * 100) if _mpts_parts else None
+                    _own_txt = (f" (own-mean reliability, in the H1 panel, is {_own_imp:.1f}%)"
+                                if _own_imp is not None else "")
+                    st.caption(f"Signal MPTS P% ({_mp:.1f}%) is against the global scrap line "
+                               f"({_gthr:.2f}%) at the average order quantity ({int(_avg_oq)} parts) — the "
+                               f"same basis as the RF and the walk-forward Delta{_own_txt}. H1 is unaffected.")
+                else:
+                    st.info(f"Part {d_part} never exceeds the global scrap line ({_gthr:.2f}%) — it is highly "
+                            f"reliable against the foundry average, so a global-referenced signal is not "
+                            f"applicable. Its own-mean reliability is in the H1 panel above.")
             except Exception:
                 pass
         else:
@@ -4007,7 +4013,7 @@ def main():
                 st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
                 if rows:
                     top_def = list(fr.keys())[0]
-                    top_proc = DEFECT_TO_PROC.get(top_def, "—")
+                    top_proc = DEFECT_TO_PROC.get(top_def, "—") if 'DEFECT_TO_PROC' in dir() else "—"
                     st.success(f"Dominant defect **{top_def.replace('_rate','').replace('_',' ').title()}** "
                                f"→ Campbell primary process **{top_proc}**")
 
