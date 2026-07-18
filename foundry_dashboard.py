@@ -3663,7 +3663,9 @@ def main():
         if not _valid:
             st.caption("⚠️ Not valid for this part — the signal needs a stable MPTS baseline (≥20 runs, ≥4 exceedances).")
 
-        @st.cache_data(show_spinner="Computing dual-model signal…")
+        # No @st.cache_data here: st.cache_data does not invalidate when the
+        # nested compute_dual_model_validation_table changes, which stales the
+        # defect columns. One part is a cheap inference, so recompute each run.
         def _defense_signal(_part_id):
             _t, _ = compute_dual_model_validation_table(df, defect_cols, global_model, [_part_id])
             return _t
@@ -4005,7 +4007,7 @@ def main():
                 st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
                 if rows:
                     top_def = list(fr.keys())[0]
-                    top_proc = DEFECT_TO_PROC.get(top_def, "—") if 'DEFECT_TO_PROC' in dir() else "—"
+                    top_proc = DEFECT_TO_PROC.get(top_def, "—")
                     st.success(f"Dominant defect **{top_def.replace('_rate','').replace('_',' ').title()}** "
                                f"→ Campbell primary process **{top_proc}**")
 
