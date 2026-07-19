@@ -3483,9 +3483,22 @@ def main():
     # Reuses existing functions so all figures match reported results.
     # ================================================================
     with tab0:
-        st.header("🎓 Defense — One-Part Results  ·  H1 · H2 · H3")
-        st.caption("A single view of everything reported for a selected part. "
-                   "Part and threshold controls mirror the Prognostic tab; no LIME.")
+        _hdr, _btn = st.columns([5, 1])
+        with _hdr:
+            st.header("🎓 Defense — One-Part Results  ·  H1 · H2 · H3")
+            st.caption("A single view of everything reported for a selected part. "
+                       "Part and threshold controls mirror the Prognostic tab; no LIME.")
+        with _btn:
+            st.write("")
+            if st.button("↻ Clear cache", use_container_width=True,
+                         help="Clears all cached data and reruns. Use if any panel shows "
+                              "stale or missing values (e.g. a defect name rendering as \u2014)."):
+                st.cache_data.clear()
+                try:
+                    st.cache_resource.clear()
+                except Exception:
+                    pass
+                st.rerun()
 
         # ---- Controls: threshold only. The PART is the app-wide selector
         # at the top of the page (selected_part) — no second dropdown here. ----
@@ -3663,7 +3676,10 @@ def main():
         if not _valid:
             st.caption("⚠️ Not valid for this part — the signal needs a stable MPTS baseline (≥20 runs, ≥4 exceedances).")
 
-        @st.cache_data(show_spinner="Computing dual-model signal…")
+        # NOTE: intentionally NOT @st.cache_data — the cached table is keyed only on
+        # part_id, so it survives changes to the nested computation and can return an
+        # old-schema result with the defect columns missing (they render as "—").
+        # One-part inference is cheap; compute it fresh.
         def _defense_signal(_part_id):
             _t, _ = compute_dual_model_validation_table(df, defect_cols, global_model, [_part_id])
             return _t
