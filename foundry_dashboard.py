@@ -3763,7 +3763,8 @@ def main():
             try:
                 if _mp is not None:
                     _own_imp = ((1 - float(np.exp(-(_avg_oq) / _mpts_parts))) * 100) if _mpts_parts else None
-                    _own_txt = (f" (own-mean reliability, in the H1 panel, is {_own_imp:.1f}%)"
+                    _own_txt = (f" (on the part's OWN average the exceedance probability is {_own_imp:.1f}%"
+                                f" — i.e. 1 minus the H1 panel's reliability)"
                                 if _own_imp is not None else "")
                     st.caption(f"Signal MPTS P% ({_mp:.1f}%) is against the global scrap line "
                                f"({_gthr:.2f}%) at the average order quantity ({int(_avg_oq)} parts) — the "
